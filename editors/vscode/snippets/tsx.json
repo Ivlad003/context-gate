@@ -1,0 +1,84 @@
+{
+  "context-gate prompt": {
+    "prefix": "cg-prompt",
+    "description": "context-gate: файл промпту (.prompt.tsx)",
+    "body": [
+      "import { Prompt, Section, If, Else, Each, V } from '@context-gate/jsx'",
+      "",
+      "export default (",
+      "  <Prompt>",
+      "    <Section id=\"${1:main}\" scope=\"${2|profile,static,volatile|}\">",
+      "      $0",
+      "    </Section>",
+      "  </Prompt>",
+      ")"
+    ]
+  },
+  "context-gate skill prompt": {
+    "prefix": "cg-skill",
+    "description": "context-gate: skill-промпт з аргументами (.prompt.tsx → .claude/skills/<name>/SKILL.md)",
+    "body": [
+      "import { Prompt, Section, If, arg } from '@context-gate/jsx'",
+      "",
+      "export default (",
+      "  <Prompt as=\"skill\" name=\"${1:my-skill}\" description=\"${2:Що робить skill і коли його кликати}\" args={{ ${3:target}: arg.string({ required: true, description: '${4:що це}' }) }}>",
+      "    <Section id=\"${1:my-skill}\" scope=\"volatile\">",
+      "      Задача: {'{{ args.${3:target} }}'}.",
+      "      $0",
+      "    </Section>",
+      "  </Prompt>",
+      ")"
+    ]
+  },
+  "Section": {
+    "prefix": "Section",
+    "description": "context-gate: секція",
+    "body": [
+      "<Section id=\"${1:id}\" scope=\"${2|profile,static,volatile|}\" when='${3:gate.profile == \"backend\"}'>",
+      "  $0",
+      "</Section>"
+    ]
+  },
+  "If": {
+    "prefix": "If",
+    "description": "context-gate: умова (рядок-вираз)",
+    "body": [
+      "<If test=\"${1:len(cursor.auto) > 0}\">",
+      "  $2",
+      "  <Else>$3</Else>",
+      "</If>"
+    ]
+  },
+  "Each": {
+    "prefix": "Each",
+    "description": "context-gate: цикл по рантайм-списку",
+    "body": [
+      "<Each of=\"${1:cursor.always}\" as=\"${2:r}\">",
+      "  <li><V expr=\"${2:r}.${3:body}\" /></li>",
+      "</Each>"
+    ]
+  },
+  "Run": {
+    "prefix": "Run",
+    "description": "context-gate: скрипт з кешем",
+    "body": [
+      "<Run lang=\"${1:bash}\" cache=\"${2:5m}\" as=\"${3:out}\">${4:git log --oneline -5}</Run>"
+    ]
+  },
+  "Include": {
+    "prefix": "Include",
+    "description": "context-gate: вставити файл",
+    "body": [
+      "<Include path=\"${1:docs/file.md}\" mode=\"${2|inline,ref,lazy|}\" />"
+    ]
+  },
+  "Tier": {
+    "prefix": "Tier",
+    "description": "context-gate: блок для tiers",
+    "body": [
+      "<Tier is={[${1:'quick'}]}>",
+      "  $0",
+      "</Tier>"
+    ]
+  }
+}

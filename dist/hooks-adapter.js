@@ -429,6 +429,7 @@ var str = { type: "string" };
 var bool = { type: "boolean" };
 var strArr = { type: "array", items: { type: "string" } };
 var pct = { type: "number", minimum: 0, maximum: 100 };
+var duration = { type: "string", pattern: "^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$", "x-duration": true, description: "\u0422\u0440\u0438\u0432\u0430\u043B\u0456\u0441\u0442\u044C: 5m, 1h30m, 10s, 500ms." };
 var tierRef = { type: "string", description: "Tier name (key of `tiers`)." };
 var budgetPct = { type: "object", additionalProperties: false, properties: { softContextPct: pct, hardContextPct: pct } };
 var onExceedAction = {
@@ -453,7 +454,7 @@ var thresholds = {
 var providerRef = {
   anyOf: [
     { enum: ["builtin", "jev"] },
-    { type: "object", additionalProperties: false, required: ["kind", "command"], properties: { kind: { enum: ["cli"] }, command: strArr, timeout: { type: "string", format: "duration" } } }
+    { type: "object", additionalProperties: false, required: ["kind", "command"], properties: { kind: { enum: ["cli"] }, command: strArr, timeout: duration } }
   ]
 };
 var groupMap = { type: "object", additionalProperties: strArr, description: "Group name \u2192 globs." };
@@ -556,7 +557,7 @@ var gateJsonSchema = {
           pick: strArr,
           tool: str,
           args: { type: "object" },
-          cache: { type: "string", format: "duration" },
+          cache: duration,
           onError: { enum: ["unverified", "skip", "fail"] },
           okExitCodes: { type: "array", items: { type: "integer" }, description: "cli: exit codes that count as success (default [0])." },
           parseOnError: { type: "boolean", description: "cli: another exit code with JSON on stdout still yields data (eslint -f json exits 1)." },
@@ -571,7 +572,7 @@ var gateJsonSchema = {
         type: "object",
         additionalProperties: false,
         required: ["command"],
-        properties: { command: strArr, stdin: str, timeout: { type: "string", format: "duration" }, env: { type: "object", additionalProperties: str }, callTemplate: strArr }
+        properties: { command: strArr, stdin: str, timeout: duration, env: { type: "object", additionalProperties: str }, callTemplate: strArr }
       }
     },
     ruleSources: { type: "array", items: itemSource, description: "Legacy (G310): use itemSources." },
@@ -604,7 +605,7 @@ var gateJsonSchema = {
     prompt: {
       type: "object",
       additionalProperties: false,
-      properties: { dir: str, runCacheDefault: { type: "string", format: "duration" }, build: { enum: ["auto", "never"] }, commitCompiled: bool, persist: bool, packages: { ...strArr, description: "Prompt library packages whose exported skills `build` builds." }, transform: { enum: ["level1", "level2"], description: "TSX level 2: native TS expressions in runtime props (\u04201)." }, skillBody: { enum: ["live", "static", "both"], description: "SKILL.md body: live render line, pre-rendered static body, or both (\u04206)." } }
+      properties: { dir: str, runCacheDefault: duration, build: { enum: ["auto", "never"] }, commitCompiled: bool, persist: bool, packages: { ...strArr, description: "Prompt library packages whose exported skills `build` builds." }, transform: { enum: ["level1", "level2"], description: "TSX level 2: native TS expressions in runtime props (\u04201)." }, skillBody: { enum: ["live", "static", "both"], description: "SKILL.md body: live render line, pre-rendered static body, or both (\u04206)." } }
     },
     health: { type: "object", additionalProperties: { type: "number" }, description: "Code (H001\u2026) \u2192 threshold." },
     debug: bool,
@@ -656,7 +657,7 @@ function checkSchema(schema, v, path, out) {
     if (typeof schema.minimum === "number" && v < schema.minimum) out.push(diag("G309", `${path}: ${v} < ${schema.minimum}`));
     if (typeof schema.maximum === "number" && v > schema.maximum) out.push(diag("G309", `${path}: ${v} > ${schema.maximum}`));
   }
-  if (typeof v === "string" && schema.format === "duration" && parseDuration(v) === void 0) {
+  if (typeof v === "string" && schema["x-duration"] === true && parseDuration(v) === void 0) {
     out.push(diag("G307", `${path}: \u043D\u0435\u0432\u0456\u0440\u043D\u0430 \u0442\u0440\u0438\u0432\u0430\u043B\u0456\u0441\u0442\u044C ${JSON.stringify(v)}`));
   }
   if (Array.isArray(v) && schema.items) {

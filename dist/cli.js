@@ -3736,7 +3736,7 @@ function checkSchema(schema, v, path, out) {
     if (typeof schema.minimum === "number" && v < schema.minimum) out.push(diag("G309", `${path}: ${v} < ${schema.minimum}`));
     if (typeof schema.maximum === "number" && v > schema.maximum) out.push(diag("G309", `${path}: ${v} > ${schema.maximum}`));
   }
-  if (typeof v === "string" && schema.format === "duration" && parseDuration(v) === void 0) {
+  if (typeof v === "string" && schema["x-duration"] === true && parseDuration(v) === void 0) {
     out.push(diag("G307", `${path}: \u043D\u0435\u0432\u0456\u0440\u043D\u0430 \u0442\u0440\u0438\u0432\u0430\u043B\u0456\u0441\u0442\u044C ${JSON.stringify(v)}`));
   }
   if (Array.isArray(v) && schema.items) {
@@ -4006,7 +4006,7 @@ function tierForModel(cfg, modelId, attrs) {
   if (!modelId) return { tier: DEFAULT_TIER, reason: `\u043C\u043E\u0434\u0435\u043B\u044C \u043D\u0435\u0432\u0456\u0434\u043E\u043C\u0430 \u2192 ${DEFAULT_TIER}`, fallback: true };
   const id = normalizeModelId(modelId);
   const models = cfg.models ?? {};
-  const resolve8 = (key, how, v) => {
+  const resolve9 = (key, how, v) => {
     if (typeof v === "string") return { tier: v, reason: `\u043C\u043E\u0434\u0435\u043B\u044C ${id} ${how} \u2192 ${v}`, matched: key, fallback: false };
     if (v.tier) return { tier: v.tier, reason: `\u043C\u043E\u0434\u0435\u043B\u044C ${id} ${how} \u2192 ${v.tier}`, matched: key, fallback: false };
     const a = { ...attrs, ...v.contextWindow !== void 0 ? { contextWindow: v.contextWindow } : {}, ...v.costPer1k !== void 0 ? { costPer1k: v.costPer1k } : {} };
@@ -4015,10 +4015,10 @@ function tierForModel(cfg, modelId, attrs) {
     return { tier: DEFAULT_TIER, reason: `\u043C\u043E\u0434\u0435\u043B\u044C ${id} ${how}: \u0430\u0442\u0440\u0438\u0431\u0443\u0442\u0438 (${attrText(a) || "\u2014"}) \u043D\u0435 \u0432\u0456\u0434\u043F\u043E\u0432\u0456\u0434\u0430\u044E\u0442\u044C \u043F\u043E\u0440\u043E\u0433\u0430\u043C \u0436\u043E\u0434\u043D\u043E\u0433\u043E tier \u2192 ${DEFAULT_TIER}`, matched: key, fallback: true };
   };
   const exact = models[id];
-  if (exact !== void 0 && (typeof exact === "string" || !exact.match)) return resolve8(id, "\u2192", exact);
+  if (exact !== void 0 && (typeof exact === "string" || !exact.match)) return resolve9(id, "\u2192", exact);
   for (const [key, v] of Object.entries(models)) {
     const glob = typeof v === "string" ? key : v.match ?? key;
-    if (compileGlob(glob, { nocase: true })(id)) return resolve8(key, `~ ${glob}`, v);
+    if (compileGlob(glob, { nocase: true })(id)) return resolve9(key, `~ ${glob}`, v);
   }
   if (attrs) {
     const t = inferTier(cfg, attrs);
@@ -4042,7 +4042,7 @@ function filterEnv(source, whitelist) {
 function budgetFor(cfg, tier) {
   return { ...DEFAULT_BUDGET, ...cfg.budgets?.default, ...cfg.budgets?.tiers?.[tier] };
 }
-var DEFAULT_TIER, DEFAULT_BUDGET, str2, bool2, strArr, pct, tierRef, budgetPct, onExceedAction, num0, modelSpec, thresholds, providerRef, groupMap, itemSource, DEFAULT_BINARIES, gateJsonSchema, DEFAULT_THRESHOLDS, DEBUG_LOG_PATH, DEBUG_LOG_MAX_BYTES;
+var DEFAULT_TIER, DEFAULT_BUDGET, str2, bool2, strArr, pct, duration, tierRef, budgetPct, onExceedAction, num0, modelSpec, thresholds, providerRef, groupMap, itemSource, DEFAULT_BINARIES, gateJsonSchema, DEFAULT_THRESHOLDS, DEBUG_LOG_PATH, DEBUG_LOG_MAX_BYTES;
 var init_config = __esm({
   "packages/core/src/config.ts"() {
     "use strict";
@@ -4055,6 +4055,7 @@ var init_config = __esm({
     bool2 = { type: "boolean" };
     strArr = { type: "array", items: { type: "string" } };
     pct = { type: "number", minimum: 0, maximum: 100 };
+    duration = { type: "string", pattern: "^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$", "x-duration": true, description: "\u0422\u0440\u0438\u0432\u0430\u043B\u0456\u0441\u0442\u044C: 5m, 1h30m, 10s, 500ms." };
     tierRef = { type: "string", description: "Tier name (key of `tiers`)." };
     budgetPct = { type: "object", additionalProperties: false, properties: { softContextPct: pct, hardContextPct: pct } };
     onExceedAction = {
@@ -4079,7 +4080,7 @@ var init_config = __esm({
     providerRef = {
       anyOf: [
         { enum: ["builtin", "jev"] },
-        { type: "object", additionalProperties: false, required: ["kind", "command"], properties: { kind: { enum: ["cli"] }, command: strArr, timeout: { type: "string", format: "duration" } } }
+        { type: "object", additionalProperties: false, required: ["kind", "command"], properties: { kind: { enum: ["cli"] }, command: strArr, timeout: duration } }
       ]
     };
     groupMap = { type: "object", additionalProperties: strArr, description: "Group name \u2192 globs." };
@@ -4183,7 +4184,7 @@ var init_config = __esm({
               pick: strArr,
               tool: str2,
               args: { type: "object" },
-              cache: { type: "string", format: "duration" },
+              cache: duration,
               onError: { enum: ["unverified", "skip", "fail"] },
               okExitCodes: { type: "array", items: { type: "integer" }, description: "cli: exit codes that count as success (default [0])." },
               parseOnError: { type: "boolean", description: "cli: another exit code with JSON on stdout still yields data (eslint -f json exits 1)." },
@@ -4198,7 +4199,7 @@ var init_config = __esm({
             type: "object",
             additionalProperties: false,
             required: ["command"],
-            properties: { command: strArr, stdin: str2, timeout: { type: "string", format: "duration" }, env: { type: "object", additionalProperties: str2 }, callTemplate: strArr }
+            properties: { command: strArr, stdin: str2, timeout: duration, env: { type: "object", additionalProperties: str2 }, callTemplate: strArr }
           }
         },
         ruleSources: { type: "array", items: itemSource, description: "Legacy (G310): use itemSources." },
@@ -4231,7 +4232,7 @@ var init_config = __esm({
         prompt: {
           type: "object",
           additionalProperties: false,
-          properties: { dir: str2, runCacheDefault: { type: "string", format: "duration" }, build: { enum: ["auto", "never"] }, commitCompiled: bool2, persist: bool2, packages: { ...strArr, description: "Prompt library packages whose exported skills `build` builds." }, transform: { enum: ["level1", "level2"], description: "TSX level 2: native TS expressions in runtime props (\u04201)." }, skillBody: { enum: ["live", "static", "both"], description: "SKILL.md body: live render line, pre-rendered static body, or both (\u04206)." } }
+          properties: { dir: str2, runCacheDefault: duration, build: { enum: ["auto", "never"] }, commitCompiled: bool2, persist: bool2, packages: { ...strArr, description: "Prompt library packages whose exported skills `build` builds." }, transform: { enum: ["level1", "level2"], description: "TSX level 2: native TS expressions in runtime props (\u04201)." }, skillBody: { enum: ["live", "static", "both"], description: "SKILL.md body: live render line, pre-rendered static body, or both (\u04206)." } }
         },
         health: { type: "object", additionalProperties: { type: "number" }, description: "Code (H001\u2026) \u2192 threshold." },
         debug: bool2,
@@ -5167,8 +5168,8 @@ function eqValue(actual, want) {
   if (actual === void 0 || actual === null) return want === "null" || want === "";
   return String(actual) === want;
 }
-function matchCond(obj2, c, resolve8) {
-  const actual = resolve8 ? resolve8(obj2, c.key) : getPath3(obj2, c.key);
+function matchCond(obj2, c, resolve9) {
+  const actual = resolve9 ? resolve9(obj2, c.key) : getPath3(obj2, c.key);
   switch (c.op) {
     case "=":
       return eqValue(actual, c.value);
@@ -5186,10 +5187,10 @@ function matchCond(obj2, c, resolve8) {
     }
   }
 }
-function filterWhere(records, expr, resolve8) {
+function filterWhere(records, expr, resolve9) {
   const p = parseWhere(expr);
   if ("error" in p) return p;
-  return { items: records.filter((r) => p.conds.every((c) => matchCond(r, c, resolve8))) };
+  return { items: records.filter((r) => p.conds.every((c) => matchCond(r, c, resolve9))) };
 }
 var init_journal = __esm({
   "packages/core/src/journal.ts"() {
@@ -9882,9 +9883,9 @@ var init_build = __esm({
 });
 
 // packages/cli/src/main.ts
-import { existsSync as existsSync8, realpathSync, watch } from "node:fs";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
-import { join as join15, relative as relative5, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync9, realpathSync, watch } from "node:fs";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { join as join16, relative as relative6, resolve as resolve8 } from "node:path";
 
 // package.json
 var package_default = {
@@ -9914,6 +9915,7 @@ var package_default = {
   files: [
     "dist/cli.js",
     "dist/hooks-adapter.js",
+    "dist/jsx-types/",
     "packages/core/src/",
     "packages/jsx/src/",
     "examples/skills/",
@@ -9929,12 +9931,15 @@ var package_default = {
     test: "node --test --experimental-strip-types 'test/**/*.test.ts'",
     build: "esbuild packages/cli/src/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/cli.js --external:esbuild --banner:js='#!/usr/bin/env node'",
     "build:hooks-adapter": "esbuild packages/hooks-adapter/src/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/hooks-adapter.js --banner:js='#!/usr/bin/env node'",
+    "build:jsx-types": "rm -rf dist/jsx-types && tsc -p packages/jsx/tsconfig.build.json --outDir dist/jsx-types",
     typecheck: "tsc -p tsconfig.json",
     "build:editors": "npm --prefix packages/lsp run build && node editors/vscode/scripts/build.mjs",
+    "package:vscode": "npm --prefix editors/vscode run package",
+    "test:vscode": "node editors/vscode/test/run.mjs",
     "typecheck:mod": "scripts/sync-mod-types.sh >/dev/null && tsc -p hooks/tsconfig.json",
     "test:mod": "scripts/plugin-test.sh",
     "validate:mod": "claude plugin validate --strict .",
-    "build:all": "npm run build && npm run build:hooks-adapter",
+    "build:all": "npm run build && npm run build:hooks-adapter && npm run build:jsx-types",
     "check:dist": "npm run build:all && git diff --exit-code -- dist",
     "validate:calls": "scripts/validate-calls.sh",
     e2e: "scripts/e2e.sh",
@@ -10100,6 +10105,100 @@ function parseGateCommand(input, opts = {}) {
 // packages/cli/src/main.ts
 init_build();
 
+// packages/cli/src/editor-types.ts
+init_util();
+import { cpSync, existsSync as existsSync5, mkdirSync as mkdirSync3, readFileSync as readFileSync5, readdirSync as readdirSync5, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3, join as join8, relative as relative4, resolve as resolve5 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+var TSCONFIG_MARK = "// Generated by context-gate (editor types for *.prompt.tsx). Remove this line to keep your own edits.";
+function jsxTypesDir() {
+  const here = dirname3(fileURLToPath2(import.meta.url));
+  for (const c of [join8(here, "jsx-types"), join8(here, "../../../dist/jsx-types")]) if (existsSync5(join8(c, "jsx", "src", "index.d.ts"))) return resolve5(c);
+  return void 0;
+}
+var JSX_ENTRY = ".types/jsx/jsx/src";
+function promptTsconfig() {
+  const json = {
+    compilerOptions: {
+      target: "ES2022",
+      module: "ESNext",
+      moduleResolution: "Bundler",
+      jsx: "react-jsx",
+      jsxImportSource: "@context-gate/jsx",
+      strict: true,
+      noEmit: true,
+      allowImportingTsExtensions: true,
+      resolveJsonModule: true,
+      skipLibCheck: true,
+      paths: {
+        "@context-gate/jsx": [`./${JSX_ENTRY}/index.d.ts`],
+        "@context-gate/jsx/jsx-runtime": [`./${JSX_ENTRY}/jsx-runtime.d.ts`],
+        "@context-gate/jsx/jsx-dev-runtime": [`./${JSX_ENTRY}/jsx-runtime.d.ts`],
+        "@context-gate/jsx/compile": [`./${JSX_ENTRY}/compile.d.ts`]
+      }
+    },
+    include: ["**/*.tsx", "**/*.ts", ".types/*.d.ts"],
+    exclude: [".compiled", ".trace", ".types/jsx"]
+  };
+  return TSCONFIG_MARK + "\n" + JSON.stringify(json, null, 2) + "\n";
+}
+function sameTree(a, b) {
+  let names;
+  try {
+    names = readdirSync5(a);
+  } catch {
+    return false;
+  }
+  for (const n of names) {
+    const pa = join8(a, n);
+    const pb = join8(b, n);
+    if (statSync3(pa).isDirectory()) {
+      if (!sameTree(pa, pb)) return false;
+      continue;
+    }
+    try {
+      if (!readFileSync5(pa).equals(readFileSync5(pb))) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+function writeEditorTypes(root, dir = ".claude/prompt") {
+  const out = { written: [], notes: [] };
+  const promptDir = resolve5(root, dir);
+  const rel = (p) => posix(relative4(root, p));
+  try {
+    const src = jsxTypesDir();
+    const dest = join8(promptDir, ".types", "jsx");
+    if (!src) out.notes.push("\u0442\u0438\u043F\u0438 @context-gate/jsx \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E \u043F\u043E\u0440\u0443\u0447 \u0456\u0437 CLI (npm run build:jsx-types) \u2014 .types/jsx/ \u043D\u0435 \u043E\u043D\u043E\u0432\u043B\u0435\u043D\u043E");
+    else if (!sameTree(src, dest)) {
+      rmSync2(dest, { recursive: true, force: true });
+      mkdirSync3(dest, { recursive: true });
+      cpSync(src, dest, { recursive: true });
+      out.written.push(rel(dest) + "/");
+    }
+    const tsconfig = join8(promptDir, "tsconfig.json");
+    let cur;
+    try {
+      cur = readFileSync5(tsconfig, "utf8");
+    } catch {
+      cur = void 0;
+    }
+    const next = promptTsconfig();
+    if (cur === void 0 || cur.startsWith(TSCONFIG_MARK) && cur !== next) {
+      mkdirSync3(promptDir, { recursive: true });
+      writeFileSync3(tsconfig, next);
+      out.written.push(rel(tsconfig));
+    } else if (!cur.startsWith(TSCONFIG_MARK) && !cur.includes(JSX_ENTRY)) {
+      out.notes.push(`${rel(tsconfig)} \u2014 \u0432\u043B\u0430\u0441\u043D\u0438\u0439 \u0444\u0430\u0439\u043B: \u0434\u043E\u0434\u0430\u0439 paths @context-gate/jsx \u2192 ./${JSX_ENTRY}/index.d.ts, \u0449\u043E\u0431 \u0440\u0435\u0434\u0430\u043A\u0442\u043E\u0440 \u0431\u0430\u0447\u0438\u0432 \u0442\u0438\u043F\u0438`);
+    }
+  } catch (e) {
+    out.notes.push(`\u0442\u0438\u043F\u0438 \u0434\u043B\u044F \u0440\u0435\u0434\u0430\u043A\u0442\u043E\u0440\u0430 \u043D\u0435 \u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E: ${e.message}`);
+  }
+  return out;
+}
+
 // packages/cli/src/argv.ts
 var GLOBAL_FLAGS = {
   root: { type: "string", desc: "\u043A\u043E\u0440\u0456\u043D\u044C \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0456\u044E (\u0437\u0430 \u0437\u0430\u043C\u043E\u0432\u0447\u0443\u0432\u0430\u043D\u043D\u044F\u043C \u2014 \u043D\u0430\u0439\u0431\u043B\u0438\u0436\u0447\u0438\u0439 \u0437 .claude/ \u0430\u0431\u043E .git \u0432\u0456\u0434 cwd)", arg: "<dir>" },
@@ -10192,8 +10291,8 @@ function helpText(name, summary, usage, spec, extra) {
 // packages/cli/src/cmd-run.ts
 init_render();
 init_config();
-import { dirname as dirname3, join as join8, relative as relative4 } from "node:path";
-import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname4, join as join9, relative as relative5 } from "node:path";
+import { mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "node:fs";
 
 // packages/core/src/health.ts
 var DEFAULT_THRESHOLDS2 = {
@@ -10505,7 +10604,7 @@ async function renderWith(ctx, o) {
   };
   const skill = o.id ? prompts.skills[o.id] : void 0;
   if (skill) {
-    const parsed = skillArgs(skill, o.argsRaw ?? "", (p) => fileExists(join8(repo.root, p)));
+    const parsed = skillArgs(skill, o.argsRaw ?? "", (p) => fileExists(join9(repo.root, p)));
     if (!parsed.ok) {
       const empty = { sections: [], text: parsed.text, trace: [], diagnostics: [], ms: 0, stored: {} };
       return { result: empty, mode: "skill", id: o.id, usage: parsed.text, prompts: [skill] };
@@ -10564,10 +10663,10 @@ function writeDebugLog(root, result, meta = {}) {
   const add = debugLogLines(result, meta.now ?? Date.now(), { ...meta.tier ? { tier: meta.tier } : {}, ...meta.secrets ? { secrets: meta.secrets } : {} });
   if (!add) return void 0;
   const file = meta.file ?? debugLogPath({ debug: true });
-  const path = join8(root, file.path);
+  const path = join9(root, file.path);
   try {
-    mkdirSync3(dirname3(path), { recursive: true });
-    writeFileSync3(path, capDebugLog(readText(path) ?? "", add, file.maxBytes));
+    mkdirSync4(dirname4(path), { recursive: true });
+    writeFileSync4(path, capDebugLog(readText(path) ?? "", add, file.maxBytes));
     return path;
   } catch {
     return void 0;
@@ -10575,7 +10674,7 @@ function writeDebugLog(root, result, meta = {}) {
 }
 function writeTrace(ctx, j) {
   try {
-    writeJson(join8(ctx.repo.root, ctx.repo.promptDir, ".trace", "last.json"), j);
+    writeJson(join9(ctx.repo.root, ctx.repo.promptDir, ".trace", "last.json"), j);
   } catch {
   }
 }
@@ -10632,10 +10731,10 @@ async function runCommand(o) {
 async function healthCommand(o) {
   const ctx = await buildContext({ ...o, dryScripts: o.dryScripts ?? false });
   const r = await renderWith(ctx, {});
-  const prevPath = join8(ctx.repo.cacheDir, "last-render.json");
+  const prevPath = join9(ctx.repo.cacheDir, "last-render.json");
   const previous = readJson(prevPath);
   const stale = checkStale({ root: ctx.repo.root, dir: ctx.repo.promptDir });
-  const logText = readText(join8(ctx.repo.root, ".claude", "gate.log.jsonl"));
+  const logText = readText(join9(ctx.repo.root, ".claude", "gate.log.jsonl"));
   const gates = logText ? gateStatsFromJournal(fromJsonl(logText).items, ctx.snapshot?.sessionId ? { sessionId: ctx.snapshot.sessionId } : {}) : {};
   const items = logText ? fromJsonl(logText).items : [];
   const conv = items.slice(items.map((e) => e.trigger).lastIndexOf("clear") + 1);
@@ -10664,14 +10763,14 @@ async function healthCommand(o) {
 init_mdc();
 init_decide();
 init_context();
-import { existsSync as existsSync5, readdirSync as readdirSync5, rmSync as rmSync2 } from "node:fs";
-import { dirname as dirname4, join as join9 } from "node:path";
+import { existsSync as existsSync6, readdirSync as readdirSync6, rmSync as rmSync3 } from "node:fs";
+import { dirname as dirname5, join as join10 } from "node:path";
 init_util();
 var GENERATED_PROMPT = ".claude/prompt.generated.md";
 var IMPORT_LINE = "@.claude/prompt.generated.md";
 var MARK = "generated by context-gate";
 function writeIfChanged(root, rel, text, res) {
-  const abs = join9(root, rel);
+  const abs = join10(root, rel);
   if (readText(abs) === text) {
     res.unchanged++;
     return;
@@ -10699,19 +10798,19 @@ async function syncCommand(o) {
         writeIfChanged(root, rel, transpileAgentRule(r), res);
       }
     }
-    for (const f of existsSync5(join9(root, ".claude/rules/cursor")) ? walkFiles(root, { under: ".claude/rules/cursor" }) : []) {
-      if (f.endsWith(".md") && !wantRules.has(f) && (readText(join9(root, f)) ?? "").includes(MARK)) {
-        rmSync2(join9(root, f));
+    for (const f of existsSync6(join10(root, ".claude/rules/cursor")) ? walkFiles(root, { under: ".claude/rules/cursor" }) : []) {
+      if (f.endsWith(".md") && !wantRules.has(f) && (readText(join10(root, f)) ?? "").includes(MARK)) {
+        rmSync3(join10(root, f));
         res.removed.push(f);
       }
     }
-    const skillsDir = join9(root, ".claude/skills");
-    if (existsSync5(skillsDir)) {
-      for (const d of readdirSync5(skillsDir)) {
+    const skillsDir = join10(root, ".claude/skills");
+    if (existsSync6(skillsDir)) {
+      for (const d of readdirSync6(skillsDir)) {
         if (!d.startsWith("cursor-") || wantSkills.has(d)) continue;
-        const p = join9(skillsDir, d, "SKILL.md");
+        const p = join10(skillsDir, d, "SKILL.md");
         if ((readText(p) ?? "").includes(MARK)) {
-          rmSync2(join9(skillsDir, d), { recursive: true, force: true });
+          rmSync3(join10(skillsDir, d), { recursive: true, force: true });
           res.removed.push(`.claude/skills/${d}/SKILL.md`);
         }
       }
@@ -10722,17 +10821,17 @@ async function syncCommand(o) {
     const overrides = skillOverridesFor(gate, { hard: !!o.hard });
     res.overrides = overrides;
     const settingsRel = ".claude/settings.local.json";
-    const statePath = join9(ctx.repo.cacheDir, "sync-state.json");
+    const statePath = join10(ctx.repo.cacheDir, "sync-state.json");
     const state = readJson(statePath) ?? {};
-    const settings = readJson(join9(root, settingsRel)) ?? {};
+    const settings = readJson(join10(root, settingsRel)) ?? {};
     const cur = settings.skillOverrides && typeof settings.skillOverrides === "object" ? { ...settings.skillOverrides } : {};
     for (const k of state.overrides ?? []) delete cur[k];
     const next = { ...cur, ...overrides };
     const out = { ...settings };
     if (Object.keys(next).length) out.skillOverrides = Object.fromEntries(Object.entries(next).sort(([a], [b]) => a.localeCompare(b)));
     else delete out.skillOverrides;
-    if (JSON.stringify(out) !== JSON.stringify(settings) || !existsSync5(join9(root, settingsRel)) && Object.keys(next).length) {
-      writeJson(join9(root, settingsRel), out);
+    if (JSON.stringify(out) !== JSON.stringify(settings) || !existsSync6(join10(root, settingsRel)) && Object.keys(next).length) {
+      writeJson(join10(root, settingsRel), out);
       res.written.push(settingsRel);
     } else res.unchanged++;
     writeJson(statePath, { overrides: Object.keys(overrides) });
@@ -10744,7 +10843,7 @@ async function syncCommand(o) {
 
 ${r.result.text}
 `, res);
-    const claudeMd = join9(root, "CLAUDE.md");
+    const claudeMd = join10(root, "CLAUDE.md");
     const cur = readText(claudeMd);
     if (cur === void 0) writeIfChanged(root, "CLAUDE.md", `${IMPORT_LINE}
 `, res);
@@ -10756,7 +10855,7 @@ ${IMPORT_LINE}
   return res;
 }
 function syncWatchPaths(root, promptDir) {
-  return [".cursor/rules", promptDir, ".claude/gate.json"].map((p) => join9(root, p)).filter((p) => existsSync5(p) || existsSync5(dirname4(p)));
+  return [".cursor/rules", promptDir, ".claude/gate.json"].map((p) => join10(root, p)).filter((p) => existsSync6(p) || existsSync6(dirname5(p)));
 }
 function formatSync(res) {
   const lines = [];
@@ -10785,11 +10884,11 @@ function mergeSyncHook(settings, command, uninstall = false) {
   return out;
 }
 function installSyncHook(root, o = {}) {
-  const abs = join9(root, SETTINGS_LOCAL);
+  const abs = join10(root, SETTINGS_LOCAL);
   const cur = readJson(abs) ?? {};
   const command = o.command ?? syncHookCommand();
   const next = mergeSyncHook(cur, command, o.uninstall);
-  const changed = JSON.stringify(next) !== JSON.stringify(cur) || !existsSync5(abs) && !o.uninstall;
+  const changed = JSON.stringify(next) !== JSON.stringify(cur) || !existsSync6(abs) && !o.uninstall;
   if (changed) writeJson(abs, next);
   return { path: SETTINGS_LOCAL, changed, command };
 }
@@ -10816,9 +10915,9 @@ async function syncHookMode(o, mode) {
 // packages/cli/src/cmd-init.ts
 init_config();
 init_util();
-import { copyFileSync, existsSync as existsSync6, readdirSync as readdirSync6, statSync as statSync3 } from "node:fs";
-import { dirname as dirname5, join as join10, resolve as resolve5 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { copyFileSync, existsSync as existsSync7, readdirSync as readdirSync7, statSync as statSync4 } from "node:fs";
+import { dirname as dirname6, join as join11, resolve as resolve6 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 function gitignoreLines(cfg) {
   const dir = (cfg.prompt?.dir ?? ".claude/prompt").replace(/^\.\//, "").replace(/\/+$/, "");
   return [
@@ -10826,11 +10925,12 @@ function gitignoreLines(cfg) {
     `${dir}/.trace/`,
     ".claude/gate.debug.log",
     ".claude/gate.log.jsonl",
-    ".claude/gate.index.json"
+    ".claude/gate.index.json",
+    `${dir}/.types/jsx/`
   ];
 }
 function removeGitignoreLines(root, lines) {
-  const path = join10(root, ".gitignore");
+  const path = join11(root, ".gitignore");
   const cur = readText(path);
   if (cur === void 0) return [];
   const drop = new Set(lines);
@@ -10841,14 +10941,14 @@ function removeGitignoreLines(root, lines) {
 }
 var isDir = (p) => {
   try {
-    return statSync3(p).isDirectory();
+    return statSync4(p).isDirectory();
   } catch {
     return false;
   }
 };
 var listDirs = (p) => {
   try {
-    return readdirSync6(p).filter((d) => !d.startsWith(".") && isDir(join10(p, d))).sort();
+    return readdirSync7(p).filter((d) => !d.startsWith(".") && isDir(join11(p, d))).sort();
   } catch {
     return [];
   }
@@ -10866,8 +10966,8 @@ function guessProfiles(root) {
     groups[name] = [.../* @__PURE__ */ new Set([...groups[name] ?? [], ...groupGlobs])];
   };
   for (const top of ["apps", ""]) {
-    const base = top ? join10(root, top) : root;
-    for (const d of top ? listDirs(base) : ["web", "frontend", "client", "api", "backend", "server"].filter((x) => isDir(join10(root, x)))) {
+    const base = top ? join11(root, top) : root;
+    for (const d of top ? listDirs(base) : ["web", "frontend", "client", "api", "backend", "server"].filter((x) => isDir(join11(root, x)))) {
       const rel = top ? `${top}/${d}` : d;
       if (FRONTEND.test(d)) {
         addPaths("frontend", [`${rel}/**`], ["skill:react-*", "skill:tailwind*", "skill:storybook", "tool:mcp__figma__*", "tool:mcp__playwright__*", "rule:react*", "rule:frontend*"]);
@@ -10881,18 +10981,18 @@ function guessProfiles(root) {
       }
     }
   }
-  for (const d of listDirs(join10(root, "packages"))) {
+  for (const d of listDirs(join11(root, "packages"))) {
     const name = profiles[d] ? `pkg-${d}` : d;
     addPaths(name, [`packages/${d}/**`], [`rule:${d}*`, `skill:${d}*`]);
     notes.push(`packages/${d} \u2192 ${name}`);
   }
-  if (isDir(join10(root, "docs"))) {
+  if (isDir(join11(root, "docs"))) {
     addPaths("docs", ["docs/**", "**/*.md"], ["skill:writing-*", "rule:docs*"]);
     profiles.docs.groups = ["docs"];
     notes.push("docs \u2192 docs");
   }
-  if (isDir(join10(root, "prisma")) || isDir(join10(root, "migrations"))) {
-    addPaths("backend", [...isDir(join10(root, "prisma")) ? ["prisma/**"] : [], "**/migrations/**"], ["skill:prisma"]);
+  if (isDir(join11(root, "prisma")) || isDir(join11(root, "migrations"))) {
+    addPaths("backend", [...isDir(join11(root, "prisma")) ? ["prisma/**"] : [], "**/migrations/**"], ["skill:prisma"]);
     notes.push("prisma/migrations \u2192 backend");
   }
   return { profiles, groups, notes };
@@ -10906,14 +11006,14 @@ function initConfig(root, o = {}) {
     profiles: guess.profiles,
     classify: { mode: "shadow", minConfidence: 0.7, recheckOn: ["/gate new", "compact"] },
     budgets: { default: { softContextPct: 70, hardContextPct: 85 } },
-    cursorRules: { enabled: true, nested: existsSync6(join10(root, "packages")) || existsSync6(join10(root, "apps")), maxCharsPerInjection: 3e4 },
+    cursorRules: { enabled: true, nested: existsSync7(join11(root, "packages")) || existsSync7(join11(root, "apps")), maxCharsPerInjection: 3e4 },
     prompt: { dir: ".claude/prompt", runCacheDefault: "5m", ...o.commitCompiled ? { commitCompiled: true } : {} }
   };
   return { json, guess };
 }
 function initCommand(root, o) {
-  const path = join10(root, ".claude", "gate.json");
-  if (existsSync6(path) && !o.force) return { code: 1, out: `.claude/gate.json \u0443\u0436\u0435 \u0456\u0441\u043D\u0443\u0454 \u2014 \u0434\u043E\u0434\u0430\u0439 --force, \u0449\u043E\u0431 \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0438\u0441\u0430\u0442\u0438, \u0430\u0431\u043E context-gate migrate
+  const path = join11(root, ".claude", "gate.json");
+  if (existsSync7(path) && !o.force) return { code: 1, out: `.claude/gate.json \u0443\u0436\u0435 \u0456\u0441\u043D\u0443\u0454 \u2014 \u0434\u043E\u0434\u0430\u0439 --force, \u0449\u043E\u0431 \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0438\u0441\u0430\u0442\u0438, \u0430\u0431\u043E context-gate migrate
 ` };
   const { json, guess } = initConfig(root, { commitCompiled: o.commitCompiled });
   const check = loadConfig(JSON.stringify(json));
@@ -10925,13 +11025,16 @@ function initCommand(root, o) {
   const added = ensureGitignore(root, gitignoreLines(cfg));
   const removed = cfg.prompt?.commitCompiled ? removeGitignoreLines(root, gitignoreLines({ ...cfg, prompt: { ...cfg.prompt, commitCompiled: false } }).slice(0, 1)) : [];
   const lines = ["\u0441\u0442\u0432\u043E\u0440\u0435\u043D\u043E .claude/gate.json (classify.mode: shadow \u2014 \u043D\u0456\u0447\u043E\u0433\u043E \u043D\u0435 \u0444\u0456\u043B\u044C\u0442\u0440\u0443\u0454\u0442\u044C\u0441\u044F, /gate why \u043F\u043E\u043A\u0430\u0437\u0443\u0454 \u043F\u0440\u043E\u043F\u043E\u0437\u0438\u0446\u0456\u0457)"];
+  const types = writeEditorTypes(root, cfg.prompt?.dir ?? ".claude/prompt");
+  if (types.written.length) lines.push(`\u0442\u0438\u043F\u0438 \u0434\u043B\u044F \u0440\u0435\u0434\u0430\u043A\u0442\u043E\u0440\u0430 (TSX \u0431\u0435\u0437 npm): ${types.written.join(", ")}`);
+  lines.push(...types.notes);
   if (cfg.prompt?.commitCompiled) lines.push(`prompt.commitCompiled: true \u2014 ${cfg.prompt.dir ?? ".claude/prompt"}/.compiled/ \u043A\u043E\u043C\u0456\u0442\u0438\u0442\u044C\u0441\u044F \u0440\u0430\u0437\u043E\u043C \u0456\u0437 \u0434\u0436\u0435\u0440\u0435\u043B\u0430\u043C\u0438 (\u04203)${removed.length ? "; \u0440\u044F\u0434\u043E\u043A \u043F\u0440\u0438\u0431\u0440\u0430\u043D\u043E \u0437 .gitignore" : ""}`);
   lines.push(guess.notes.length ? `\u043F\u0440\u043E\u0444\u0456\u043B\u0456: ${guess.notes.join("; ")}` : "\u043F\u0440\u043E\u0444\u0456\u043B\u0456 \u043D\u0435 \u0432\u0433\u0430\u0434\u0430\u043D\u043E: \u0441\u0442\u0440\u0443\u043A\u0442\u0443\u0440\u0430 \u0431\u0435\u0437 apps/, packages/, docs/ \u2014 \u0434\u043E\u0434\u0430\u0439 \u0457\u0445 \u0443 profiles \u0432\u0440\u0443\u0447\u043D\u0443");
   if (added.length) lines.push(`.gitignore: + ${added.join(", ")}`);
   return { code: 0, out: lines.join("\n") + "\n" };
 }
 function migrateCommand(root, o) {
-  const path = join10(root, ".claude", "gate.json");
+  const path = join11(root, ".claude", "gate.json");
   const text = readText(path);
   if (text === void 0) return { code: 1, out: "\u043D\u0435\u043C\u0430\u0454 .claude/gate.json \u2014 \u0441\u043F\u0435\u0440\u0448\u0443 context-gate init\n", diagnostics: [] };
   let raw;
@@ -10947,7 +11050,7 @@ function migrateCommand(root, o) {
   if (o.dryRun) return { code: 0, out: next, diagnostics };
   if (next.trim() === text.trim() || JSON.stringify(json) === JSON.stringify(raw)) return { code: 0, out: "gate.json \u0443\u0436\u0435 \u0432 \u043D\u043E\u0432\u043E\u043C\u0443 \u0444\u043E\u0440\u043C\u0430\u0442\u0456\n", diagnostics };
   let backup = `${path}.bak`;
-  for (let i = 1; existsSync6(backup); i++) backup = `${path}.bak.${i}`;
+  for (let i = 1; existsSync7(backup); i++) backup = `${path}.bak.${i}`;
   copyFileSync(path, backup);
   writeText(path, next);
   const conv = diagnostics.filter((d) => d.code === "G310").length ? "\u043A\u043E\u043D\u0432\u0435\u0440\u0442\u043E\u0432\u0430\u043D\u043E skillGroups/mcpGroups/ruleSources \u0443 groups/itemSources" : "\u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E";
@@ -10956,25 +11059,25 @@ function migrateCommand(root, o) {
 `).join(""), diagnostics };
 }
 function pluginRoot() {
-  const here = dirname5(fileURLToPath2(import.meta.url));
-  for (const c of [resolve5(here, ".."), resolve5(here, "../../..")]) if (existsSync6(join10(c, "examples", "skills"))) return c;
-  return resolve5(here, "../../..");
+  const here = dirname6(fileURLToPath3(import.meta.url));
+  for (const c of [resolve6(here, ".."), resolve6(here, "../../..")]) if (existsSync7(join11(c, "examples", "skills"))) return c;
+  return resolve6(here, "../../..");
 }
 function exampleCommand(root, what, o) {
   if (what !== "skills") return { code: 2, out: "\u0432\u0438\u043A\u043E\u0440\u0438\u0441\u0442\u0430\u043D\u043D\u044F: context-gate example skills\n" };
-  const src = join10(pluginRoot(), "examples", "skills");
-  if (!existsSync6(src)) return { code: 1, out: `\u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E ${src}
+  const src = join11(pluginRoot(), "examples", "skills");
+  if (!existsSync7(src)) return { code: 1, out: `\u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E ${src}
 ` };
-  const dest = join10(root, o.dir ?? ".claude/prompt");
+  const dest = join11(root, o.dir ?? ".claude/prompt");
   const lines = [];
-  for (const f of readdirSync6(src).sort()) {
+  for (const f of readdirSync7(src).sort()) {
     if (!f.endsWith(".prompt.tsx")) continue;
-    const to = join10(dest, f);
-    if (existsSync6(to) && !o.force) {
+    const to = join11(dest, f);
+    if (existsSync7(to) && !o.force) {
       lines.push(`\u043F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u043E ${f} (\u0443\u0436\u0435 \u0454; --force \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0438\u0441\u0430\u0442\u0438)`);
       continue;
     }
-    writeText(to, readText(join10(src, f)) ?? "");
+    writeText(to, readText(join11(src, f)) ?? "");
     lines.push(`\u0441\u043A\u043E\u043F\u0456\u0439\u043E\u0432\u0430\u043D\u043E ${f}`);
   }
   lines.push("\u0434\u0430\u043B\u0456: context-gate build (\u0430\u0431\u043E \u0437\u0431\u0456\u0440\u043A\u0430 \u043D\u0430 session.start \u0443 mod-\u0456)");
@@ -10982,7 +11085,7 @@ function exampleCommand(root, what, o) {
 }
 
 // packages/cli/src/cmd-pipe.ts
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // packages/core/src/pipeline.ts
 init_duration();
@@ -11217,7 +11320,7 @@ init_render();
 init_context();
 init_util();
 function readLog(root) {
-  const t = readText(join11(root, ".claude", "gate.log.jsonl"));
+  const t = readText(join12(root, ".claude", "gate.log.jsonl"));
   return t ? fromJsonl(t).items : [];
 }
 function cliPipeHost(env) {
@@ -11262,7 +11365,7 @@ function formatStageOut(out, opts = {}) {
 
 // packages/cli/src/cmd-report.ts
 init_journal();
-import { basename as basename5, join as join12, resolve as resolve6 } from "node:path";
+import { basename as basename5, join as join13, resolve as resolve7 } from "node:path";
 
 // packages/core/src/report.ts
 init_decide();
@@ -11461,7 +11564,7 @@ function formatReport(r) {
   return out.join("\n").replace(/\n+$/, "") + "\n";
 }
 async function reportCommand(root, o) {
-  const text = readText(join12(root, ".claude", "gate.log.jsonl"));
+  const text = readText(join13(root, ".claude", "gate.log.jsonl"));
   const entries = text ? fromJsonl(text).items : [];
   const repo = loadRepo(root);
   const all = await collectRepoItems(repo, { ...o.trustRepo ? { trustRepo: true } : {} });
@@ -11490,16 +11593,16 @@ async function benchRepo(dir, o) {
     ms: r.result.ms
   };
 }
-var BENCH_REPOS = join12("bench", "repos.json");
+var BENCH_REPOS = join13("bench", "repos.json");
 function readBenchRepos(file) {
   const v = readJson(file);
   if (!v || !Array.isArray(v.repos)) return [];
   return v.repos.filter((r) => !!r && typeof r === "object" && typeof r.dir === "string").map((r) => ({ ...r, name: typeof r.name === "string" ? r.name : basename5(r.dir) }));
 }
 function benchTargets(root, given) {
-  if (given.length) return given.map((g) => ({ name: basename5(resolve6(root, g)), dir: resolve6(root, g) }));
-  const listed = readBenchRepos(join12(root, BENCH_REPOS));
-  if (listed.length) return listed.map((r) => ({ ...r, dir: resolve6(root, r.dir) }));
+  if (given.length) return given.map((g) => ({ name: basename5(resolve7(root, g)), dir: resolve7(root, g) }));
+  const listed = readBenchRepos(join13(root, BENCH_REPOS));
+  if (listed.length) return listed.map((r) => ({ ...r, dir: resolve7(root, r.dir) }));
   return [{ name: basename5(root), dir: root }];
 }
 async function benchCommand(root, dirs, o) {
@@ -11523,8 +11626,8 @@ init_mddsl();
 init_build();
 init_context();
 init_util();
-import { existsSync as existsSync7, readdirSync as readdirSync7 } from "node:fs";
-import { join as join13 } from "node:path";
+import { existsSync as existsSync8, readdirSync as readdirSync8 } from "node:fs";
+import { join as join14 } from "node:path";
 function typeOf2(v) {
   if (v === null) return "null";
   if (Array.isArray(v)) return "array";
@@ -11588,8 +11691,8 @@ async function schemaInferCommand(o) {
     ...inferSchema(value)
   };
   if (o.print) return { code: 0, out: JSON.stringify(schema, null, 2) + "\n" };
-  const rel = posix(join13(ctx.repo.promptDir, "proposals", `${o.provider}.schema.json`));
-  writeJson(join13(ctx.repo.root, rel), schema);
+  const rel = posix(join14(ctx.repo.promptDir, "proposals", `${o.provider}.schema.json`));
+  writeJson(join14(ctx.repo.root, rel), schema);
   return { code: 0, out: `\u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E ${rel}
 \u041F\u0435\u0440\u0435\u0432\u0456\u0440 \u0456 \u043F\u0435\u0440\u0435\u043D\u0435\u0441\u0438 \u0432 gate.json providers.${o.provider}.schema (\u0430\u0431\u043E \u0432\u043A\u0430\u0436\u0438 \u0448\u043B\u044F\u0445 \u0434\u043E \u0444\u0430\u0439\u043B\u0443).
 ` };
@@ -11614,14 +11717,14 @@ function fmValue(text, key) {
   return m ? new RegExp(`^${key}:\\s*(.+)$`, "m").exec(m[1])?.[1]?.trim().replace(/^["']|["']$/g, "") : void 0;
 }
 function planExpand(root, promptDir, tiers, only) {
-  const dir = join13(root, promptDir);
-  if (!existsSync7(dir)) return [];
-  const files = readdirSync7(dir).filter((f) => f.endsWith(".md") && !/^readme\.md$/i.test(f)).sort();
+  const dir = join14(root, promptDir);
+  if (!existsSync8(dir)) return [];
+  const files = readdirSync8(dir).filter((f) => f.endsWith(".md") && !/^readme\.md$/i.test(f)).sort();
   const plan = [];
   for (const f of files) {
     if (tierVariantOf(f)) continue;
-    const rel = posix(join13(promptDir, f));
-    const text = readText(join13(dir, f)) ?? "";
+    const rel = posix(join14(promptDir, f));
+    const text = readText(join14(dir, f)) ?? "";
     const parsed = parseMarkdownPrompt(text, { path: rel });
     const id = parsed.section.id;
     if (only?.length && !only.includes(id)) continue;
@@ -11629,13 +11732,13 @@ function planExpand(root, promptDir, tiers, only) {
     const sourceHash = sha256(text).slice(0, 16);
     const body = text.replace(/^---\n[\s\S]*?\n---\n?/, "");
     for (const tier of tiers) {
-      const out = posix(join13(promptDir, "proposals", `${id}.${tier}.md`));
-      const merged = join13(dir, `${id}.${tier}.md`);
+      const out = posix(join14(promptDir, "proposals", `${id}.${tier}.md`));
+      const merged = join14(dir, `${id}.${tier}.md`);
       let skip;
       if (hasTierDirective) skip = "\u0441\u0435\u043A\u0446\u0456\u044F \u0432\u0436\u0435 \u043C\u0430\u0454 @tier-\u0432\u0430\u0440\u0456\u0430\u043D\u0442\u0438";
-      else if (existsSync7(merged) && fmValue(readText(merged) ?? "", "source-hash") === sourceHash) skip = `${id}.${tier}.md \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u0438\u0439`;
-      else if (existsSync7(merged) && !fmValue(readText(merged) ?? "", "source-hash")) skip = `${id}.${tier}.md \u043D\u0430\u043F\u0438\u0441\u0430\u043D\u043E \u0432\u0440\u0443\u0447\u043D\u0443`;
-      else if (fmValue(readText(join13(root, out)) ?? "", "source-hash") === sourceHash) skip = "\u043F\u0440\u043E\u043F\u043E\u0437\u0438\u0446\u0456\u044F \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u0430 (source-hash \u043D\u0435 \u0437\u043C\u0456\u043D\u0438\u0432\u0441\u044F)";
+      else if (existsSync8(merged) && fmValue(readText(merged) ?? "", "source-hash") === sourceHash) skip = `${id}.${tier}.md \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u0438\u0439`;
+      else if (existsSync8(merged) && !fmValue(readText(merged) ?? "", "source-hash")) skip = `${id}.${tier}.md \u043D\u0430\u043F\u0438\u0441\u0430\u043D\u043E \u0432\u0440\u0443\u0447\u043D\u0443`;
+      else if (fmValue(readText(join14(root, out)) ?? "", "source-hash") === sourceHash) skip = "\u043F\u0440\u043E\u043F\u043E\u0437\u0438\u0446\u0456\u044F \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u0430 (source-hash \u043D\u0435 \u0437\u043C\u0456\u043D\u0438\u0432\u0441\u044F)";
       plan.push({ id, tier, source: rel, sourceHash, out, instruction: expandInstruction(id, tier, body), ...skip ? { skip } : {} });
     }
   }
@@ -11643,12 +11746,12 @@ function planExpand(root, promptDir, tiers, only) {
 }
 var TSX_NOTE = '\u0421\u0435\u043A\u0446\u0456\u044F \u0437 TSX: \u0432\u0430\u0440\u0456\u0430\u043D\u0442 \u0437\u0430\u0441\u0442\u043E\u0441\u043E\u0432\u0443\u0454\u0442\u044C\u0441\u044F \u044F\u043A <Tier is="\u2026"> \u0443 \u0444\u0430\u0439\u043B\u0456-\u0434\u0436\u0435\u0440\u0435\u043B\u0456 (Markdown-\u0444\u043E\u0440\u043C\u0430 \u043D\u0438\u0436\u0447\u0435 \u2014 \u0442\u0430 \u0441\u0430\u043C\u0430 AST).';
 function planExpandTsx(root, promptDir, tiers, only, skipIds = /* @__PURE__ */ new Set()) {
-  const compiledDir = join13(root, promptDir, ".compiled");
+  const compiledDir = join14(root, promptDir, ".compiled");
   const prompts = [];
-  if (existsSync7(compiledDir)) {
-    for (const f of readdirSync7(compiledDir).filter((x) => x.endsWith(".json")).sort()) {
+  if (existsSync8(compiledDir)) {
+    for (const f of readdirSync8(compiledDir).filter((x) => x.endsWith(".json")).sort()) {
       try {
-        prompts.push(JSON.parse(readText(join13(compiledDir, f)) ?? ""));
+        prompts.push(JSON.parse(readText(join14(compiledDir, f)) ?? ""));
       } catch {
       }
     }
@@ -11664,10 +11767,10 @@ function planExpandTsx(root, promptDir, tiers, only, skipIds = /* @__PURE__ */ n
       const sourceHash = sha256(text).slice(0, 16);
       const source = sec.source?.path ?? cp.sources?.[0]?.path ?? `${promptDir}/${cp.id}.prompt.tsx`;
       for (const tier of tiers) {
-        const out = posix(join13(promptDir, "proposals", `${sec.id}.${tier}.md`));
+        const out = posix(join14(promptDir, "proposals", `${sec.id}.${tier}.md`));
         let skip;
         if (sec.tier?.length || hasTierNodes(sec.children)) skip = "\u0441\u0435\u043A\u0446\u0456\u044F \u0432\u0436\u0435 \u043C\u0430\u0454 <Tier>-\u0432\u0430\u0440\u0456\u0430\u043D\u0442\u0438";
-        else if (fmValue(readText(join13(root, out)) ?? "", "source-hash") === sourceHash) skip = "\u043F\u0440\u043E\u043F\u043E\u0437\u0438\u0446\u0456\u044F \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u0430 (source-hash \u043D\u0435 \u0437\u043C\u0456\u043D\u0438\u0432\u0441\u044F)";
+        else if (fmValue(readText(join14(root, out)) ?? "", "source-hash") === sourceHash) skip = "\u043F\u0440\u043E\u043F\u043E\u0437\u0438\u0446\u0456\u044F \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u0430 (source-hash \u043D\u0435 \u0437\u043C\u0456\u043D\u0438\u0432\u0441\u044F)";
         plan.push({ id: sec.id, tier, source, sourceHash, out, tsx: sec.source?.line ? { line: sec.source.line } : {}, instruction: `${expandInstruction(sec.id, tier, text)}
 ${TSX_NOTE}`, ...skip ? { skip } : {} });
       }
@@ -11712,7 +11815,7 @@ ${unbuiltNote}` };
       continue;
     }
     const fm = ["---", `id: ${p.id}`, `generated-by: context-gate expand (${model})`, `generated-at: ${(/* @__PURE__ */ new Date()).toISOString()}`, `source-hash: ${p.sourceHash}`, `source: ${p.source}${p.tsx?.line ? `:${p.tsx.line}` : ""}`, ...p.tsx ? [`apply: "<Tier is=\\"${p.tier}\\"> \u0443 ${p.source}"`] : [], "---", ""];
-    writeText(join13(root, p.out), fm.join("\n") + r.stdout.trim() + "\n");
+    writeText(join14(root, p.out), fm.join("\n") + r.stdout.trim() + "\n");
     lines.push(`\u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E ${p.out}${p.tsx ? ` (TSX: \u0432\u0441\u0442\u0430\u0432 \u044F\u043A <Tier is="${p.tier}">\u2026</Tier> \u0443 ${p.source}${p.tsx.line ? `:${p.tsx.line}` : ""}, \u0430 \u043A\u0430\u043D\u043E\u043D\u0456\u0447\u043D\u0438\u0439 \u0442\u0435\u043A\u0441\u0442 \u2014 \u0443 <Tier is={[\u2026\u0456\u043D\u0448\u0456 tiers]}>)` : ""}`);
   }
   if (lines.some((l) => l.startsWith("\u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E"))) lines.push("", `\u041F\u0435\u0440\u0435\u0433\u043B\u044F\u043D\u044C diff \u0456 \u043F\u0435\u0440\u0435\u043D\u0435\u0441\u0438 \u043F\u043E\u0442\u0440\u0456\u0431\u043D\u0456 \u0432\u0430\u0440\u0456\u0430\u043D\u0442\u0438 \u0437 proposals/ \u0443 ${repo.promptDir}/.`);
@@ -11720,7 +11823,7 @@ ${unbuiltNote}` };
 }
 
 // packages/cli/src/cmd-index.ts
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 
 // packages/core/src/gateindex.ts
 var INDEX_BUILTINS = ["gate", "git", "fs", "cursor", "session", "ctx", "budgets", "args", "data", "scripts"];
@@ -11830,7 +11933,7 @@ async function buildIndex(o) {
 async function indexCommand(o) {
   const index = await buildIndex(o);
   if (o.print) return { code: 0, out: JSON.stringify(index, null, 2) + "\n" };
-  writeJson(join14(o.root, ".claude", "gate.index.json"), index);
+  writeJson(join15(o.root, ".claude", "gate.index.json"), index);
   return { code: 0, out: `\u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E .claude/gate.index.json: ${index.items.length} \u0435\u043B\u0435\u043C\u0435\u043D\u0442\u0456\u0432, ${index.sections.length} \u0441\u0435\u043A\u0446\u0456\u0439, ${index.symbols.length} \u0441\u0438\u043C\u0432\u043E\u043B\u0456\u0432
 ` };
 }
@@ -11976,10 +12079,10 @@ async function watchLoop(paths, fn2, io) {
       }
     }, 150);
   };
-  const watchers = paths.filter((p) => existsSync8(p)).map((p) => watch(p, { recursive: true }, (_e, f) => {
+  const watchers = paths.filter((p) => existsSync9(p)).map((p) => watch(p, { recursive: true }, (_e, f) => {
     if (!f || !/(^|[\\/])\.(compiled|trace|types)([\\/]|$)|\.tmp$/.test(String(f))) trigger();
   }));
-  io.err(`\u0441\u0442\u0435\u0436\u0443 \u0437\u0430: ${paths.filter((p) => existsSync8(p)).map((p) => posix(relative5(process.cwd(), p)) || ".").join(", ")} (Ctrl+C \u2014 \u0432\u0438\u0445\u0456\u0434)
+  io.err(`\u0441\u0442\u0435\u0436\u0443 \u0437\u0430: ${paths.filter((p) => existsSync9(p)).map((p) => posix(relative6(process.cwd(), p)) || ".").join(", ")} (Ctrl+C \u2014 \u0432\u0438\u0445\u0456\u0434)
 `);
   await new Promise((done) => process.once("SIGINT", () => done()));
   for (const w of watchers) w.close();
@@ -11996,9 +12099,12 @@ async function doBuild(root, p, io) {
     } catch {
     }
   }
+  const types = existsSync9(join16(root, repo.promptDir)) ? writeEditorTypes(root, repo.promptDir) : { written: [], notes: [] };
+  if (types.written.length && existsSync9(join16(root, ".gitignore"))) ensureGitignore(root, [`${repo.promptDir.replace(/^\.\//, "").replace(/\/+$/, "")}/.types/jsx/`]);
+  r.written.push(...types.written);
   for (const cp of r.compiled) if (!cp.diagnostics.some((d) => d.severity === "error")) {
     try {
-      writeJson(join15(repo.cacheDir, "compiled", `${cp.id}.json`), cp);
+      writeJson(join16(repo.cacheDir, "compiled", `${cp.id}.json`), cp);
     } catch {
     }
   }
@@ -12006,6 +12112,7 @@ async function doBuild(root, p, io) {
   if (bool3(p, "json")) io.out(JSON.stringify({ ok: !failed, compiled: r.compiled.map((c) => c.id), written: r.written, diagnostics: r.diagnostics, ms: Date.now() - t0 }) + "\n");
   else {
     printDiags(io, r.diagnostics);
+    for (const n of types.notes) io.err(n + "\n");
     io.out(r.compiled.length ? `\u0437\u0456\u0431\u0440\u0430\u043D\u043E ${r.compiled.map((c) => c.id).join(", ")} \u0437\u0430 ${Date.now() - t0} \u043C\u0441${r.written.length ? `; \u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E:
   ${r.written.join("\n  ")}` : ""}
 ` : `\u043D\u0435\u043C\u0430\u0454 *.prompt.tsx \u0443 ${repo.promptDir}
@@ -12059,7 +12166,7 @@ var COMMANDS = {
     async run(p, root, io) {
       if (!bool3(p, "watch")) return doBuild(root, p, io);
       const repo = loadRepo(root);
-      return watchLoop([join15(root, repo.promptDir), join15(root, ".claude", "gate.json"), join15(root, repo.promptDir, "scripts")], async () => {
+      return watchLoop([join16(root, repo.promptDir), join16(root, ".claude", "gate.json"), join16(root, repo.promptDir, "scripts")], async () => {
         await doBuild(root, p, io);
       }, io);
     }
@@ -12101,7 +12208,7 @@ var COMMANDS = {
       };
       if (!bool3(p, "watch")) return once();
       const repo = loadRepo(root);
-      return watchLoop([join15(root, repo.promptDir), join15(root, ".claude", "gate.json")], async () => {
+      return watchLoop([join16(root, repo.promptDir), join16(root, ".claude", "gate.json")], async () => {
         io.out("\x1B[2J\x1B[H");
         await once();
       }, io);
@@ -12137,10 +12244,10 @@ var COMMANDS = {
     flags: { check: { type: "bool", desc: "\u043B\u0438\u0448\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0438\u0442\u0438: \u043A\u043E\u0434 1, \u044F\u043A\u0449\u043E \u0449\u043E\u0441\u044C \u0442\u0440\u0435\u0431\u0430 \u0432\u0456\u0434\u0444\u043E\u0440\u043C\u0430\u0442\u0443\u0432\u0430\u0442\u0438" } },
     async run(p, root, io) {
       const repo = loadRepo(root);
-      const files = p.positional.length ? p.positional.map((f) => posix(relative5(root, resolve7(process.cwd(), f)))) : walkFiles(root, { under: repo.promptDir }).filter((f) => f.endsWith(".md") && !f.includes("/proposals/"));
+      const files = p.positional.length ? p.positional.map((f) => posix(relative6(root, resolve8(process.cwd(), f)))) : walkFiles(root, { under: repo.promptDir }).filter((f) => f.endsWith(".md") && !f.includes("/proposals/"));
       let bad = 0;
       for (const f of files) {
-        const src = readText(join15(root, f));
+        const src = readText(join16(root, f));
         if (src === void 0) {
           io.err(`\u043D\u0435\u043C\u0430\u0454 \u0444\u0430\u0439\u043B\u0443 ${f}
 `);
@@ -12160,7 +12267,7 @@ var COMMANDS = {
 `);
           bad++;
         } else {
-          writeText(join15(root, f), r.text);
+          writeText(join16(root, f), r.text);
           io.out(`\u0432\u0456\u0434\u0444\u043E\u0440\u043C\u0430\u0442\u043E\u0432\u0430\u043D\u043E ${f}
 `);
         }
@@ -12494,7 +12601,7 @@ context-gate ${name} --help \u2014 \u0434\u043E\u0432\u0456\u0434\u043A\u0430.
 `);
     return 2;
   }
-  const root = str3(p, "root") ? resolve7(str3(p, "root")) : findRoot(process.cwd());
+  const root = str3(p, "root") ? resolve8(str3(p, "root")) : findRoot(process.cwd());
   try {
     return await withUserSkills(p.flags["user-skills"] !== false, () => cmd.run(p, root, io));
   } catch (e) {
@@ -12505,7 +12612,7 @@ context-gate ${name} --help \u2014 \u0434\u043E\u0432\u0456\u0434\u043A\u0430.
 }
 var isEntry = (() => {
   try {
-    return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath3(import.meta.url));
+    return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath4(import.meta.url));
   } catch {
     return false;
   }

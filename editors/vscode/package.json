@@ -1,26 +1,46 @@
 {
   "name": "context-gate-vscode",
   "displayName": "context-gate",
-  "description": "Prompt DSL of context-gate: G* diagnostics, completion and hover in expressions (tsserver plugin), live preview of sections",
+  "description": "Prompt DSL of context-gate: build on save with G* problems, TSX and Markdown hints, gate.json schema, .mdc checks, live preview of sections",
   "version": "0.1.0",
   "publisher": "context-gate",
   "license": "MIT",
   "type": "module",
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Programming Languages", "Linters"],
+  "repository": { "type": "git", "url": "https://github.com/kosmodev/context-gate" },
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Programming Languages", "Linters", "Snippets"],
   "main": "./dist/extension.cjs",
-  "activationEvents": ["workspaceContains:.claude/gate.json", "workspaceContains:.claude/prompt", "onLanguage:typescriptreact", "onLanguage:markdown"],
+  "activationEvents": [
+    "workspaceContains:.claude/gate.json",
+    "workspaceContains:.claude/prompt",
+    "workspaceContains:.cursor/rules",
+    "onLanguage:typescriptreact",
+    "onLanguage:markdown"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "У недовіреному workspace збірка (вона виконує код промптів) і preview вимкнені; підказки, схема gate.json і перевірка .mdc працюють."
+    }
+  },
   "contributes": {
     "typescriptServerPlugins": [
       { "name": "@context-gate/lsp", "enableForWorkspaceTypeScriptVersions": true }
     ],
     "commands": [
+      { "command": "contextGate.build", "title": "context-gate: Build prompts" },
+      { "command": "contextGate.buildFile", "title": "context-gate: Build current file" },
+      { "command": "contextGate.health", "title": "context-gate: Health" },
+      { "command": "contextGate.showLog", "title": "context-gate: Show log" },
       { "command": "contextGate.preview", "title": "context-gate: Preview section" },
       { "command": "contextGate.quickVariant", "title": "context-gate: згенерувати quick-варіант секції" }
     ],
     "menus": {
       "editor/title": [
         { "command": "contextGate.preview", "when": "resourcePath =~ /\\.claude[\\\\/]prompt[\\\\/]/", "group": "navigation" }
+      ],
+      "commandPalette": [
+        { "command": "contextGate.buildFile", "when": "resourcePath =~ /\\.claude[\\\\/]/" }
       ]
     },
     "configuration": {
@@ -28,15 +48,43 @@
       "properties": {
         "contextGate.cliPath": {
           "type": "string",
-          "default": "npx context-gate",
-          "description": "Команда CLI context-gate (напр. `node dist/cli.js` у репозиторії плагіна)."
+          "default": "",
+          "description": "Команда CLI context-gate (напр. `node /шлях/context-gate/dist/cli.js`). Порожньо: `node_modules/.bin/context-gate` workspace, інакше CLI, вбудований у розширення."
+        },
+        "contextGate.buildOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Збирати промпти при збереженні .claude/prompt/**, імпортованих файлів і .claude/gate.json."
         }
       }
-    }
+    },
+    "jsonValidation": [
+      { "fileMatch": ["**/.claude/gate.json"], "url": "./schema/context-gate.schema.json" }
+    ],
+    "grammars": [
+      {
+        "scopeName": "context-gate.markdown.injection",
+        "path": "./syntaxes/markdown-injection.tmLanguage.json",
+        "injectTo": ["text.html.markdown"]
+      }
+    ],
+    "snippets": [
+      { "language": "typescriptreact", "path": "./snippets/tsx.json" },
+      { "language": "markdown", "path": "./snippets/markdown.json" }
+    ]
   },
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "package": "node scripts/build.mjs && npx @vscode/vsce package --no-dependencies"
+    "package": "node scripts/build.mjs && vsce package",
+    "test": "node test/run.mjs"
+  },
+  "dependencies": {
+    "esbuild": "0.28.2"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.95.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0"
   }
 }

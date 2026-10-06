@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.json",
-  "compilerOptions": { "types": ["node"] },
+  "compilerOptions": { "types": ["node", "vscode"], "typeRoots": ["./node_modules/@types", "../../node_modules/@types"] },
   "include": ["src/**/*.ts"]
 }

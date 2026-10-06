@@ -11,7 +11,7 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/index.cjs --external:typescript --footer:js='module.exports = Object.assign(module.exports.default, module.exports);'"
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/index.cjs --external:typescript --define:import.meta.url=__cgUrl --banner:js=\"const __cgUrl = require('url').pathToFileURL(__filename).href;\" --footer:js='module.exports = Object.assign(module.exports.default, module.exports);'"
   },
   "peerDependencies": {
     "typescript": ">=5.0"

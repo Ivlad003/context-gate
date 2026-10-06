@@ -1,0 +1,54 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "context-gate.markdown.injection",
+  "injectionSelector": "L:text.html.markdown -markup.fenced_code -markup.raw -markup.inline.raw",
+  "patterns": [
+    { "include": "#directive-block" },
+    { "include": "#directive" },
+    { "include": "#placeholder" }
+  ],
+  "repository": {
+    "directive-block": {
+      "comment": "@if / @elif / @else if / @each / @repeat / @let / @set / @assert / @debug: the rest of the line is an expression",
+      "match": "^\\s*(@)(if|elif|else\\s+if|each|repeat|let|set|assert|debug|tier)\\b(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.keyword.context-gate" },
+        "2": { "name": "keyword.control.directive.context-gate" },
+        "3": { "patterns": [{ "include": "#expression" }] }
+      }
+    },
+    "directive": {
+      "match": "^\\s*(@)(else|end|break|continue|store|run|call|use|include|section|skill|rule|mcp|lazy|fn|log|trace)\\b(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.keyword.context-gate" },
+        "2": { "name": "keyword.control.directive.context-gate" },
+        "3": { "patterns": [{ "include": "#options" }, { "include": "#expression" }] }
+      }
+    },
+    "placeholder": {
+      "begin": "\\{\\{",
+      "end": "\\}\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.context-gate" } },
+      "endCaptures": { "0": { "name": "punctuation.section.embedded.end.context-gate" } },
+      "contentName": "meta.embedded.expression.context-gate",
+      "patterns": [{ "include": "#expression" }]
+    },
+    "options": {
+      "match": "\\b(as|cache|store|needs|budget|to|level)(=)",
+      "captures": { "1": { "name": "entity.other.attribute-name.context-gate" }, "2": { "name": "punctuation.separator.key-value.context-gate" } }
+    },
+    "expression": {
+      "patterns": [
+        { "match": "\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'", "name": "string.quoted.context-gate" },
+        { "match": "\\b\\d+(?:\\.\\d+)?\\b", "name": "constant.numeric.context-gate" },
+        { "match": "\\b(true|false|null)\\b", "name": "constant.language.context-gate" },
+        { "match": "\\b(in|and|or|not)\\b", "name": "keyword.operator.word.context-gate" },
+        { "match": "(\\|)\\s*([A-Za-z_]\\w*)", "captures": { "1": { "name": "keyword.operator.pipe.context-gate" }, "2": { "name": "support.function.filter.context-gate" } } },
+        { "match": "==|!=|<=|>=|&&|\\|\\||\\?\\?|[<>!+\\-*/%?:]", "name": "keyword.operator.context-gate" },
+        { "match": "\\b(gate|git|fs|cursor|session|ctx|budgets|args|data)\\b", "name": "variable.language.context-gate" },
+        { "match": "\\b[A-Za-z_]\\w*(?=\\s*\\()", "name": "entity.name.function.context-gate" },
+        { "match": "\\b[A-Za-z_]\\w*\\b", "name": "variable.other.context-gate" }
+      ]
+    }
+  }
+}

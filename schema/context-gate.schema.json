@@ -236,7 +236,9 @@
                 },
                 "timeout": {
                   "type": "string",
-                  "format": "duration"
+                  "pattern": "^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$",
+                  "x-duration": true,
+                  "description": "Тривалість: 5m, 1h30m, 10s, 500ms."
                 }
               }
             }
@@ -489,7 +491,9 @@
                 },
                 "timeout": {
                   "type": "string",
-                  "format": "duration"
+                  "pattern": "^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$",
+                  "x-duration": true,
+                  "description": "Тривалість: 5m, 1h30m, 10s, 500ms."
                 }
               }
             }
@@ -559,7 +563,9 @@
           },
           "cache": {
             "type": "string",
-            "format": "duration"
+            "pattern": "^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$",
+            "x-duration": true,
+            "description": "Тривалість: 5m, 1h30m, 10s, 500ms."
           },
           "onError": {
             "enum": [
@@ -609,7 +615,9 @@
           },
           "timeout": {
             "type": "string",
-            "format": "duration"
+            "pattern": "^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$",
+            "x-duration": true,
+            "description": "Тривалість: 5m, 1h30m, 10s, 500ms."
           },
           "env": {
             "type": "object",
@@ -832,7 +840,9 @@
         },
         "runCacheDefault": {
           "type": "string",
-          "format": "duration"
+          "pattern": "^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$",
+          "x-duration": true,
+          "description": "Тривалість: 5m, 1h30m, 10s, 500ms."
         },
         "build": {
           "enum": [

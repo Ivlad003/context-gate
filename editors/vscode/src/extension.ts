@@ -1,26 +1,33 @@
-// VS Code client of context-gate: a thin shell around the tsserver plugin (`@context-gate/lsp`,
-// contributed via `typescriptServerPlugins`) and the CLI preview. All logic is in preview.ts.
+// VS Code client of context-gate: the compiler on save (Problems + status bar + log, compiler.ts), the tsserver
+// plugin (`@context-gate/lsp`, contributed via `typescriptServerPlugins`), Markdown DSL / `.mdc` providers
+// (providers.ts), the gate.json schema (`jsonValidation`) and the CLI preview panel (preview.ts).
 
 import * as vscode from 'vscode'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { buildRunArgs, cliArgv, previewOptions, renderPreviewHtml, runCli, sectionIdAt, type PreviewState, type RunView } from './preview.ts'
+import { buildRunArgs, previewOptions, renderPreviewHtml, runCli, sectionIdAt, type PreviewState, type RunView } from './preview.ts'
+import { resolveCli, shellLine, buildTargetFor, readLock, type CliCommand } from './compiler-core.ts'
+import { Compiler, execCli, needsEditorTypes, type RootInfo } from './compiler.ts'
+import { registerDslProviders } from './providers.ts'
+import { findRoot as findRootOf } from '../../../packages/lsp/src/load.ts'
 
 const PLUGIN = '@context-gate/lsp'
 
+let extensionPath = ''
+let output: vscode.OutputChannel
+let compiler: Compiler
+
 function findRoot(file: string): string | undefined {
-  let dir = dirname(file)
-  for (;;) {
-    if (existsSync(join(dir, '.claude', 'gate.json')) || existsSync(join(dir, '.claude', 'prompt'))) return dir
-    const up = dirname(dir)
-    if (up === dir) return undefined
-    dir = up
-  }
+  return findRootOf(file)
 }
 
 function readConfig(root: string): { tiers?: Record<string, unknown>; profiles?: Record<string, unknown>; prompt?: { dir?: string } } | undefined {
   try { return JSON.parse(readFileSync(join(root, '.claude', 'gate.json'), 'utf8')) } catch { return undefined }
+}
+
+function rootInfo(root: string): RootInfo {
+  return { root, promptDir: (readConfig(root)?.prompt?.dir ?? '.claude/prompt').replace(/^\.\//, '').replace(/\/+$/, '') }
 }
 
 function fixtures(root: string): string[] {
@@ -31,8 +38,24 @@ function fixtures(root: string): string[] {
   return out
 }
 
-function cliPath(): string[] {
-  return cliArgv(vscode.workspace.getConfiguration('contextGate').get<string>('cliPath') ?? 'npx context-gate')
+/** CLI for a repo root: `contextGate.cliPath` → workspace `node_modules/.bin/context-gate` → bundled CLI. */
+function cliFor(root?: string): CliCommand {
+  return resolveCli({
+    setting: vscode.workspace.getConfiguration('contextGate').get<string>('cliPath') ?? '',
+    ...(root ? { root } : {}),
+    extensionPath,
+    execPath: process.execPath,
+    appRoot: vscode.env.appRoot,
+    electron: Boolean(process.versions.electron),
+  })
+}
+
+function activeRoot(): string | undefined {
+  const f = vscode.window.activeTextEditor?.document.uri
+  const r = f?.scheme === 'file' ? findRoot(f.fsPath) : undefined
+  if (r) return r
+  for (const w of vscode.workspace.workspaceFolders ?? []) { const x = findRoot(join(w.uri.fsPath, 'x')); if (x) return x }
+  return undefined
 }
 
 async function configureTsPlugin(): Promise<void> {
@@ -40,7 +63,9 @@ async function configureTsPlugin(): Promise<void> {
   if (!ext) return
   await ext.activate()
   const api = (ext.exports as { getAPI?: (v: number) => { configurePlugin(id: string, cfg: unknown): void } } | undefined)?.getAPI?.(0)
-  api?.configurePlugin(PLUGIN, { cliPath: cliPath() })
+  const cmd = cliFor(activeRoot())
+  // The extension publishes fresh build diagnostics itself (compiler.ts); the plugin keeps the live ones.
+  api?.configurePlugin(PLUGIN, { cliPath: cmd.argv, cliEnv: cmd.env, compiledDiagnostics: false })
 }
 
 class PreviewPanel {
@@ -88,8 +113,8 @@ class PreviewPanel {
     this.busy = true
     this.dryScripts = dryScripts
     this.render()
-    const argv = [...cliPath(), ...buildRunArgs(this.state, { dryScripts })]
-    this.view = await runCli(argv, this.root)
+    const cmd = cliFor(this.root)
+    this.view = await runCli([...cmd.argv, ...buildRunArgs(this.state, { dryScripts })], this.root, 60_000, cmd.env)
     this.busy = false
     this.render()
   }
@@ -122,23 +147,81 @@ function quickVariantCommand(section?: string): void {
   const root = file ? findRoot(file) : undefined
   const id = section ?? (editor && file ? sectionIdAt(editor.document.getText(), editor.document.offsetAt(editor.selection.active), file) : undefined)
   if (!root || !id) return
-  const term = vscode.window.createTerminal({ name: 'context-gate expand', cwd: root })
+  const cmd = cliFor(root)
+  const term = vscode.window.createTerminal({ name: 'context-gate expand', cwd: root, env: cmd.env })
   term.show()
-  term.sendText([...cliPath(), 'expand', '--only', id].map((a) => (/[\s"']/.test(a) ? JSON.stringify(a) : a)).join(' '))
+  term.sendText(shellLine(cmd, ['expand', '--only', id]))
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+async function buildCommand(full: boolean): Promise<void> {
+  const root = activeRoot()
+  if (!root) { void vscode.window.showWarningMessage('context-gate: не знайдено .claude/ у workspace'); return }
+  const info = rootInfo(root)
+  const file = vscode.window.activeTextEditor?.document.uri.fsPath
+  if (vscode.window.activeTextEditor?.document.isDirty) await vscode.window.activeTextEditor.document.save()
+  const target = full || !file ? 'full' : buildTargetFor(file, root, info.promptDir, readLock(root, info.promptDir)) ?? 'full'
+  await compiler.enqueue(info, target, file)
+  const b = compiler.lastBuild
+  if (b?.error) { output.show(true); void vscode.window.showErrorMessage(`context-gate: ${b.error}`) }
+}
+
+async function healthCommand(): Promise<void> {
+  const root = activeRoot()
+  if (!root) { void vscode.window.showWarningMessage('context-gate: не знайдено .claude/ у workspace'); return }
+  const cmd = cliFor(root)
+  compiler.log(`${cmd.argv.join(' ')} health  (cwd ${root})`)
+  const r = await execCli(cmd, ['health'], root)
+  output.appendLine(r.stdout.trimEnd())
+  if (r.stderr.trim()) output.appendLine(r.stderr.trimEnd())
+  output.show(true)
+  const warn = (r.stdout.match(/\bH0\d\d\b/g) ?? []).length
+  void vscode.window.showInformationMessage(`context-gate health: ${r.code === 0 ? (warn ? `${warn} попереджень H0xx` : 'усе в межах') : `код ${r.code}`} — деталі в журналі`)
+}
+
+/** First build of a repo whose editor typings (prompt tsconfig, .types/jsx) are missing: writes them. */
+async function ensureEditorTypes(): Promise<void> {
+  if (!vscode.workspace.isTrusted) return
+  const roots = new Set<string>()
+  for (const w of vscode.workspace.workspaceFolders ?? []) { const r = findRoot(join(w.uri.fsPath, 'x')); if (r) roots.add(r) }
+  for (const d of vscode.workspace.textDocuments) if (d.uri.scheme === 'file') { const r = findRoot(d.uri.fsPath); if (r) roots.add(r) }
+  let wrote = false
+  for (const root of roots) {
+    const info = rootInfo(root)
+    if (!needsEditorTypes(info)) continue
+    compiler.log(`${relative(root, join(root, info.promptDir, 'tsconfig.json'))} або .types/jsx/ відсутні — перша збірка`)
+    await compiler.enqueue(info, 'full')
+    wrote = true
+  }
+  // tsserver may have put open prompts into an inferred project before the tsconfig existed.
+  if (wrote && vscode.workspace.textDocuments.some((d) => /\.prompt\.tsx$/.test(d.uri.fsPath))) await vscode.commands.executeCommand('typescript.restartTsServer')
+}
+
+export function activate(context: vscode.ExtensionContext): { compiler: Compiler; ready: Promise<void> } {
+  extensionPath = context.extensionPath
+  output = vscode.window.createOutputChannel('context-gate')
+  compiler = new Compiler(output, (root) => cliFor(root))
   void configureTsPlugin()
+  registerDslProviders(context)
   context.subscriptions.push(
+    output, compiler,
+    vscode.commands.registerCommand('contextGate.build', () => buildCommand(true)),
+    vscode.commands.registerCommand('contextGate.buildFile', () => buildCommand(false)),
+    vscode.commands.registerCommand('contextGate.health', healthCommand),
+    vscode.commands.registerCommand('contextGate.showLog', () => output.show()),
     vscode.commands.registerCommand('contextGate.preview', previewCommand),
     vscode.commands.registerCommand('contextGate.quickVariant', quickVariantCommand),
     vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme !== 'file') return
+      const root = findRoot(doc.uri.fsPath)
+      if (!root) return
+      if (vscode.workspace.getConfiguration('contextGate').get<boolean>('buildOnSave') ?? true) void compiler.onSaved(doc.uri.fsPath, rootInfo(root))
       const p = PreviewPanel.current
       if (!p) return
       // Refresh on save of .claude/** (prompts, gate.json) or scripts/** of the same repo.
       const rel = relative(p.root, doc.uri.fsPath).split(/[\\/]/)
       if (rel[0] === '.claude' || rel[0] === 'scripts') void p.refresh(true)
     }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => { void ensureEditorTypes() }),
     vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration('contextGate.cliPath')) void configureTsPlugin() }),
     vscode.languages.registerCodeActionsProvider({ pattern: '**/.claude/prompt/**/*.{tsx,md}' }, {
       provideCodeActions(document: vscode.TextDocument, range: vscode.Range) {
@@ -152,6 +235,8 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     }),
   )
+  const ready = ensureEditorTypes().catch((e: unknown) => compiler.log(`помилка першої збірки: ${(e as Error).message}`))
+  return { compiler, ready }
 }
 
 export function deactivate(): void {}

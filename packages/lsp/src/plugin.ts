@@ -6,7 +6,9 @@
 import type TS from 'typescript'
 import { spawnSync } from 'node:child_process'
 import { analyzeFile, completeAt, hoverAt, hoverMarkdown, numericCode, refactorsAt, sectionSymbols, type FileDiag } from './analyze.ts'
-import { compiledDiagnosticsFor, findRoot, isPromptFile, loadModel } from './load.ts'
+import { compiledDiagnosticsFor, findRoot, isPromptFile, loadModel, toPosix } from './load.ts'
+import { level2Diagnostics } from './level2.ts'
+import { relative } from 'node:path'
 import { codeInfo } from '../../core/src/codes.ts'
 import { cliArgv } from './runcli.ts'
 
@@ -15,8 +17,13 @@ type TSModule = typeof TS
 export interface PluginConfig {
   /** CLI command (`npx context-gate` by default), string or argv array. */
   cliPath?: string | string[]
+  /** Extra environment for the CLI (VS Code's bundled CLI runs Electron with ELECTRON_RUN_AS_NODE=1). */
+  cliEnv?: Record<string, string>
   /** Turn the decorations off without uninstalling. */
   disabled?: boolean
+  /** Show diagnostics of the last build (`.compiled/*.json`) on the file (default true). The VS Code extension
+   * publishes fresh build diagnostics itself and turns this off. */
+  compiledDiagnostics?: boolean
 }
 
 const REFACTOR = 'context-gate'
@@ -70,8 +77,13 @@ export function createPlugin(ts: TSModule, info: TS.server.PluginCreateInfo): TS
     if (!o) return prior
     return safe('diagnostics', () => {
       const sf = ls.getProgram()?.getSourceFile(fileName)
-      const { model } = loadModel(o.root)
-      const diags = analyzeFile(ts, fileName, o.text, model, compiledDiagnosticsFor(o.root, fileName))
+      const { model, config } = loadModel(o.root)
+      const relPath = toPosix(relative(o.root, fileName))
+      const live2 = level2Diagnostics(ts, o.text, relPath, config?.prompt?.transform)
+      const compiled = cfg().compiledDiagnostics === false ? undefined : compiledDiagnosticsFor(o.root, fileName)
+      // The live transform supersedes G160 copies of the last build.
+      if (compiled && live2.length) compiled.diagnostics = compiled.diagnostics.filter((d) => d.code !== 'G160')
+      const diags = [...analyzeFile(ts, fileName, o.text, model, compiled), ...live2]
       return [...prior, ...diags.map((d): TS.Diagnostic => ({
         file: sf,
         start: d.start,
@@ -155,7 +167,8 @@ export function createPlugin(ts: TSModule, info: TS.server.PluginCreateInfo): TS
     const one = Array.isArray(action) ? undefined : (action as { type?: string; root?: string; argv?: string[] })
     if (!one || one.type !== COMMAND_TYPE || !one.argv) return (ls.applyCodeActionCommand as (...a: unknown[]) => unknown)(action, ...rest)
     const [bin, ...args] = [...cliArgv(cfg().cliPath), ...one.argv.slice(1)]
-    const r = spawnSync(bin!, args, { cwd: one.root, encoding: 'utf8', timeout: 120_000 })
+    const env = cfg().cliEnv
+    const r = spawnSync(bin!, args, { cwd: one.root, encoding: 'utf8', timeout: 120_000, ...(env ? { env: { ...process.env, ...env } } : {}) })
     const ok = r.status === 0
     return Promise.resolve(ok ? { successMessage: `context-gate: ${one.argv.slice(1).join(' ')} — пропозицію записано в proposals/` } : { successMessage: `context-gate: помилка (${r.status ?? r.error?.message}): ${(r.stderr || r.stdout || '').slice(0, 500)}` })
   }) as TS.LanguageService['applyCodeActionCommand']

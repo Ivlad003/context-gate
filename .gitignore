@@ -12,3 +12,8 @@ editors/vscode/node_modules/
 editors/vscode/dist/
 editors/vscode/*.vsix
 packages/lsp/dist/
+editors/vscode/cli/
+editors/vscode/schema/
+editors/vscode/.vscode-test/
+**/.claude/prompt/.types/jsx/
+editors/vscode/LICENSE

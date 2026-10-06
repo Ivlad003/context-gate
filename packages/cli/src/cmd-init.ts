@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import type { Diagnostic, ProfileConfig } from '../../core/src/types.ts'
 import { loadConfig, migrateConfig } from '../../core/src/config.ts'
 import { ensureGitignore, readText, writeJson, writeText } from './util.ts'
+import { writeEditorTypes } from './editor-types.ts'
 
 export const GITIGNORE_LINES = ['.claude/prompt/.compiled/', '.claude/prompt/.trace/', '.claude/gate.debug.log', '.claude/gate.log.jsonl', '.claude/gate.index.json']
 
@@ -15,7 +16,7 @@ export function gitignoreLines(cfg: { prompt?: { dir?: string; commitCompiled?: 
   const dir = (cfg.prompt?.dir ?? '.claude/prompt').replace(/^\.\//, '').replace(/\/+$/, '')
   return [
     ...(cfg.prompt?.commitCompiled ? [] : [`${dir}/.compiled/`]),
-    `${dir}/.trace/`, '.claude/gate.debug.log', '.claude/gate.log.jsonl', '.claude/gate.index.json',
+    `${dir}/.trace/`, '.claude/gate.debug.log', '.claude/gate.log.jsonl', '.claude/gate.index.json', `${dir}/.types/jsx/`,
   ]
 }
 
@@ -104,6 +105,9 @@ export function initCommand(root: string, o: { force?: boolean; dryRun?: boolean
   const added = ensureGitignore(root, gitignoreLines(cfg))
   const removed = cfg.prompt?.commitCompiled ? removeGitignoreLines(root, gitignoreLines({ ...cfg, prompt: { ...cfg.prompt, commitCompiled: false } }).slice(0, 1)) : []
   const lines = ['створено .claude/gate.json (classify.mode: shadow — нічого не фільтрується, /gate why показує пропозиції)']
+  const types = writeEditorTypes(root, cfg.prompt?.dir ?? '.claude/prompt')
+  if (types.written.length) lines.push(`типи для редактора (TSX без npm): ${types.written.join(', ')}`)
+  lines.push(...types.notes)
   if (cfg.prompt?.commitCompiled) lines.push(`prompt.commitCompiled: true — ${cfg.prompt.dir ?? '.claude/prompt'}/.compiled/ комітиться разом із джерелами (Р3)${removed.length ? '; рядок прибрано з .gitignore' : ''}`)
   lines.push(guess.notes.length ? `профілі: ${guess.notes.join('; ')}` : 'профілі не вгадано: структура без apps/, packages/, docs/ — додай їх у profiles вручну')
   if (added.length) lines.push(`.gitignore: + ${added.join(', ')}`)

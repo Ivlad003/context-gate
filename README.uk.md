@@ -207,6 +207,27 @@ CI падає, якщо з'являється виклик `$` поза [`script
 
 Shiftwork-runner читає той самий `gate.json` і той самий журнал ([docs/SHIFTWORK.md](docs/SHIFTWORK.md)).
 
+## Редактор (VS Code)
+
+Розширенню з `editors/vscode` нічого не потрібно з npm: воно містить CLI (`cli/dist/cli.js`, запускається
+Node-рантаймом самого VS Code) з `esbuild`, tsserver-плагін і схему `gate.json`.
+
+```bash
+npm run package:vscode     # → editors/vscode/context-gate-vscode-0.1.0.vsix
+code --install-extension editors/vscode/context-gate-vscode-0.1.0.vsix
+```
+
+- **Збірка при збереженні** `.claude/prompt/**`, імпортованих файлів і `.claude/gate.json`; діагностики збірки (G*)
+  у Problems, рядок стану `context-gate: ✓ built` / `⚠ N` (клік — журнал); команди *Build prompts*,
+  *Build current file*, *Health*, *Preview section*.
+- **Підказки TSX:** `init` і `build` пишуть `.claude/prompt/tsconfig.json` і `.types/jsx/` (декларації
+  `@context-gate/jsx`), тож компоненти, пропси, `arg.*` і `ctx` резолвляться без пакета; tsserver-плагін додає
+  діагностики G*, completion і hover у рядкових виразах (і живий G160 для TSX рівня 2).
+- **Markdown-секції:** діагностики, completion після `@` і всередині `{{ }}`, hover, outline, підсвітка.
+- **`gate.json`** перевіряється схемою; **`.mdc`**-правила — G010–G015 і hover з типом правила.
+
+Деталі, налаштування й обмеження: [docs/EDITOR.md](docs/EDITOR.md).
+
 ## Модель безпеки
 
 - **Mod не ізольований** і працює з правами користувача, тож код із репозиторію запускається лише після
@@ -235,11 +256,13 @@ npm run build            # dist/cli.js (комітиться: його запу�
 npm run build:hooks-adapter
 npm run typecheck:mod && npm run test:mod   # потрібен claude CLI
 npm run validate:mod     # claude plugin validate --strict .
+npm run build:jsx-types  # dist/jsx-types (комітиться: копіюється в репозиторії як .claude/prompt/.types/jsx/)
+npm run test:vscode      # розширення в справжньому VS Code, ізольований профіль (docs/EDITOR.md)
 scripts/validate-calls.sh                   # виклики $ проти scripts/expected-calls.txt
 scripts/e2e.sh           # один хід claude -p на examples/reference із probe/context-gate-probe
 ```
 
-`dist/cli.js` і `dist/hooks-adapter.js` комітяться; CI перезбирає їх і падає на diff. Живий probe відкритих питань
+`dist/cli.js`, `dist/hooks-adapter.js` і `dist/jsx-types/` комітяться; CI перезбирає їх і падає на diff. Живий probe відкритих питань
 mods API — [`probe/`](probe/README.md); статичні результати — [`docs/PROBE.md`](docs/PROBE.md). Bench —
 [`bench/`](bench/README.md).
 

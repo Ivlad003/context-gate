@@ -1,0 +1,13 @@
+{
+  "context-gate section": {
+    "prefix": "cg-section",
+    "description": "context-gate: Markdown-секція з frontmatter",
+    "body": ["---", "id: ${1:section-id}", "scope: ${2|profile,static,volatile|}", "when: ${3:gate.profile == \"backend\"}", "budget: ${4:2000}", "---", "$0"]
+  },
+  "@if": { "prefix": "@if", "description": "context-gate: умова", "body": ["@if ${1:умова}", "$2", "@else", "$3", "@end"] },
+  "@each": { "prefix": "@each", "description": "context-gate: цикл", "body": ["@each ${1:r} in ${2:cursor.always}", "- {{ ${1:r}.${3:body} }}", "@end"] },
+  "@tier": { "prefix": "@tier", "description": "context-gate: блок для tier", "body": ["@tier ${1:quick}", "$0", "@end"] },
+  "@run": { "prefix": "@run", "description": "context-gate: скрипт з кешем", "body": ["@run ${1:bash} cache=${2:5m} as=${3:out}", "${4:git log --oneline -5}", "@end", "{{ ${3:out}.stdout }}"] },
+  "@include": { "prefix": "@include", "description": "context-gate: вставити файл", "body": ["@include ${1:docs/file.md} ${2|inline,ref,lazy|}"] },
+  "{{ }}": { "prefix": "{{", "description": "context-gate: вираз", "body": ["{{ ${1:git.branch} }}"] }
+}

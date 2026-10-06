@@ -53,11 +53,11 @@ export function parseRunOutput(stdout: string, stderr = '', exitCode: number | n
   return view
 }
 
-/** Run the CLI and parse its JSON. Never rejects. */
-export function runCli(argv: string[], cwd: string, timeoutMs = 60_000): Promise<RunView & { argv: string[] }> {
+/** Run the CLI and parse its JSON. Never rejects. `env` is merged over `process.env`. */
+export function runCli(argv: string[], cwd: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<RunView & { argv: string[] }> {
   const [bin, ...rest] = argv
   return new Promise((resolveP) => {
-    execFile(bin!, rest, { cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, encoding: 'utf8', shell: process.platform === 'win32' }, (err, stdout, stderr) => {
+    execFile(bin!, rest, { cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, encoding: 'utf8', shell: process.platform === 'win32', ...(env ? { env: { ...process.env, ...env } } : {}) }, (err, stdout, stderr) => {
       const code = err ? ((err as { code?: number | string }).code ?? 1) : 0
       const view = parseRunOutput(stdout ?? '', stderr ?? '', typeof code === 'number' ? code : 1)
       if (err && !view.sections.length && !view.error) view.error = err.message

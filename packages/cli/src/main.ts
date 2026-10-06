@@ -10,6 +10,7 @@ import { explain as explainCode, CODES } from '../../core/src/codes.ts'
 import { parseDuration } from '../../core/src/duration.ts'
 import { PIPE_STAGES, type PipeStage, type PipeStageName } from '../../core/src/gatecmd.ts'
 import { buildPrompts, generateCtxTypes } from './build.ts'
+import { writeEditorTypes } from './editor-types.ts'
 import { bool, helpText, list, parseArgv, str, type FlagSpec, type ParsedArgv } from './argv.ts'
 import { healthCommand, runCommand } from './cmd-run.ts'
 import { formatSync, syncCommand, syncHookMode, syncWatchPaths } from './cmd-sync.ts'
@@ -22,7 +23,7 @@ import { formatPrompt } from './fmt.ts'
 import { buildContext, callScriptTool, loadData, loadRepo, scriptTools, setData, validDataKey } from './context.ts'
 import { readTrust, setTrust, trustState, readUserSettings, userSettingsPath, trustPath, binaryWhitelist, repoCacheDir } from './settings.ts'
 import { withUserSkills } from './host-node.ts'
-import { findRoot, parseJsonl, posix, readStdin, readText, walkFiles, writeText, writeJson } from './util.ts'
+import { ensureGitignore, findRoot, parseJsonl, posix, readStdin, readText, walkFiles, writeText, writeJson } from './util.ts'
 
 export const VERSION: string = (pkg as { version: string }).version
 
@@ -87,12 +88,17 @@ async function doBuild(root: string, p: ParsedArgv, io: Io): Promise<number> {
   const t0 = Date.now()
   const r = await buildPrompts({ root, dir: repo.promptDir, ...(only ? { only } : {}) })
   if (repo.hasConfig) { try { generateCtxTypes({ root, config: repo.config }) } catch { /* types are best effort */ } }
+  // tsconfig.json + .types/jsx/ for editors (the jsx package is not installed in user repos).
+  const types = existsSync(join(root, repo.promptDir)) ? writeEditorTypes(root, repo.promptDir) : { written: [], notes: [] }
+  if (types.written.length && existsSync(join(root, '.gitignore'))) ensureGitignore(root, [`${repo.promptDir.replace(/^\.\//, '').replace(/\/+$/, '')}/.types/jsx/`])
+  r.written.push(...types.written)
   // Р3: a copy of .compiled in ~/.cache/context-gate/<repo>/compiled for `claude -p` without a build.
   for (const cp of r.compiled) if (!cp.diagnostics.some((d) => d.severity === 'error')) { try { writeJson(join(repo.cacheDir, 'compiled', `${cp.id}.json`), cp) } catch { /* best effort */ } }
   const failed = r.diagnostics.some((d) => d.severity === 'error')
   if (bool(p, 'json')) io.out(JSON.stringify({ ok: !failed, compiled: r.compiled.map((c) => c.id), written: r.written, diagnostics: r.diagnostics, ms: Date.now() - t0 }) + '\n')
   else {
     printDiags(io, r.diagnostics)
+    for (const n of types.notes) io.err(n + '\n')
     io.out(r.compiled.length ? `зібрано ${r.compiled.map((c) => c.id).join(', ')} за ${Date.now() - t0} мс${r.written.length ? `; записано:\n  ${r.written.join('\n  ')}` : ''}\n` : `немає *.prompt.tsx у ${repo.promptDir}\n`)
   }
   return failed ? 1 : 0

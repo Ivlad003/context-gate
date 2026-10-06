@@ -208,6 +208,27 @@ CI fails when a `$` call outside [`scripts/expected-calls.txt`](scripts/expected
 
 The shiftwork runner reads the same `gate.json` and the same journal ([docs/SHIFTWORK.md](docs/SHIFTWORK.md)).
 
+## Editor (VS Code)
+
+The extension in `editors/vscode` needs nothing from npm: it ships the CLI (`cli/dist/cli.js`, run by VS Code's
+own Node runtime) with `esbuild`, the tsserver plugin and the `gate.json` schema.
+
+```bash
+npm run package:vscode     # → editors/vscode/context-gate-vscode-0.1.0.vsix
+code --install-extension editors/vscode/context-gate-vscode-0.1.0.vsix
+```
+
+- **Build on save** of `.claude/prompt/**`, imported files and `.claude/gate.json`; build diagnostics (G*) in
+  Problems, status bar `context-gate: ✓ built` / `⚠ N` (click: log); commands *Build prompts*, *Build current file*,
+  *Health*, *Preview section*.
+- **TSX hints:** `init` and `build` write `.claude/prompt/tsconfig.json` and `.types/jsx/` (declarations of
+  `@context-gate/jsx`), so components, props, `arg.*` and `ctx` resolve without the package; the tsserver plugin adds
+  G* diagnostics, completion and hover inside expression strings (and live G160 for TSX level 2).
+- **Markdown sections:** diagnostics, completion after `@` and inside `{{ }}`, hover, outline, highlighting.
+- **`gate.json`** validated against the schema; **`.mdc`** rules: G010–G015 and rule-type hover.
+
+Details, settings and limits: [docs/EDITOR.md](docs/EDITOR.md).
+
 ## Security model
 
 - **The mod is not sandboxed** and runs with the user's rights, so code from a repository runs only after
@@ -236,11 +257,13 @@ npm run build            # dist/cli.js (committed: the installed plugin runs it)
 npm run build:hooks-adapter
 npm run typecheck:mod && npm run test:mod   # needs the claude CLI
 npm run validate:mod     # claude plugin validate --strict .
+npm run build:jsx-types  # dist/jsx-types (committed: copied into user repos as .claude/prompt/.types/jsx/)
+npm run test:vscode      # the extension in a real VS Code, isolated profile (docs/EDITOR.md)
 scripts/validate-calls.sh                   # $ calls vs scripts/expected-calls.txt
 scripts/e2e.sh           # one claude -p turn on examples/reference with probe/context-gate-probe
 ```
 
-`dist/cli.js` and `dist/hooks-adapter.js` are committed; CI rebuilds them and fails on a diff. The live API probe
+`dist/cli.js`, `dist/hooks-adapter.js` and `dist/jsx-types/` are committed; CI rebuilds them and fails on a diff. The live API probe
 for the open mods-API questions is [`probe/`](probe/README.md); the static results are in
 [`docs/PROBE.md`](docs/PROBE.md). Bench: [`bench/`](bench/README.md).
 

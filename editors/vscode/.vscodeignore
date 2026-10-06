@@ -1,4 +1,7 @@
 src/**
 scripts/**
+test/**
 tsconfig.json
-!node_modules/@context-gate/**
+**/*.map
+node_modules/.package-lock.json
+node_modules/esbuild/bin/**

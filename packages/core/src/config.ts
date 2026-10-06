@@ -35,6 +35,9 @@ const str: S = { type: 'string' }
 const bool: S = { type: 'boolean' }
 const strArr: S = { type: 'array', items: { type: 'string' } }
 const pct: S = { type: 'number', minimum: 0, maximum: 100 }
+/** `5m`, `1h30m`, `500ms`, `250` (ms). Not JSON Schema `format: "duration"` (ISO 8601): editors would reject `5m`.
+ * `pattern` is for editors; `x-duration` makes `checkSchema` run `parseDuration` (G307). */
+const duration: S = { type: 'string', pattern: '^\\s*(\\d+(\\.\\d+)?|(\\d+(\\.\\d+)?\\s*([mM][sS]|[sSmMhHdDwW])\\s*)+)$', 'x-duration': true, description: 'Тривалість: 5m, 1h30m, 10s, 500ms.' }
 const tierRef: S = { type: 'string', description: 'Tier name (key of `tiers`).' }
 const budgetPct: S = { type: 'object', additionalProperties: false, properties: { softContextPct: pct, hardContextPct: pct } }
 const onExceedAction: S = {
@@ -57,7 +60,7 @@ const thresholds: S = {
 const providerRef: S = {
   anyOf: [
     { enum: ['builtin', 'jev'] },
-    { type: 'object', additionalProperties: false, required: ['kind', 'command'], properties: { kind: { enum: ['cli'] }, command: strArr, timeout: { type: 'string', format: 'duration' } } },
+    { type: 'object', additionalProperties: false, required: ['kind', 'command'], properties: { kind: { enum: ['cli'] }, command: strArr, timeout: duration } },
   ],
 }
 const groupMap: S = { type: 'object', additionalProperties: strArr, description: 'Group name → globs.' }
@@ -167,7 +170,7 @@ export const gateJsonSchema = {
           kind: { enum: ['cli', 'file', 'mcp', 'module'] }, builtin: bool, command: strArr,
           functions: { anyOf: [strArr, { type: 'object', additionalProperties: strArr }] },
           path: str, pick: strArr, tool: str, args: { type: 'object' },
-          cache: { type: 'string', format: 'duration' }, onError: { enum: ['unverified', 'skip', 'fail'] },
+          cache: duration, onError: { enum: ['unverified', 'skip', 'fail'] },
           okExitCodes: { type: 'array', items: { type: 'integer' }, description: 'cli: exit codes that count as success (default [0]).' },
           parseOnError: { type: 'boolean', description: 'cli: another exit code with JSON on stdout still yields data (eslint -f json exits 1).' },
           schema: {}, exposes: strArr,
@@ -178,7 +181,7 @@ export const gateJsonSchema = {
       type: 'object',
       additionalProperties: {
         type: 'object', additionalProperties: false, required: ['command'],
-        properties: { command: strArr, stdin: str, timeout: { type: 'string', format: 'duration' }, env: { type: 'object', additionalProperties: str }, callTemplate: strArr },
+        properties: { command: strArr, stdin: str, timeout: duration, env: { type: 'object', additionalProperties: str }, callTemplate: strArr },
       },
     },
     ruleSources: { type: 'array', items: itemSource, description: 'Legacy (G310): use itemSources.' },
@@ -199,7 +202,7 @@ export const gateJsonSchema = {
     },
     prompt: {
       type: 'object', additionalProperties: false,
-      properties: { dir: str, runCacheDefault: { type: 'string', format: 'duration' }, build: { enum: ['auto', 'never'] }, commitCompiled: bool, persist: bool, packages: { ...strArr, description: 'Prompt library packages whose exported skills `build` builds.' }, transform: { enum: ['level1', 'level2'], description: 'TSX level 2: native TS expressions in runtime props (Р1).' }, skillBody: { enum: ['live', 'static', 'both'], description: 'SKILL.md body: live render line, pre-rendered static body, or both (Р6).' } },
+      properties: { dir: str, runCacheDefault: duration, build: { enum: ['auto', 'never'] }, commitCompiled: bool, persist: bool, packages: { ...strArr, description: 'Prompt library packages whose exported skills `build` builds.' }, transform: { enum: ['level1', 'level2'], description: 'TSX level 2: native TS expressions in runtime props (Р1).' }, skillBody: { enum: ['live', 'static', 'both'], description: 'SKILL.md body: live render line, pre-rendered static body, or both (Р6).' } },
     },
     health: { type: 'object', additionalProperties: { type: 'number' }, description: 'Code (H001…) → threshold.' },
     debug: bool,
@@ -253,7 +256,7 @@ function checkSchema(schema: S, v: unknown, path: string, out: Diagnostic[]): vo
     if (typeof schema.minimum === 'number' && v < schema.minimum) out.push(diag('G309', `${path}: ${v} < ${schema.minimum}`))
     if (typeof schema.maximum === 'number' && v > schema.maximum) out.push(diag('G309', `${path}: ${v} > ${schema.maximum}`))
   }
-  if (typeof v === 'string' && schema.format === 'duration' && parseDuration(v) === undefined) {
+  if (typeof v === 'string' && schema['x-duration'] === true && parseDuration(v) === undefined) {
     out.push(diag('G307', `${path}: невірна тривалість ${JSON.stringify(v)}`))
   }
   if (Array.isArray(v) && schema.items) {
