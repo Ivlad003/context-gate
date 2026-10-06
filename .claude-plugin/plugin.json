@@ -1,0 +1,51 @@
+{
+  "name": "context-gate",
+  "version": "0.1.0",
+  "description": "Runtime and DSL for Claude Code context: Cursor .mdc rules, skill-gate profiles, TSX prompt sections",
+  "author": {
+    "name": "kosmodev"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "profile": {
+      "type": "string",
+      "title": "Profile",
+      "description": "Fixed gate profile for this session (as /gate <profile>); empty means automatic",
+      "default": ""
+    },
+    "mode": {
+      "type": "string",
+      "title": "Classifier mode",
+      "description": "shadow only logs the classifier's proposal, auto applies it",
+      "options": [
+        "shadow",
+        "auto"
+      ],
+      "default": "shadow"
+    },
+    "trustBuild": {
+      "type": "string",
+      "title": "Trust repository code",
+      "description": "Whether repo-defined builds, scripts and MCP calls may run: ask once per repo, always, or never",
+      "options": [
+        "ask",
+        "always",
+        "never"
+      ],
+      "default": "ask"
+    },
+    "allowScripts": {
+      "type": "boolean",
+      "title": "Allow scripts",
+      "description": "Allow Run/Call executors and cli providers from trusted repositories",
+      "default": false
+    },
+    "brief": {
+      "type": "boolean",
+      "title": "Task brief",
+      "description": "Write a task brief with a strong model for weaker tiers",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.claude/prompt/.compiled/
+.claude/gate.debug.log
+.claude-plugin/types/
+hooks/.types/

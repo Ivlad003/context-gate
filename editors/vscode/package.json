@@ -1,0 +1,42 @@
+{
+  "name": "context-gate-vscode",
+  "displayName": "context-gate",
+  "description": "Prompt DSL of context-gate: G* diagnostics, completion and hover in expressions (tsserver plugin), live preview of sections",
+  "version": "0.1.0",
+  "publisher": "context-gate",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Programming Languages", "Linters"],
+  "main": "./dist/extension.cjs",
+  "activationEvents": ["workspaceContains:.claude/gate.json", "workspaceContains:.claude/prompt", "onLanguage:typescriptreact", "onLanguage:markdown"],
+  "contributes": {
+    "typescriptServerPlugins": [
+      { "name": "@context-gate/lsp", "enableForWorkspaceTypeScriptVersions": true }
+    ],
+    "commands": [
+      { "command": "contextGate.preview", "title": "context-gate: Preview section" },
+      { "command": "contextGate.quickVariant", "title": "context-gate: згенерувати quick-варіант секції" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "contextGate.preview", "when": "resourcePath =~ /\\.claude[\\\\/]prompt[\\\\/]/", "group": "navigation" }
+      ]
+    },
+    "configuration": {
+      "title": "context-gate",
+      "properties": {
+        "contextGate.cliPath": {
+          "type": "string",
+          "default": "npx context-gate",
+          "description": "Команда CLI context-gate (напр. `node dist/cli.js` у репозиторії плагіна)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "package": "node scripts/build.mjs && npx @vscode/vsce package --no-dependencies"
+  }
+}

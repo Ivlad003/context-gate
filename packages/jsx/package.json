@@ -1,0 +1,13 @@
+{
+  "name": "@context-gate/jsx",
+  "version": "0.1.0",
+  "description": "TSX components that compile context-gate prompts into the shared AST (build time only, no React)",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./jsx-runtime": "./src/jsx-runtime.ts",
+    "./jsx-dev-runtime": "./src/jsx-runtime.ts",
+    "./compile": "./src/compile.ts"
+  }
+}

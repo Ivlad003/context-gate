@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@context-gate/jsx",
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "paths": { "@context-gate/jsx": ["./packages/jsx/src/index.ts"], "@context-gate/jsx/jsx-runtime": ["./packages/jsx/src/jsx-runtime.ts"] }
+  },
+  "include": [
+    "packages/**/*.ts",
+    "test/**/*.ts",
+    "examples/basic/.claude/prompt/*.tsx",
+    "examples/basic/.claude/prompt/shared/*.tsx",
+    "examples/basic/.claude/prompt/.types/ctx.d.ts",
+    "examples/skills/*.tsx"
+  ]
+}

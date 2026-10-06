@@ -1,0 +1,47 @@
+{
+  "skillGroups": {
+    "core":     ["tdd", "diagnosing-bugs"],
+    "frontend": ["react-*", "tailwind", "storybook"],
+    "backend":  ["nestjs", "prisma", "api-design"],
+    "git":      ["git-conventions", "resolving-merge-conflicts"],
+    "docs":     ["writing-for-agents"]
+  },
+  "mcpGroups": {
+    "frontend": ["figma", "playwright"],
+    "backend":  ["postgres"],
+    "always":   ["github"]
+  },
+  "tiers": {
+    "premium":  { "skills": ["core"] },
+    "standard": { "skills": ["core", "git"] },
+    "quick":    { "skills": ["core", "git", "docs"], "preload": ["project-conventions"] }
+  },
+  "models": { "claude-opus-*": "premium", "claude-sonnet-*": "standard", "claude-haiku-*": "quick" },
+  "profiles": {
+    "frontend": { "skills": ["frontend"], "mcp": ["frontend", "always"], "agents": ["ui-reviewer"],
+                  "when": { "paths": ["apps/web/**", "**/*.tsx"], "branch": "^feat/ui" } },
+    "backend":  { "skills": ["backend"], "mcp": ["backend", "always"],
+                  "when": { "paths": ["apps/api/**", "**/*.service.ts"] } },
+    "git":      { "skills": ["git"], "mcp": ["always"], "agents": [] },
+    "docs":     { "skills": ["docs"], "mcp": [] }
+  },
+  "classify": { "mode": "shadow", "model": "haiku", "minConfidence": 0.7, "recheckOn": ["/gate new", "compact"] },
+  "budgets": {
+    "default": { "softContextPct": 70, "hardContextPct": 85 },
+    "tiers":   { "quick": { "softContextPct": 55, "hardContextPct": 70 } }
+  },
+  "onExceed": {
+    "softContextPct": { "do": "section", "section": "budget-warning" },
+    "hardContextPct": { "do": "notice", "text": "Контекст {pct}%: запусти /compact або /handoff" }
+  },
+  "escalation": { "order": ["quick", "standard", "premium"], "after": { "verifyFailed": 2, "stallTurns": 6 } },
+  "brief": { "enabled": true, "model": "opus", "maxChars": 2000, "tiers": ["quick", "standard"] },
+  "providers": { "git": { "kind": "module", "builtin": true }, "fs": { "kind": "module", "builtin": true } },
+  "ruleSources": [ { "kind": "cursor-mdc", "dir": ".cursor/rules" } ],
+  "gates": [
+    { "name": "read-before-write", "on": "write", "builtin": true, "tiers": ["quick", "standard"] },
+    { "name": "tests", "on": "commit", "run": ["pnpm", "test"], "pass": "exitCode == 0" }
+  ],
+  "cursorRules": { "enabled": true, "nested": true, "maxCharsPerInjection": 30000 },
+  "prompt": { "dir": ".claude/prompt", "runCacheDefault": "5m" }
+}

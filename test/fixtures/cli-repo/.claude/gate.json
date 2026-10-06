@@ -1,0 +1,20 @@
+{
+  "groups": {
+    "core": ["skill:tdd"],
+    "frontend": ["skill:react-*", "rule:react", "tool:mcp__figma__*"],
+    "backend": ["skill:nestjs", "rule:api"]
+  },
+  "tiers": { "premium": { "groups": ["core"] }, "standard": { "groups": ["core"] }, "quick": { "groups": ["core"] } },
+  "models": { "*opus*": "premium", "*sonnet*": "standard", "*haiku*": "quick" },
+  "profiles": {
+    "frontend": { "groups": ["frontend"], "when": { "paths": ["apps/web/**"] } },
+    "backend": { "groups": ["backend"], "when": { "paths": ["apps/api/**"] } }
+  },
+  "classify": { "mode": "shadow" },
+  "providers": {
+    "pkg": { "kind": "file", "path": "package.json", "pick": ["name", "scripts"] },
+    "info": { "kind": "cli", "command": ["node", "scripts/info.mjs"], "cache": "1m" },
+    "prs": { "kind": "mcp", "tool": "mcp__github__list_prs" }
+  },
+  "prompt": { "dir": ".claude/prompt", "runCacheDefault": "5m" }
+}

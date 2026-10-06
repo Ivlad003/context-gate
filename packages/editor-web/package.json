@@ -1,0 +1,13 @@
+{
+  "name": "@context-gate/editor-web",
+  "version": "0.1.0",
+  "description": "Browser editor for context-gate prompts (CodeMirror 6, live preview, expression REPL) on a localhost server",
+  "type": "module",
+  "license": "MIT",
+  "exports": { ".": "./src/server.ts" },
+  "bin": { "context-gate-edit": "dist/editor-web.js" },
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/editor-web.js --external:typescript --banner:js='#!/usr/bin/env node'",
+    "start": "node src/main.ts"
+  }
+}

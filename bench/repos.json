@@ -1,0 +1,6 @@
+{
+  "$comment": "Repos for bench/run.ts. dir is relative to this file's repo root. profile/model choose the gate-on decision; commands may override the CLI argv.",
+  "repos": [
+    { "name": "basic", "dir": "examples/basic", "profile": "frontend", "model": "claude-sonnet-4-6" }
+  ]
+}

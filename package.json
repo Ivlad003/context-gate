@@ -1,0 +1,30 @@
+{
+  "name": "context-gate",
+  "version": "0.1.0",
+  "description": "Runtime and DSL for Claude Code context: Cursor .mdc rules, skill-gate, TSX prompt DSL",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "context-gate": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types 'test/**/*.test.ts'",
+    "build": "esbuild packages/cli/src/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/cli.js --external:esbuild --banner:js='#!/usr/bin/env node'",
+    "build:hooks-adapter": "esbuild packages/hooks-adapter/src/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/hooks-adapter.js --banner:js='#!/usr/bin/env node'",
+    "typecheck": "tsc -p tsconfig.json",
+    "build:editors": "npm --prefix packages/lsp run build && node editors/vscode/scripts/build.mjs",
+    "typecheck:mod": "scripts/sync-mod-types.sh >/dev/null && tsc -p hooks/tsconfig.json",
+    "test:mod": "scripts/plugin-test.sh",
+    "validate:mod": "claude plugin validate --strict ."
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^24.0.0"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "context-gate",
+  "description": "Marketplace for context-gate: Cursor .mdc rules, skill-gate profiles and a TSX prompt DSL for Claude Code",
+  "owner": {
+    "name": "kosmodev"
+  },
+  "plugins": [
+    {
+      "name": "context-gate",
+      "description": "Runtime and DSL for Claude Code context: Cursor .mdc rules, skill-gate profiles, TSX prompt sections",
+      "version": "0.1.0",
+      "author": {
+        "name": "kosmodev"
+      },
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["cursor-rules", "skills", "mcp", "context", "prompt"],
+      "source": "./"
+    }
+  ]
+}

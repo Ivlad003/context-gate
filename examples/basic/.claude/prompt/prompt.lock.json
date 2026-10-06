@@ -1,0 +1,27 @@
+{
+  "compiler": "context-gate@0.1.0",
+  "prompts": {
+    "main": {
+      "entry": ".claude/prompt/main.prompt.tsx",
+      "sourceHash": "71b9944caeb0839e4dcfe47f484aeed5e429435fc9d647d91ee3fbe7284c2e36",
+      "sources": [
+        {
+          "path": ".claude/prompt/main.prompt.tsx",
+          "hash": "5ff38f8ba8c32191368f1c4b22f6440532d39e1492958da9500853078a18eef9"
+        },
+        {
+          "path": ".claude/prompt/data/glossary.json",
+          "hash": "53dd3492759fedb09f2cfd469764e81e6ab1cd0842c239928079ff9005de7847"
+        },
+        {
+          "path": ".claude/prompt/shared/base.prompt.tsx",
+          "hash": "9ecac66aeba4fe37336c3e284c3a7912a14d53e8f2bf8c0e698dac3fc8e9fe3f"
+        },
+        {
+          "path": "CONVENTIONS.md",
+          "hash": "fa276ec1614e68a89fe028008655f26b6d7ca02e1b4772259b2cdd996e41f981"
+        }
+      ]
+    }
+  }
+}

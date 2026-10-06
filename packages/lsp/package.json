@@ -1,0 +1,19 @@
+{
+  "name": "@context-gate/lsp",
+  "version": "0.1.0",
+  "description": "tsserver plugin for context-gate prompts: G* diagnostics, completion and hover in string expressions, sections outline",
+  "type": "module",
+  "license": "MIT",
+  "main": "dist/index.cjs",
+  "exports": {
+    ".": { "require": "./dist/index.cjs", "default": "./dist/index.cjs" },
+    "./src": "./src/index.ts"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/index.cjs --external:typescript --footer:js='module.exports = Object.assign(module.exports.default, module.exports);'"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0"
+  }
+}

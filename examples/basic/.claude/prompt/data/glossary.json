@@ -1,0 +1,7 @@
+{
+  "terms": [
+    { "name": "gate", "type": "core", "text": "рішення, які skills/MCP/правила увімкнені на цей хід" },
+    { "name": "tier", "type": "core", "text": "рівень моделі: premium, standard, quick" },
+    { "name": "section", "type": "prompt", "text": "іменований шматок системного промпту зі scope" }
+  ]
+}

@@ -1,0 +1,750 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://context-gate.dev/context-gate.schema.json",
+  "title": "context-gate .claude/gate.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "groups": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "description": "Unified groups: name → kind-prefixed globs (`skill:react-*`, `tool:mcp__figma__*`, `agent:ui-reviewer`, `rule:api-*`)."
+    },
+    "skillGroups": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "description": "Legacy (G310): group → skill name globs."
+    },
+    "mcpGroups": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "description": "Legacy (G310): group → MCP server name globs."
+    },
+    "tiers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Legacy (G310)."
+          },
+          "preload": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Tier name (key of `tiers`)."
+      },
+      "description": "Model id glob → tier."
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mcp": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "when": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "branch": {
+                "type": "string"
+              },
+              "expr": {
+                "type": "string"
+              },
+              "ticketType": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "classify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "shadow",
+            "auto"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "minConfidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "recheckOn": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider": {
+          "type": "string"
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "softContextPct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "hardContextPct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          }
+        },
+        "tiers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "softContextPct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "hardContextPct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        }
+      }
+    },
+    "onExceed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "softContextPct": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "do",
+                "section"
+              ],
+              "properties": {
+                "do": {
+                  "enum": [
+                    "section"
+                  ]
+                },
+                "section": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "do",
+                "text"
+              ],
+              "properties": {
+                "do": {
+                  "enum": [
+                    "notice"
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "do"
+              ],
+              "properties": {
+                "do": {
+                  "enum": [
+                    "compact"
+                  ]
+                },
+                "instructions": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "hardContextPct": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "do",
+                "section"
+              ],
+              "properties": {
+                "do": {
+                  "enum": [
+                    "section"
+                  ]
+                },
+                "section": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "do",
+                "text"
+              ],
+              "properties": {
+                "do": {
+                  "enum": [
+                    "notice"
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "do"
+              ],
+              "properties": {
+                "do": {
+                  "enum": [
+                    "compact"
+                  ]
+                },
+                "instructions": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order",
+        "after"
+      ],
+      "properties": {
+        "order": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Tier name (key of `tiers`)."
+          }
+        },
+        "after": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "verifyFailed": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "stallTurns": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "brief": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "maxChars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tiers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Tier name (key of `tiers`)."
+          }
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "cli",
+              "file",
+              "mcp",
+              "module"
+            ]
+          },
+          "builtin": {
+            "type": "boolean"
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "functions": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "pick": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tool": {
+            "type": "string"
+          },
+          "args": {
+            "type": "object"
+          },
+          "cache": {
+            "type": "string",
+            "format": "duration"
+          },
+          "onError": {
+            "enum": [
+              "unverified",
+              "skip",
+              "fail"
+            ]
+          },
+          "schema": {},
+          "exposes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "executors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stdin": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "string",
+            "format": "duration"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "callTemplate": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "ruleSources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "claude-skills",
+              "claude-tools",
+              "claude-agents",
+              "cursor-mdc",
+              "markdown-dir",
+              "prompt-dir",
+              "provider"
+            ]
+          },
+          "dir": {
+            "type": "string"
+          },
+          "match": {
+            "type": "string"
+          },
+          "as": {
+            "enum": [
+              "skill",
+              "tool",
+              "agent",
+              "rule",
+              "section",
+              "datum",
+              "always"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "pick": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "nested": {
+            "type": "boolean"
+          },
+          "frontmatter": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Legacy (G310): use itemSources."
+    },
+    "itemSources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "claude-skills",
+              "claude-tools",
+              "claude-agents",
+              "cursor-mdc",
+              "markdown-dir",
+              "prompt-dir",
+              "provider"
+            ]
+          },
+          "dir": {
+            "type": "string"
+          },
+          "match": {
+            "type": "string"
+          },
+          "as": {
+            "enum": [
+              "skill",
+              "tool",
+              "agent",
+              "rule",
+              "section",
+              "datum",
+              "always"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "pick": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "nested": {
+            "type": "boolean"
+          },
+          "frontmatter": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "on"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "on": {
+            "enum": [
+              "write",
+              "commit",
+              "turn",
+              "prompt"
+            ]
+          },
+          "builtin": {
+            "type": "boolean"
+          },
+          "tiers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Tier name (key of `tiers`)."
+            }
+          },
+          "run": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pass": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "onlyNew": {
+            "type": "boolean"
+          },
+          "baseline": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "cursorRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "nested": {
+          "type": "boolean"
+        },
+        "maxCharsPerInjection": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "strictWrite": {
+          "type": "boolean"
+        }
+      }
+    },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "type": "string"
+        },
+        "runCacheDefault": {
+          "type": "string",
+          "format": "duration"
+        },
+        "build": {
+          "enum": [
+            "auto",
+            "never"
+          ]
+        },
+        "commitCompiled": {
+          "type": "boolean"
+        },
+        "persist": {
+          "type": "boolean"
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      },
+      "description": "Code (H001…) → threshold."
+    },
+    "debug": {
+      "type": "boolean"
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "boolean"
+        }
+      }
+    },
+    "env": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

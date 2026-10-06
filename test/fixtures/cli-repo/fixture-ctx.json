@@ -1,0 +1,1 @@
+{ "gate": { "profile": "frontend", "tier": "quick" }, "pkg": { "name": "from-fixture", "scripts": { "test": "vitest" } }, "info": { "owner": "fixture-owner", "services": [] }, "ctx": { "percent": 90 } }
