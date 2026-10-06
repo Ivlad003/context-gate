@@ -16,6 +16,7 @@ import { makeItem, normalizeItems } from '../../core/src/items.ts'
 import { parseDuration } from '../../core/src/duration.ts'
 import { findSnapshot, fromJsonl, type Snapshot } from '../../core/src/journal.ts'
 import { splitFrontmatter } from './build.ts'
+import { markdownProviderValue as markdownValue } from '../../core/src/providers.ts'
 import { assemblePrompts, buildScope, cursorMatch, dataScope, isMarkdownSectionFile, promptSectionDirs, type DataEntry, type MarkdownFile, type PromptSet } from '../../core/src/assemble.ts'
 import { NodeHost, listSkills } from './host-node.ts'
 import { parseToolHeader, parseToolHeaders, type ToolHeader } from '../../core/src/toolheader.ts'
@@ -377,13 +378,6 @@ export function decide(config: GateConfig, items: readonly Item[], flags: GateFl
 }
 
 // ───────────────────────── providers ─────────────────────────
-
-/** Markdown file provider: `{ body, meta, headings }`. */
-function markdownValue(text: string): Value {
-  const { meta, body } = splitFrontmatter(text)
-  const headings = [...body.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((m) => ({ level: m[1]!.length, text: m[2]!.trim() }))
-  return { meta: JSON.parse(JSON.stringify(meta)) as Value, body, headings }
-}
 
 function fill(template: string[], args: Value[], kwargs: Record<string, Value>): string[] {
   let i = 0

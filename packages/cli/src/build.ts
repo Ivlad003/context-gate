@@ -112,38 +112,9 @@ export function promptIdOf(file: string): string {
   return basename(file).replace(/\.prompt\.tsx$/, '')
 }
 
-// ───────────────────────── Markdown frontmatter (text loader) ─────────────────────────
-
-function scalar(v: string): unknown {
-  const s = v.trim()
-  if (s === '') return ''
-  if (s === 'true' || s === 'false') return s === 'true'
-  if (s === 'null' || s === '~') return null
-  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s)
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s.slice(1, -1)
-  if (s.startsWith('[') && s.endsWith(']')) return s.slice(1, -1).split(',').map((x) => scalar(x)).filter((x) => x !== '')
-  return s
-}
-
-/** Splits `---` frontmatter (lenient, no YAML library: `globs: *.ts` must survive). */
-export function splitFrontmatter(raw: string): { meta: Record<string, unknown>; body: string } {
-  const text = raw.replace(/^﻿/, '').replace(/\r\n?/g, '\n')
-  const m = /^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/.exec(text)
-  if (!m) return { meta: {}, body: text }
-  const meta: Record<string, unknown> = {}
-  let lastKey: string | undefined
-  for (const line of m[1]!.split('\n')) {
-    const item = /^\s+-\s+(.*)$/.exec(line) ?? /^-\s+(.*)$/.exec(line)
-    if (item && lastKey) {
-      const cur = meta[lastKey]
-      meta[lastKey] = [...(Array.isArray(cur) ? cur : cur === '' || cur === undefined ? [] : [cur]), scalar(item[1]!)]
-      continue
-    }
-    const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
-    if (kv) { lastKey = kv[1]!; meta[lastKey] = scalar(kv[2]!) }
-  }
-  return { meta, body: text.slice(m[0].length) }
-}
+// Markdown frontmatter (text loader): shared with the mod via core providers.ts.
+import { splitFrontmatter } from '../../core/src/providers.ts'
+export { splitFrontmatter }
 
 // ───────────────────────── esbuild plugin ─────────────────────────
 

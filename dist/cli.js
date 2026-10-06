@@ -3333,6 +3333,98 @@ var init_stale = __esm({
   }
 });
 
+// packages/core/src/providers.ts
+function pickFields(v, pick) {
+  if (!pick?.length || !v || typeof v !== "object" || Array.isArray(v)) return v;
+  const out = {};
+  for (const p of pick) {
+    const parts = p.split(".");
+    let cur = v;
+    for (const k of parts) cur = cur && typeof cur === "object" && !Array.isArray(cur) ? cur[k] : void 0;
+    if (cur === void 0) continue;
+    let o = out;
+    for (const k of parts.slice(0, -1)) o = o[k] ??= {};
+    o[parts[parts.length - 1]] = cur;
+  }
+  return out;
+}
+function parseLoose(stdout) {
+  const t = stdout.trim();
+  if (!t) return null;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return t;
+  }
+}
+function providerResultOk(cfg, exitCode, stdout) {
+  const okCodes = cfg.okExitCodes?.length ? cfg.okExitCodes : [0];
+  if (okCodes.includes(exitCode)) return { ok: true, value: parseLoose(stdout) };
+  if (cfg.parseOnError) {
+    const t = stdout.trim();
+    if (t) {
+      try {
+        return { ok: true, value: JSON.parse(t) };
+      } catch {
+      }
+    }
+    return { ok: false, error: `exit ${exitCode}, stdout \u043D\u0435 \u0454 JSON (parseOnError)` };
+  }
+  return { ok: false, error: `exit ${exitCode}` };
+}
+function fileProviderValue(path, text, pick) {
+  if (/\.json$/i.test(path)) {
+    try {
+      return { value: pickFields(JSON.parse(text), pick) };
+    } catch (e) {
+      return { error: `JSON: ${e.message}` };
+    }
+  }
+  if (/\.mdx?$/i.test(path)) return { markdown: true };
+  return { value: text };
+}
+function scalar(v) {
+  const s = v.trim();
+  if (s === "") return "";
+  if (s === "true" || s === "false") return s === "true";
+  if (s === "null" || s === "~") return null;
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+  if (s.startsWith('"') && s.endsWith('"') || s.startsWith("'") && s.endsWith("'")) return s.slice(1, -1);
+  if (s.startsWith("[") && s.endsWith("]")) return s.slice(1, -1).split(",").map((x) => scalar(x)).filter((x) => x !== "");
+  return s;
+}
+function splitFrontmatter(raw) {
+  const text = raw.replace(/^﻿/, "").replace(/\r\n?/g, "\n");
+  const m = /^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/.exec(text);
+  if (!m) return { meta: {}, body: text };
+  const meta = {};
+  let lastKey;
+  for (const line of m[1].split("\n")) {
+    const item = /^\s+-\s+(.*)$/.exec(line) ?? /^-\s+(.*)$/.exec(line);
+    if (item && lastKey) {
+      const cur = meta[lastKey];
+      meta[lastKey] = [...Array.isArray(cur) ? cur : cur === "" || cur === void 0 ? [] : [cur], scalar(item[1])];
+      continue;
+    }
+    const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
+    if (kv) {
+      lastKey = kv[1];
+      meta[lastKey] = scalar(kv[2]);
+    }
+  }
+  return { meta, body: text.slice(m[0].length) };
+}
+function markdownProviderValue(text) {
+  const { meta, body } = splitFrontmatter(text);
+  const headings = [...body.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((m) => ({ level: m[1].length, text: m[2].trim() }));
+  return { meta: JSON.parse(JSON.stringify(meta)), body, headings };
+}
+var init_providers = __esm({
+  "packages/core/src/providers.ts"() {
+    "use strict";
+  }
+});
+
 // packages/core/src/glob.ts
 function expandBraces(pattern) {
   const open = findOpenBrace(pattern);
@@ -7514,7 +7606,7 @@ function bashArgv(req) {
   }
   return out;
 }
-function parseLoose(s) {
+function parseLoose2(s) {
   const t = s.replace(/\n+$/, "");
   const x = t.trim();
   if (x && /^[{["\-\d]|^(true|false|null)$/.test(x)) {
@@ -7540,7 +7632,7 @@ function parseBashOutput(stdout, calls) {
     const body = rest.join("");
     if (tag === "O") {
       if (calls[i].fn === "__exports__") results.push(body.split(/\s+/).filter(Boolean).sort());
-      else results.push(parseLoose(body));
+      else results.push(parseLoose2(body));
       errors.push(null);
     } else {
       results.push(null);
@@ -8352,62 +8444,6 @@ var init_shims2 = __esm({
   }
 });
 
-// packages/core/src/providers.ts
-function pickFields(v, pick) {
-  if (!pick?.length || !v || typeof v !== "object" || Array.isArray(v)) return v;
-  const out = {};
-  for (const p of pick) {
-    const parts = p.split(".");
-    let cur = v;
-    for (const k of parts) cur = cur && typeof cur === "object" && !Array.isArray(cur) ? cur[k] : void 0;
-    if (cur === void 0) continue;
-    let o = out;
-    for (const k of parts.slice(0, -1)) o = o[k] ??= {};
-    o[parts[parts.length - 1]] = cur;
-  }
-  return out;
-}
-function parseLoose2(stdout) {
-  const t = stdout.trim();
-  if (!t) return null;
-  try {
-    return JSON.parse(t);
-  } catch {
-    return t;
-  }
-}
-function providerResultOk(cfg, exitCode, stdout) {
-  const okCodes = cfg.okExitCodes?.length ? cfg.okExitCodes : [0];
-  if (okCodes.includes(exitCode)) return { ok: true, value: parseLoose2(stdout) };
-  if (cfg.parseOnError) {
-    const t = stdout.trim();
-    if (t) {
-      try {
-        return { ok: true, value: JSON.parse(t) };
-      } catch {
-      }
-    }
-    return { ok: false, error: `exit ${exitCode}, stdout \u043D\u0435 \u0454 JSON (parseOnError)` };
-  }
-  return { ok: false, error: `exit ${exitCode}` };
-}
-function fileProviderValue(path, text, pick) {
-  if (/\.json$/i.test(path)) {
-    try {
-      return { value: pickFields(JSON.parse(text), pick) };
-    } catch (e) {
-      return { error: `JSON: ${e.message}` };
-    }
-  }
-  if (/\.mdx?$/i.test(path)) return { markdown: true };
-  return { value: text };
-}
-var init_providers = __esm({
-  "packages/core/src/providers.ts"() {
-    "use strict";
-  }
-});
-
 // packages/cli/src/context.ts
 var context_exports = {};
 __export(context_exports, {
@@ -8724,11 +8760,6 @@ function decide(config, items, flags, data = {}) {
   const { gate } = decideGate(config, signals, { turn: 0 }, items, { evalExpr: evalExpr2, ...flags.tier ? { tier: flags.tier } : {} });
   return gate;
 }
-function markdownValue(text) {
-  const { meta, body } = splitFrontmatter(text);
-  const headings = [...body.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((m) => ({ level: m[1].length, text: m[2].trim() }));
-  return { meta: JSON.parse(JSON.stringify(meta)), body, headings };
-}
 function fill(template, args, kwargs) {
   let i = 0;
   const str4 = (v) => v === void 0 || v === null ? "" : typeof v === "string" ? v : JSON.stringify(v);
@@ -8896,6 +8927,7 @@ var init_context = __esm({
     init_duration();
     init_journal();
     init_build();
+    init_providers();
     init_assemble();
     init_host_node();
     init_toolheader();
@@ -9023,7 +9055,7 @@ var init_context = __esm({
           if (text === void 0) v = this.fail(name, p, `\u0444\u0430\u0439\u043B ${p.path} \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E`);
           else {
             const f = fileProviderValue(p.path, text, p.pick);
-            v = "markdown" in f ? markdownValue(text) : "error" in f ? this.fail(name, p, f.error) : f.value;
+            v = "markdown" in f ? markdownProviderValue(text) : "error" in f ? this.fail(name, p, f.error) : f.value;
           }
         } else if (p.kind === "cli") v = p.command?.length ? await this.cliRun(name, p, p.command) : null;
         else if (p.kind === "module") v = await this.moduleCall(name, p, "__default__", [], {});
@@ -9099,7 +9131,7 @@ var init_context = __esm({
             this.fail(`scripts.${fn2}`, p, `exit ${r.exitCode}: ${r.stderr.trim().split("\n")[0] ?? ""}`);
             return void 0;
           }
-          return parseLoose2(r.stdout);
+          return parseLoose(r.stdout);
         });
         return v ?? null;
       }
@@ -9129,37 +9161,6 @@ function findEntries(root, dir = DEFAULT_DIR) {
 }
 function promptIdOf(file) {
   return basename4(file).replace(/\.prompt\.tsx$/, "");
-}
-function scalar(v) {
-  const s = v.trim();
-  if (s === "") return "";
-  if (s === "true" || s === "false") return s === "true";
-  if (s === "null" || s === "~") return null;
-  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
-  if (s.startsWith('"') && s.endsWith('"') || s.startsWith("'") && s.endsWith("'")) return s.slice(1, -1);
-  if (s.startsWith("[") && s.endsWith("]")) return s.slice(1, -1).split(",").map((x) => scalar(x)).filter((x) => x !== "");
-  return s;
-}
-function splitFrontmatter(raw) {
-  const text = raw.replace(/^﻿/, "").replace(/\r\n?/g, "\n");
-  const m = /^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/.exec(text);
-  if (!m) return { meta: {}, body: text };
-  const meta = {};
-  let lastKey;
-  for (const line of m[1].split("\n")) {
-    const item = /^\s+-\s+(.*)$/.exec(line) ?? /^-\s+(.*)$/.exec(line);
-    if (item && lastKey) {
-      const cur = meta[lastKey];
-      meta[lastKey] = [...Array.isArray(cur) ? cur : cur === "" || cur === void 0 ? [] : [cur], scalar(item[1])];
-      continue;
-    }
-    const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
-    if (kv) {
-      lastKey = kv[1];
-      meta[lastKey] = scalar(kv[2]);
-    }
-  }
-  return { meta, body: text.slice(m[0].length) };
 }
 function promptPlugin(jsxSrc, notes, root, po = {}) {
   const jsxMap = {
@@ -9860,6 +9861,7 @@ var init_build = __esm({
     init_model();
     init_exprcheck();
     init_stale();
+    init_providers();
     COMPILER = "context-gate@0.1.0";
     MAX_COMPILED_BYTES = 2 * 1024 * 1024;
     SENTINEL = "@@context-gate:compiled@@";

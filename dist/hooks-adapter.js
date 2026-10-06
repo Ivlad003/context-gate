@@ -2911,7 +2911,43 @@ function staticProviderValue(cfg, name, read) {
   const text = read(p.path.replace(/^\.\//, ""));
   if (text === void 0) return void 0;
   const f = fileProviderValue(p.path, text, p.pick);
-  return "value" in f ? f.value : "markdown" in f ? text : void 0;
+  return "value" in f ? f.value : "markdown" in f ? markdownProviderValue(text) : void 0;
+}
+function scalar(v) {
+  const s = v.trim();
+  if (s === "") return "";
+  if (s === "true" || s === "false") return s === "true";
+  if (s === "null" || s === "~") return null;
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+  if (s.startsWith('"') && s.endsWith('"') || s.startsWith("'") && s.endsWith("'")) return s.slice(1, -1);
+  if (s.startsWith("[") && s.endsWith("]")) return s.slice(1, -1).split(",").map((x) => scalar(x)).filter((x) => x !== "");
+  return s;
+}
+function splitFrontmatter(raw) {
+  const text = raw.replace(/^﻿/, "").replace(/\r\n?/g, "\n");
+  const m = /^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/.exec(text);
+  if (!m) return { meta: {}, body: text };
+  const meta = {};
+  let lastKey;
+  for (const line of m[1].split("\n")) {
+    const item = /^\s+-\s+(.*)$/.exec(line) ?? /^-\s+(.*)$/.exec(line);
+    if (item && lastKey) {
+      const cur = meta[lastKey];
+      meta[lastKey] = [...Array.isArray(cur) ? cur : cur === "" || cur === void 0 ? [] : [cur], scalar(item[1])];
+      continue;
+    }
+    const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
+    if (kv) {
+      lastKey = kv[1];
+      meta[lastKey] = scalar(kv[2]);
+    }
+  }
+  return { meta, body: text.slice(m[0].length) };
+}
+function markdownProviderValue(text) {
+  const { meta, body } = splitFrontmatter(text);
+  const headings = [...body.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((m) => ({ level: m[1].length, text: m[2].trim() }));
+  return { meta: JSON.parse(JSON.stringify(meta)), body, headings };
 }
 
 // packages/hooks-adapter/src/shiftwork.ts

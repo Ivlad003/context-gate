@@ -68,3 +68,11 @@ test('examples/providers/eslint: the fake eslint exits 1 with JSON and the secti
     process.env.PATH = path
   }
 })
+
+test('markdownProviderValue: one shape for the CLI, the mod and static adapters', async () => {
+  const { markdownProviderValue, staticProviderValue } = await import('../packages/core/src/providers.ts')
+  const md = '---\ntitle: Рішення\ntags:\n  - api\n  - db\n---\n# ADR 1\ntext\n## Наслідки\n'
+  const want = { meta: { title: 'Рішення', tags: ['api', 'db'] }, body: '# ADR 1\ntext\n## Наслідки\n', headings: [{ level: 1, text: 'ADR 1' }, { level: 2, text: 'Наслідки' }] }
+  assert.deepEqual(markdownProviderValue(md), want)
+  assert.deepEqual(staticProviderValue({ providers: { d: { kind: 'file', path: 'docs/d.md' } } }, 'd', () => md), want)
+})

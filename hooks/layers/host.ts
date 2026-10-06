@@ -11,7 +11,7 @@ import { compileGlob, hasGlobChars } from '../../packages/core/src/glob.ts'
 import { exampleValue, selectExamples } from '../../packages/core/src/examples.ts'
 import { cursorMatch } from '../../packages/core/src/assemble.ts'
 import { parseDuration } from '../../packages/core/src/duration.ts'
-import { fileProviderValue, pickFields, providerResultOk } from '../../packages/core/src/providers.ts'
+import { fileProviderValue, markdownProviderValue, pickFields, providerResultOk } from '../../packages/core/src/providers.ts'
 import { binaryWhitelist } from '../../packages/core/src/config.ts'
 import { DEFAULT_EXECUTORS as CORE_EXECUTORS, executorFor, executorInvocation, executorsOf, parseShimOutput, scriptArgv, scriptFnName, scriptLang, scriptStdin, shimCommand, type ShimCall, type ShimResponse } from '../../packages/core/src/shims.ts'
 import { type Io, OWN_TOOL_PREFIX, type Runtime, debug, hash, insideRoot, join, now } from '../ctx.ts'
@@ -352,7 +352,7 @@ export async function providerData(io: Io, rt: Runtime, host: RenderHostExt & { 
         if (t === undefined) throw new Error(`немає файлу ${p.path}`)
         const f = fileProviderValue(p.path, t, p.pick) // core: .json parsed + dotted `pick`, else the text
         if ('error' in f) throw new Error(f.error)
-        v = 'value' in f ? f.value : t
+        v = 'value' in f ? f.value : markdownProviderValue(t) // Markdown: { meta, body, headings }, as in the CLI
       } else if (p.kind === 'cli' && p.command?.length) {
         if (!host.trusted || !(await allowedBinary(io, rt, p.command))) throw new Error('не довірено')
         const r = await runArgv(io, rt, p.command, { timeoutMs: 10_000 })
