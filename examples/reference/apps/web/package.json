@@ -1,0 +1,7 @@
+{
+  "name": "@acme/web",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": { "test": "vitest run", "storybook": "storybook dev -p 6006" },
+  "dependencies": { "react": "^19.0.0", "react-dom": "^19.0.0" }
+}

@@ -19,6 +19,11 @@ export interface RenderHostExt extends RenderHost {
   provider?(req: ProviderCallRequest): Promise<Value>
   /** Callable paths (`fs.examples`, `scripts.*`); absent → every path goes to `provider`. Anything else → G157. */
   callables?: string[]
+  /**
+   * Content hash of a `use` module (SPEC «Виклик функцій»: «кешується за хешем файлу, імені функції і
+   * аргументів»). Absent → the renderer hashes `readFile(path)` itself; undefined → no hash in the key.
+   */
+  fileHash?(path: string): string | undefined | Promise<string | undefined>
 }
 
 export interface RenderOptionsExt extends RenderOptions {
@@ -30,6 +35,11 @@ export interface RenderOptionsExt extends RenderOptions {
   uses?: Record<string, string>
   /** Default cache duration for @run/@call without `cache=`. */
   runCacheDefault?: string
+  /**
+   * Values masked as `***` in trace and diagnostics (SPEC «Налагодження»: «Секретні змінні з `env` … у
+   * debug-виводі маскуються»). The string values of `scope.env` are always added.
+   */
+  secrets?: string[]
 }
 
 /** Rendered section plus the data it was rendered from that is past its cache window (H006). */
@@ -250,6 +260,8 @@ class Renderer {
   runSpentMs = 0
   lazies = new Map<string, { description: string; ref: string }>()
   staleData = new Set<string>()
+  /** Module path → content hash (null: no hash available), for the persisted `@call` cache key. */
+  moduleHashes = new Map<string, string | null>()
 
   constructor(host: RenderHostExt, opts: RenderOptionsExt, scope: Scope_, uses: Record<string, string>) {
     this.host = host
@@ -394,19 +406,36 @@ class Renderer {
     }
   }
 
+  /** Content hash of a `use` module, once per render (G-34): an edited module never serves stale results. */
+  async moduleHash(module: string): Promise<string | null> {
+    if (this.moduleHashes.has(module)) return this.moduleHashes.get(module)!
+    let h: string | null = null
+    try {
+      if (this.host.fileHash) h = (await this.host.fileHash(module)) ?? null
+      else {
+        const text = await this.host.readFile(module)
+        h = text === undefined ? null : hashString(text)
+      }
+    } catch { h = null }
+    this.moduleHashes.set(module, h)
+    return h
+  }
+
   async execCalls(module: string, list: Extract<Need, { kind: 'call' }>[], remaining: number, spent: number[]): Promise<void> {
-    const pending: { n: Extract<Need, { kind: 'call' }>; entry?: { value: Value; at: number } }[] = []
+    const pending: { n: Extract<Need, { kind: 'call' }>; entry?: { value: Value; at: number }; cacheKey: string }[] = []
+    const mh = this.host.trusted ? await this.moduleHash(module) : null
     for (const n of list) {
       const stub = `[call: ${n.label}, unverified]`
       if (!this.host.trusted) { this.results.set(n.key, { value: stub, status: 'unverified', source: 'stub', detail: 'репозиторій не довірений' }); continue }
-      const entry = await this.cached(n.key)
+      const cacheKey = callCacheKey(n.key, mh)
+      const entry = await this.cached(cacheKey)
       const now = this.host.now()
       if (entry && n.cacheMs !== undefined && now - entry.at <= n.cacheMs) { this.results.set(n.key, { value: entry.value, status: 'ok', source: 'cache' }); continue }
       if (this.host.dryScripts || !this.host.call || remaining <= 0) {
         this.results.set(n.key, entry ? { value: entry.value, status: this.host.dryScripts ? 'ok' : 'unverified', source: 'cache' } : { value: `[call: ${n.label}, ${this.host.dryScripts ? 'dry' : remaining <= 0 ? 'budget' : 'no executor'}]`, status: 'unverified', source: 'stub' })
         continue
       }
-      pending.push({ n, entry })
+      pending.push({ n, entry, cacheKey })
     }
     if (!pending.length || !this.host.call) return
     const t0 = this.host.now()
@@ -416,7 +445,7 @@ class Renderer {
       for (let i = 0; i < pending.length; i++) {
         const v = values[i] ?? null
         this.results.set(pending[i].n.key, { value: v, status: 'ok', source: 'run' })
-        try { await this.host.cacheSet?.(pending[i].n.key, wrapCache(v, 0, JSON.stringify(v).length)) } catch { /* best effort */ }
+        try { await this.host.cacheSet?.(pending[i].cacheKey, wrapCache(v, 0, JSON.stringify(v).length)) } catch { /* best effort */ }
       }
     } catch (e) {
       for (const p of pending) this.results.set(p.n.key, this.failure(p.entry, `виклик ${p.n.label}: ${String((e as Error)?.message ?? e).slice(0, 200)}`))
@@ -486,6 +515,8 @@ class Interp {
   included = true
   reason?: string
   env: EvalEnv
+  /** Characters of constant text (computed at build time, SPEC «Імпорти»: «у `--trace` … `build-time`»). */
+  constChars = 0
 
   constructor(r: Renderer, sec: SectionNode) {
     this.r = r
@@ -648,6 +679,7 @@ class Interp {
     if (truncated) rendered.truncated = true
     if (sec.after) rendered.after = sec.after
     if (this.included && this.stale.size) rendered.stale = [...this.stale].sort()
+    if (this.included && this.constChars) this.addTrace('section', `константи збірки: ${this.constChars} символів`, { source: 'build-time' })
     this.addTrace('section', `${this.included ? 'увійшла' : 'пропущена'}${this.reason ? ` (${this.reason})` : ''}, ${rendered.tokens} ток.`)
     return {
       rendered, trace: this.trace, diagnostics: this.diags,
@@ -691,7 +723,11 @@ class Interp {
   node(n: Node, frame: Scope_, out: string[]): Signal {
     this.step()
     switch (n.t) {
-      case 'text': this.emitLeaf(n.value, out); return
+      case 'text':
+        this.constChars += n.value.length
+        if (this.tracing && n.value.trim()) this.addTrace('debug', `текст «${n.value.trim().slice(0, 60)}»`, { source: 'build-time' })
+        this.emitLeaf(n.value, out)
+        return
       case 'expr': {
         const v = this.ev(n.expr, frame)
         if (this.tracing) this.addTrace('debug', `{{ ${n.expr} }} = ${JSON.stringify(v).slice(0, 200)}`)
@@ -758,7 +794,8 @@ class Interp {
       }
       case 'fence': {
         const { text, sig } = this.sub(n.children, frame)
-        const head = '```' + (n.lang ?? '') + (n.title ? ` title="${n.title}"` : '')
+        const title = n.title && n.title.includes('{{') ? this.tpl(n.title, frame) : n.title
+        const head = '```' + (n.lang ?? '') + (title ? ` title="${title}"` : '')
         out.push('\n' + head + '\n' + text.replace(/^\n+|\n+$/g, '') + '\n```\n')
         return sig === 'stop' ? sig : undefined
       }
@@ -941,7 +978,7 @@ class Interp {
     switch (n.source) {
       case 'text': {
         const name = n.as ?? 'text'
-        if (n.mode === 'inline') { this.emitLeaf(budgeted(n.text ?? ''), out); return }
+        if (n.mode === 'inline') { this.addTrace('include', `text:${name} inline, ${(n.text ?? '').length} символів`, { source: 'build-time' }); this.emitLeaf(budgeted(n.text ?? ''), out); return }
         if (n.mode === 'lazy') { this.lazy(name, n.description ?? name, `text:${name}`, out); return }
         this.emitLeaf(this.refLine(name, n.description, `text:${name}`), out)
         return
@@ -1020,6 +1057,65 @@ function snapshot(frame: Scope_, root: Scope_): Record<string, Value> {
   const out: Record<string, Value> = {}
   for (const c of chain) for (const [k, v] of Object.entries(c)) out[k] = v as Value
   return out
+}
+
+/** Persisted cache key of a `@call`: the in-render key plus the module content hash (G-34). */
+export function callCacheKey(key: string, moduleHash: string | null | undefined): string {
+  return moduleHash ? `${key}#${moduleHash}` : key
+}
+
+/** Secrets to mask: the string values of `scope.env` (the gate.json `env` whitelist) plus explicit ones. */
+export function secretValues(scope: Scope_, extra: readonly string[] = []): string[] {
+  const out = new Set<string>()
+  const env = (scope as Record<string, Value>).env
+  if (isObj(env)) for (const v of Object.values(env)) if (typeof v === 'string') out.add(v)
+  for (const v of extra) if (typeof v === 'string') out.add(v)
+  // Very short values would mask ordinary words and numbers.
+  return [...out].filter(v => v.length >= MIN_SECRET_LEN).sort((a, b) => b.length - a.length)
+}
+
+const MIN_SECRET_LEN = 4
+export const MASK = '***'
+
+/** Replace every occurrence of a secret value with `***` (longest first). */
+export function maskSecrets(text: string, secrets: readonly string[]): string {
+  let out = text
+  for (const s of secrets) if (s && out.includes(s)) out = out.split(s).join(MASK)
+  return out
+}
+
+// ───────────────────────── debug log (.claude/gate.debug.log) ─────────────────────────
+
+/** SPEC «Налагодження»: `.claude/gate.debug.log` is cut to 1 MB. */
+export const DEBUG_LOG_MAX = 1_000_000
+export const DEBUG_LOG_FILE = '.claude/gate.debug.log'
+
+/**
+ * Lines for the debug log from one render: `@debug`, `@log`, `@assert` trace entries and D001 diagnostics,
+ * each stamped `<iso> <section> <kind>`. Trace is already masked by `renderPrompt`; `secrets` masks again
+ * for callers that build entries by hand. Empty string when there is nothing to log.
+ */
+export function debugLogLines(result: Pick<RenderResult, 'trace' | 'diagnostics'>, at: number, meta: { turn?: number; tier?: string; secrets?: readonly string[] } = {}): string {
+  const iso = new Date(at).toISOString()
+  const head = `${iso}${meta.turn !== undefined ? ` turn=${meta.turn}` : ''}${meta.tier ? ` tier=${meta.tier}` : ''}`
+  const lines: string[] = []
+  for (const t of result.trace) {
+    if (t.kind !== 'debug' && t.kind !== 'log' && t.kind !== 'assert') continue
+    if (t.source === 'build-time') continue
+    lines.push(`${head} ${t.section} ${t.kind}: ${t.detail}`)
+  }
+  for (const d of result.diagnostics) if (/^D/.test(d.code)) lines.push(`${head} ${d.code} ${d.severity}: ${d.message}`)
+  const secrets = meta.secrets ?? []
+  return lines.map(l => maskSecrets(l, secrets).slice(0, DEBUG_VALUE_MAX + 200) + '\n').join('')
+}
+
+/** Append to the log text and keep at most `max` bytes (approx. chars) by dropping whole lines from the head. */
+export function capDebugLog(existing: string, add: string, max = DEBUG_LOG_MAX): string {
+  let text = existing + add
+  if (text.length <= max) return text
+  text = text.slice(text.length - max)
+  const nl = text.indexOf('\n')
+  return nl >= 0 ? text.slice(nl + 1) : text
 }
 
 // ───────────────────────── entry point ─────────────────────────
@@ -1110,6 +1206,11 @@ export async function renderPrompt(prompts: CompiledPrompt[] | SectionNode[], sc
     .join('\n\n')
   const storedEntries: Record<string, Value> = {}
   for (const [k, v] of Object.entries(stored)) storedEntries[k] = dataEnvelope(v, storedMeta[k]?.fetchedAt ?? host.now(), storedMeta[k]?.cache)
+  const secrets = secretValues(scope, opts.secrets)
+  if (secrets.length) {
+    for (const t of trace) t.detail = maskSecrets(t.detail, secrets)
+    for (const d of diagnostics) d.message = maskSecrets(d.message, secrets)
+  }
   return { sections: rendered, text, trace, diagnostics, ms: host.now() - t0, stored, storedEntries }
 }
 

@@ -6,6 +6,7 @@ import type { CompiledPrompt, Value } from '../packages/core/src/types.ts'
 import { renderPrompt, type RenderHostExt } from '../packages/core/src/render.ts'
 import { REPO, cli, copyFixture } from './cli-helpers.ts'
 import { parseRunJson } from '../packages/core/src/runjson.ts'
+import { planThenAct } from '../packages/core/src/assemble.ts'
 
 const basic = join(REPO, 'examples', 'basic')
 
@@ -24,7 +25,8 @@ test('build + run on examples/basic: CLI text equals core renderPrompt over the 
   const dir = join(root, '.claude', 'prompt', '.compiled')
   const compiled = readdirSync(dir).map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as CompiledPrompt).filter((c) => !c.skill).sort((a, c) => a.id.localeCompare(c.id))
   const host: RenderHostExt = { readFile: async (p) => { try { return readFileSync(join(root, p), 'utf8') } catch { return undefined } }, now: () => Date.now(), trusted: false }
-  const direct = await renderPrompt(compiled, res.scope as Record<string, Value>, host, { tier: res.meta.tier, runCacheDefault: '5m' })
+  const builtin = planThenAct(compiled, res.meta.tier) // core builtin section (assemblePrompts adds it below premium)
+  const direct = await renderPrompt(builtin ? [...compiled, builtin] : compiled, res.scope as Record<string, Value>, host, { tier: res.meta.tier, runCacheDefault: '5m' })
   assert.equal(direct.text, res.text)
   // Default output has section markers; --trace appends the table.
   const marked = await cli(root, ['run'])
@@ -46,7 +48,7 @@ test('run --json: trace shape (sections, trace, diagnostics, scope, gate) and .t
   assert.equal(j.meta.source, 'live')
   assert.equal(j.meta.trusted, false)
   assert.ok(Array.isArray(j.health.metrics))
-  assert.deepEqual(j.sections.map((s: { id: string }) => s.id), ['intro', 'workflow', 'data'])
+  assert.deepEqual(j.sections.map((s: { id: string }) => s.id), ['intro', 'plan-then-act', 'workflow', 'data'])
   for (const s of j.sections) for (const k of ['id', 'scope', 'text', 'chars', 'tokens', 'included', 'hash', 'status']) assert.ok(k in s, `section.${k}`)
   for (const t of j.trace) { assert.equal(typeof t.section, 'string'); assert.equal(typeof t.kind, 'string'); assert.equal(typeof t.detail, 'string') }
   for (const k of ['gate', 'git', 'cursor', 'session', 'ctx', 'budgets', 'args', 'data', 'pkg']) assert.ok(k in j.scope, `scope.${k}`)

@@ -173,6 +173,8 @@ export interface ModelInput {
   index?: GateIndex
   ctxDts?: string
   trace?: LastTrace
+  /** Reads a repo-relative file: provider `schema` given as a path (`.schema.json`, `.d.ts`). */
+  readFile?: (path: string) => string | undefined
 }
 
 const keysOf = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : v && typeof v === 'object' ? Object.keys(v) : [])
@@ -192,7 +194,8 @@ export function buildModel(input: ModelInput = {}): CtxModel {
     const doc = typeof p?.description === 'string' ? p.description : `провайдер ${name}`
     const fns = Array.isArray(p?.functions) ? (p.functions as string[]) : p?.functions && typeof p.functions === 'object' ? Object.keys(p.functions) : []
     let shape: Shape
-    if (p?.schema && typeof p.schema === 'object') shape = schemaToShape(p.schema)
+    const schema = resolveSchemaRef(p?.schema, input.readFile)
+    if (schema && typeof schema === 'object') shape = schemaToShape(schema)
     else if (fns.length) shape = obj({}, doc)
     else shape = { k: 'unknown', provider: name, doc }
     if (fns.length && shape.k === 'object') for (const f of fns) shape.props[f] = fn(`${f}(...)`, any())
@@ -264,4 +267,172 @@ export function shapeText(s: Shape, depth = 0): string {
       return `{ ${keys.slice(0, 8).join(', ')}${keys.length > 8 ? ', …' : ''}${s.open ? (keys.length ? ', …' : '…') : ''} }`
     }
   }
+}
+
+// ───────────────────────── schema files (Р4) ─────────────────────────
+
+/** `schema: "x.schema.json"` / `"types/arch.d.ts"` / `"types/arch.d.ts#ArchResult"` → [path, type name]. */
+export function splitSchemaRef(ref: string): { path: string; type?: string } {
+  const i = ref.lastIndexOf('#')
+  return i > 0 ? { path: ref.slice(0, i), type: ref.slice(i + 1) } : { path: ref }
+}
+
+export const isDtsSchema = (ref: string): boolean => /\.d\.[cm]?ts$|\.ts$/.test(splitSchemaRef(ref).path)
+
+/**
+ * A small `.d.ts` reader for provider schemas: `export interface X {…}` / `export type X = …` (object
+ * literals, `T[]`, `Array<T>`, `Record<string, T>`, unions of literals, primitives, references to other
+ * declarations of the same file) → JSON Schema. Picks `typeName`, else the default export, else the first
+ * exported declaration. Returns undefined when nothing usable is found.
+ */
+export function dtsToJsonSchema(text: string, typeName?: string): Record<string, unknown> | undefined {
+  const d = readDts(text, typeName)
+  return d.pick ? typeToSchema(d.decls.get(d.pick)!, d.decls, 0) : undefined
+}
+
+/** Declarations of a `.d.ts` and the type `dtsToJsonSchema` would pick (`'default'` never: the name of the default export). */
+export function readDts(text: string, typeName?: string): { decls: Map<string, string>; pick?: string; isDefault: boolean } {
+  const src = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+  const decls = new Map<string, string>()
+  const order: string[] = []
+  let deflt: string | undefined
+  const declRe = /(export\s+)?(default\s+)?(?:declare\s+)?(interface|type)\s+([A-Za-z_$][\w$]*)\s*(?:<[^>{=]*>)?\s*(?:extends\s+[^{]+)?(=)?/g
+  for (let m = declRe.exec(src); m; m = declRe.exec(src)) {
+    const name = m[4]!
+    let i = declRe.lastIndex
+    let body: string
+    if (m[3] === 'interface') {
+      const open = src.indexOf('{', i)
+      if (open < 0) continue
+      const close = matchBrace(src, open)
+      body = src.slice(open, close + 1)
+      declRe.lastIndex = close + 1
+    } else {
+      // type X = …; up to `;` or a new declaration at depth 0.
+      let d = 0
+      let j = i
+      for (; j < src.length; j++) {
+        const c = src[j]!
+        if ('{[(<'.includes(c)) d++
+        else if ('}])>'.includes(c)) d--
+        if (d > 0) continue
+        if (c === ';') break
+        if (c === '\n' && src.slice(i, j).trim() && !/[|&,:=<({[]\s*$/.test(src.slice(i, j)) && /^\s*(export\b|interface\b|type\b|declare\b|import\b|$)/.test(src.slice(j + 1))) break
+      }
+      body = src.slice(i, j)
+      declRe.lastIndex = j + 1
+    }
+    decls.set(name, body)
+    order.push(name)
+    if (m[2]) deflt = name
+  }
+  const dm = /export\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(src)
+  if (dm && decls.has(dm[1]!)) deflt = dm[1]
+  // Without a name: the default export, else the first exported declaration no other declaration refers to.
+  const exported = order.filter((n) => new RegExp(`export\\s+(?:declare\\s+)?(?:interface|type)\\s+${n}\\b`).test(src))
+  const referenced = (n: string) => order.some((o) => o !== n && new RegExp(`\\b${n}\\b`).test(decls.get(o)!))
+  const pick = typeName ?? deflt ?? exported.find((n) => !referenced(n)) ?? exported[0] ?? order[0]
+  return { decls, ...(pick && decls.has(pick) ? { pick } : {}), isDefault: !typeName && !!deflt && pick === deflt }
+}
+
+function matchBrace(s: string, open: number): number {
+  let d = 0
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === '{') d++
+    else if (s[i] === '}') { d--; if (d === 0) return i }
+  }
+  return s.length - 1
+}
+
+/** Split on `sep` at depth 0 of (), [], {}, <>. */
+function splitDepth(s: string, sep: string): string[] {
+  const out: string[] = []
+  let d = 0
+  let q = ''
+  let cur = ''
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!
+    if (q) { cur += c; if (c === q && s[i - 1] !== '\\') q = ''; continue }
+    if (c === '"' || c === "'" || c === '`') { q = c; cur += c; continue }
+    if ('{[(<'.includes(c)) d++
+    else if ('}])>'.includes(c)) d--
+    if (d === 0 && c === sep) { out.push(cur); cur = ''; continue }
+    cur += c
+  }
+  out.push(cur)
+  return out.map((x) => x.trim()).filter((x, i, a) => x || i < a.length - 1)
+}
+
+function typeToSchema(t0: string, decls: Map<string, string>, depth: number): Record<string, unknown> {
+  const t = t0.trim().replace(/;$/, '').trim()
+  if (depth > 12 || !t) return {}
+  const union = splitDepth(t.replace(/^\|/, ''), '|')
+  if (union.length > 1) {
+    const parts = union.map((u) => typeToSchema(u, decls, depth + 1))
+    const lits = parts.filter((p) => 'const' in p).map((p) => p.const)
+    if (lits.length === parts.length) return { enum: lits }
+    const nonNull = parts.filter((p) => p.type !== 'null')
+    if (nonNull.length === 1) return nonNull[0]!
+    return { anyOf: parts }
+  }
+  const inter = splitDepth(t, '&')
+  if (inter.length > 1) return { allOf: inter.map((u) => typeToSchema(u, decls, depth + 1)) }
+  if (t.startsWith('(') && t.endsWith(')')) return typeToSchema(t.slice(1, -1), decls, depth + 1)
+  if (t.endsWith('[]')) return { type: 'array', items: typeToSchema(t.slice(0, -2), decls, depth + 1) }
+  const gen = /^(?:readonly\s+)?(Array|ReadonlyArray|Record|Partial|Readonly)\s*<([\s\S]*)>$/.exec(t)
+  if (gen) {
+    const args = splitDepth(gen[2]!, ',')
+    if (gen[1] === 'Array' || gen[1] === 'ReadonlyArray') return { type: 'array', items: typeToSchema(args[0] ?? '', decls, depth + 1) }
+    if (gen[1] === 'Record') return { type: 'object', additionalProperties: typeToSchema(args[1] ?? '', decls, depth + 1) }
+    const inner = typeToSchema(args[0] ?? '', decls, depth + 1)
+    if (gen[1] === 'Partial') { const { required: _r, ...rest } = inner; return rest }
+    return inner
+  }
+  if (t.startsWith('readonly ')) return typeToSchema(t.slice(9), decls, depth + 1)
+  if (/^(['"]).*\1$/.test(t)) return { const: t.slice(1, -1) }
+  if (/^-?\d+(\.\d+)?$/.test(t)) return { const: Number(t) }
+  if (t === 'true' || t === 'false') return { const: t === 'true' }
+  switch (t) {
+    case 'string': return { type: 'string' }
+    case 'number': case 'bigint': return { type: 'number' }
+    case 'boolean': return { type: 'boolean' }
+    case 'null': case 'undefined': case 'void': return { type: 'null' }
+    case 'any': case 'unknown': case 'object': return {}
+  }
+  if (t.startsWith('[') && t.endsWith(']')) return { type: 'array', items: {} }
+  if (t.startsWith('{')) {
+    const close = matchBrace(t, 0)
+    const body = t.slice(1, close)
+    const properties: Record<string, unknown> = {}
+    const required: string[] = []
+    let additional: unknown
+    for (const raw of splitDepth(body.replace(/;/g, ','), ',').flatMap((x) => splitDepth(x, '\n'))) {
+      const m = /^(?:readonly\s+)?(?:(["'])(.+?)\1|([A-Za-z_$][\w$-]*))(\?)?\s*:\s*([\s\S]+)$/.exec(raw.trim())
+      if (m) {
+        const key = m[2] ?? m[3]!
+        properties[key] = typeToSchema(m[5]!, decls, depth + 1)
+        if (!m[4]) required.push(key)
+        continue
+      }
+      const idx = /^\[\s*\w+\s*:\s*string\s*\]\s*:\s*([\s\S]+)$/.exec(raw.trim())
+      if (idx) additional = typeToSchema(idx[1]!, decls, depth + 1)
+      const meth = /^([A-Za-z_$][\w$]*)\??\s*\(/.exec(raw.trim())
+      if (meth) properties[meth[1]!] = {}
+    }
+    return { type: 'object', properties, ...(required.length ? { required } : {}), ...(additional !== undefined ? { additionalProperties: additional } : {}) }
+  }
+  const ref = /^([A-Za-z_$][\w$]*)(?:<.*>)?$/.exec(t)
+  if (ref && decls.has(ref[1]!)) return typeToSchema(decls.get(ref[1]!)!, decls, depth + 1)
+  return {}
+}
+
+/** Resolves a provider `schema`: inline object as is, `*.json` parsed, `*.d.ts` read; undefined when unreadable. */
+export function resolveSchemaRef(schema: unknown, readFile?: (path: string) => string | undefined): unknown {
+  if (typeof schema !== 'string') return schema
+  if (!readFile) return undefined
+  const { path, type } = splitSchemaRef(schema)
+  const text = readFile(path)
+  if (text === undefined) return undefined
+  if (isDtsSchema(schema)) return dtsToJsonSchema(text, type)
+  try { return JSON.parse(text) } catch { return undefined }
 }

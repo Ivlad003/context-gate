@@ -1,0 +1,6 @@
+.claude/prompt/.compiled/
+.claude/prompt/.trace/
+.claude/gate.log.jsonl
+.claude/gate.debug.log
+.claude/probe.json
+node_modules/

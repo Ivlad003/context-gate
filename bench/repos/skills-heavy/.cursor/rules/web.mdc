@@ -1,0 +1,4 @@
+---
+globs: web/**/*.tsx
+---
+Компоненти веба — у `web/src/components`, стан — у хуках `web/src/hooks`.

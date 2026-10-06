@@ -1,0 +1,42 @@
+{
+  "$schema": "../../../schema/context-gate.schema.json",
+  "providers": {
+    "eslint": {
+      "kind": "cli",
+      "command": ["sh", "-c", "eslint -f json . || [ $? -eq 1 ]"],
+      "cache": "10m",
+      "onError": "unverified",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["filePath", "messages", "errorCount"],
+          "properties": {
+            "filePath": { "type": "string" },
+            "errorCount": { "type": "integer" },
+            "warningCount": { "type": "integer" },
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["severity", "message"],
+                "properties": {
+                  "ruleId": { "type": ["string", "null"] },
+                  "severity": { "type": "integer", "description": "1 = warning, 2 = error" },
+                  "message": { "type": "string" },
+                  "line": { "type": "integer" },
+                  "column": { "type": "integer" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "gates": [
+    { "name": "lint", "on": "commit", "run": ["eslint", "-f", "json", "{changedPaths}"],
+      "pass": "(result | where(\"errorCount\") | len) == 0",
+      "message": "ESLint: {{ result | where(\"errorCount\") | len }} файл(ів) з помилками; перша: {{ (result | where(\"errorCount\"))[0].filePath }}:{{ (result | where(\"errorCount\"))[0].messages[0].line }} {{ (result | where(\"errorCount\"))[0].messages[0].ruleId }}. Виправ перед комітом." }
+  ]
+}

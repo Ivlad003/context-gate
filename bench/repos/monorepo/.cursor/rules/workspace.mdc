@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+pnpm workspaces + turbo. Залежності між пакетами — через `workspace:*`. Тести: `pnpm -r test`.

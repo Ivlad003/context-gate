@@ -87,3 +87,25 @@ export function parseToolHeader(text: string): { header?: ToolHeader; diagnostic
   const header: ToolHeader = { name, inputSchema, line: nameField.line, ...(fields.description?.value ? { description: fields.description.value } : {}), ...(tiers?.length ? { tiers } : {}) }
   return { header, diagnostics }
 }
+
+/**
+ * Function-level tools (SPEC «Функції як інструменти моделі»): every comment block of a module that holds a
+ * `gate-tool: <fn>` line declares the export `<fn>` a model tool. Blocks are parsed like the leading header.
+ */
+export function parseToolHeaders(text: string): { headers: ToolHeader[]; diagnostics: Diagnostic[] } {
+  const headers: ToolHeader[] = []
+  const diagnostics: Diagnostic[] = []
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  let i = 0
+  while (i < lines.length) {
+    if (!COMMENT.test(lines[i]!) || (i === 0 && lines[i]!.startsWith('#!'))) { i++; continue }
+    const start = i
+    while (i < lines.length && COMMENT.test(lines[i]!) && !(i === 0 && lines[i]!.startsWith('#!'))) i++
+    const block = lines.slice(start, i)
+    if (!block.some((l) => /^\s*(?:#|\/\/|--|;)\s?\s*gate-tool\s*:/.test(l))) continue
+    const r = parseToolHeader(block.join('\n'))
+    for (const d of r.diagnostics) diagnostics.push({ ...d, ...(d.line !== undefined ? { line: d.line + start } : {}) })
+    if (r.header && !headers.some((h) => h.name === r.header!.name)) headers.push({ ...r.header, line: r.header.line + start })
+  }
+  return { headers, diagnostics }
+}

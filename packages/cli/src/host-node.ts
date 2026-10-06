@@ -8,21 +8,14 @@ import type { Diagnostic, ExecutorConfig, GateConfig, Value } from '../../core/s
 import type { ProviderCallRequest, RenderHostExt } from '../../core/src/render.ts'
 import { parseDuration } from '../../core/src/duration.ts'
 import { splitFrontmatter } from './build.ts'
-import { BASH_SHIM, NODE_SHIM, PYTHON_SHIM, bashArgv, parseBashOutput, shimLang, type ShimCall, type ShimResponse } from './shims.ts'
+import { DEFAULT_EXECUTORS, executorFor, executorInvocation, executorsOf as coreExecutorsOf, parseShimOutput, shimCommand, type ShimCall, type ShimResponse } from '../../core/src/shims.ts'
 import { binaryName, binaryWhitelist, readUserSettings, type UserSettings } from './settings.ts'
 import { posix, readJson, readText, runProcess, sha256, writeJson } from './util.ts'
 
-export const DEFAULT_EXECUTORS: Record<string, ExecutorConfig> = {
-  bash: { command: ['bash', '-euo', 'pipefail', '-c', '{code}'], timeout: '10s' },
-  node: { command: ['node', '--input-type=module', '-e', '{code}'], timeout: '10s' },
-  python: { command: ['python3', '-c', '{code}'], timeout: '20s', env: { PYTHONDONTWRITEBYTECODE: '1' } },
-  deno: { command: ['deno', 'run', '--no-prompt', '--allow-read=.', '-'], stdin: '{code}', timeout: '10s' },
-}
-
-const LANG_ALIASES: Record<string, string> = { sh: 'bash', js: 'node', javascript: 'node', ts: 'node', typescript: 'node', py: 'python', python3: 'python' }
+export { DEFAULT_EXECUTORS }
 
 export function executorsOf(config: Partial<GateConfig> | undefined): Record<string, ExecutorConfig> {
-  return { ...DEFAULT_EXECUTORS, ...(config?.executors ?? {}) }
+  return coreExecutorsOf(config)
 }
 
 export interface NodeHostOptions {
@@ -102,8 +95,7 @@ export class NodeHost implements RenderHostExt {
   // ───────────────────────── run ─────────────────────────
 
   async run(req: { lang: string; code: string; stdin: string; timeoutMs: number }): Promise<{ exitCode: number; stdout: string; stderr: string; ms: number }> {
-    const lang = LANG_ALIASES[req.lang] ?? req.lang
-    const ex = this.executors[lang] ?? this.executors[req.lang]
+    const ex = executorFor(this.executors, req.lang)
     if (!ex) {
       this.note({ code: 'G202', severity: 'warning', message: `Виконавця для мови «${req.lang}» немає в executors`, hint: 'додай його в gate.json executors' })
       return { exitCode: 127, stdout: '', stderr: `немає виконавця ${req.lang}`, ms: 0 }
@@ -113,13 +105,12 @@ export class NodeHost implements RenderHostExt {
       this.note({ code: 'G201', severity: 'warning', message: `Бінарник «${bin}» поза білим списком ~/.claude/context-gate.json (allowBinaries)` })
       return { exitCode: 126, stdout: '', stderr: `бінарник ${bin} не дозволено`, ms: 0 }
     }
-    const viaStdin = ex.stdin !== undefined && ex.stdin.includes('{code}')
-    const argv = ex.command.map((a) => a.split('{code}').join(req.code))
+    const inv = executorInvocation(ex, req.code, req.stdin)
     const timeout = Math.min(parseDuration(ex.timeout) ?? 10_000, req.timeoutMs > 0 ? req.timeoutMs : Infinity)
     this.processes++
-    const r = await runProcess(argv, {
+    const r = await runProcess(inv.argv, {
       cwd: this.root,
-      stdin: viaStdin ? ex.stdin!.split('{code}').join(req.code) : req.stdin,
+      stdin: inv.stdin,
       timeoutMs: timeout,
       env: { ...(ex.env ?? {}), CONTEXT_GATE_INPUT: req.stdin, CONTEXT_GATE_ROOT: this.root },
     })
@@ -133,33 +124,16 @@ export class NodeHost implements RenderHostExt {
     const file = this.abs(path)
     const fail = (msg: string): ShimResponse => ({ results: calls.map(() => null), errors: calls.map(() => msg) })
     if (!file || !existsSync(file)) return fail(`модуль ${path} не знайдено`)
-    const lang = shimLang(path)
-    let argv: string[]
-    let stdin = JSON.stringify({ file, calls })
-    if (lang === 'node') argv = ['node', '--input-type=module', '-e', NODE_SHIM]
-    else if (lang === 'python') argv = ['python3', '-c', PYTHON_SHIM]
-    else if (lang === 'bash') { argv = ['bash', '-c', BASH_SHIM, 'cg-shim', ...bashArgv({ file, calls })]; stdin = '' }
-    else {
-      const ext = /\.([\w]+)$/.exec(path)?.[1] ?? ''
-      const ex = Object.entries(this.executors).find(([k, e]) => e.callTemplate && (k === ext || LANG_ALIASES[ext] === k))?.[1]
-      if (!ex?.callTemplate) return fail(`немає shim для ${path} (додай executors.<мова>.callTemplate)`)
-      argv = ex.callTemplate.map((a) => a.split('{file}').join(file))
-    }
+    const cmd = shimCommand(path, file, calls, this.executors)
+    if (!cmd.ok) return fail(cmd.error)
+    const argv = cmd.argv
     if (!this.allowed(argv[0]!)) {
       this.note({ code: 'G201', severity: 'warning', message: `Бінарник «${argv[0]}» поза білим списком ~/.claude/context-gate.json (allowBinaries)` })
       return fail(`бінарник ${argv[0]} не дозволено`)
     }
     this.processes++
-    const r = await runProcess(argv, { cwd: this.root, stdin, timeoutMs })
-    if (lang === 'bash') return parseBashOutput(r.stdout, calls)
-    if (r.exitCode !== 0) return fail(`exit ${r.exitCode}: ${r.stderr.trim().split('\n').slice(-3).join(' ').slice(0, 300)}`)
-    try {
-      const out = JSON.parse(r.stdout.trim().split('\n').pop() ?? '') as ShimResponse | Value[]
-      if (Array.isArray(out)) return { results: out, errors: out.map(() => null) }
-      return out
-    } catch {
-      return fail(`shim повернув не JSON: ${r.stdout.slice(0, 200)}`)
-    }
+    const r = await runProcess(argv, { cwd: this.root, stdin: cmd.stdin, timeoutMs })
+    return parseShimOutput(cmd, r, calls)
   }
 
   async call(req: { path: string; calls: { fn: string; args: Value[]; kwargs?: Record<string, Value> }[] }): Promise<Value[]> {
@@ -195,6 +169,7 @@ export class NodeHost implements RenderHostExt {
 
   /** `call:<module>:…` keys include the module's file hash, so editing the module invalidates its cache. */
   storageKey(key: string): string {
+    if (/#[0-9a-f]+$/.test(key)) return key // core already keyed it by the module hash (render.ts callCacheKey)
     const m = /^call:([^:]+):/.exec(key)
     return m ? `${key}#${this.fileHash(m[1]!)}` : key
   }

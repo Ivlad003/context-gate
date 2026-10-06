@@ -1,0 +1,1 @@
+{ "name": "api-service", "private": true, "scripts": { "start": "node src/server.ts", "test": "node --test", "migrate": "knex migrate:latest" } }

@@ -206,3 +206,51 @@ test('statusLine in shadow: nothing filtered → all/all counts, proposal with ?
   const shadow = { ...rest, profile: undefined, shadow: true, proposed: { profile: profile!, confidence: 0.9 } }
   assert.match(statusLine(shadow), /^gate \(backend\?\) · tier \w+ · skills 3\/3 · mcp (\d+)\/\1 · rules \d+$/)
 })
+
+test('G-35: script tools obey groups like MCP tools; ungrouped ones stay on', () => {
+  const c: GateConfig = mergeDefaults({
+    groups: { api: ['tool:parse_openapi'], core: [] },
+    tiers: { standard: { groups: ['core'] } },
+    models: { '*': 'standard' },
+    profiles: { backend: { groups: ['api'] }, docs: { groups: ['core'] } },
+  })
+  const items = [makeItem('tool', 'parse_openapi', { provenance: { source: 'gate-tool' } }), makeItem('tool', 'free_tool', { provenance: { source: 'gate-tool' } })]
+  const on = decideGate(c, { paths: [], manual: { profile: 'backend', add: [], remove: [] } }, { turn: 0 }, items).gate
+  assert.equal(on.items['tool:parse_openapi'], 'on')
+  const off = decideGate(c, { paths: [], manual: { profile: 'docs', add: [], remove: [] } }, { turn: 0 }, items).gate
+  assert.equal(off.items['tool:parse_openapi'], 'off')
+  assert.equal(off.items['tool:free_tool'], 'on')
+  assert.match(denyText('tool', 'parse_openapi', off, c), /parse_openapi вимкнено профілем docs.*\/gate \+(api|backend)/)
+})
+
+test('G-08: a subagent tier gives its own decision for the same profile (opts.tier)', () => {
+  const s: Signals = { paths: [], manual: { profile: 'frontend', add: [], remove: [] }, agentId: 'a1' }
+  const items = [makeItem('skill', 'tdd'), makeItem('skill', 'writing-for-agents'), makeItem('skill', 'project-conventions')]
+  const main = decideGate(cfg, { ...s, agentId: undefined }, { turn: 0 }, items, { tier: 'premium' }).gate
+  const sub = decideGate(cfg, s, { turn: 0 }, items, { tier: 'quick' }).gate
+  assert.equal(main.items['skill:writing-for-agents'], 'off')
+  assert.equal(sub.items['skill:writing-for-agents'], 'on')
+  assert.equal(sub.items['skill:project-conventions'], 'preload')
+  assert.ok(sub.reason.some((r) => r.startsWith('субагент a1')))
+})
+
+test('G-02: classify/brief provider contract (stdin JSON, stdout parse)', async () => {
+  const { classifyRequest, parseClassify, briefRequest, parseBrief } = await import('../packages/core/src/decide.ts')
+  const req = JSON.parse(classifyRequest(cfg, 'x'.repeat(5000), ['a.ts'], 'claude-haiku-4-5'))
+  assert.equal(req.text.length, 4000)
+  assert.deepEqual(req.profiles.map((p: { name: string }) => p.name).sort(), Object.keys(cfg.profiles).sort())
+  assert.deepEqual(req.paths, ['a.ts'])
+  assert.equal(req.model, 'claude-haiku-4-5')
+  const profiles = Object.keys(cfg.profiles)
+  const cases: [string, unknown][] = [
+    ['{"profile":"frontend","confidence":0.9}', { profile: 'frontend', confidence: 0.9 }],
+    ['log line\n{"profile": "backend", "confidence": "2"}', { profile: 'backend', confidence: 1 }],
+    ['{"profile":"nope","confidence":1}', undefined],
+    ['not json', undefined],
+  ]
+  for (const [out, want] of cases) assert.deepEqual(parseClassify(out, profiles), want, out)
+  assert.deepEqual(JSON.parse(briefRequest('t', 'quick', 100, ['p'])), { text: 't', tier: 'quick', maxChars: 100, paths: ['p'] })
+  assert.equal(parseBrief('{"text":"## Мета\\nx"}', 100), '## Мета\nx')
+  assert.equal(parseBrief('  plain brief  ', 5), 'plain')
+  assert.equal(parseBrief('   ', 5), undefined)
+})

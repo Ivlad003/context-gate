@@ -6,8 +6,9 @@
 
 
 import type { Gate, GateConfig, GateState, Item, ItemDecision, Signals } from '../../packages/core/src/types.ts'
-import { decideGate, denyText, skillOffText } from '../../packages/core/src/decide.ts'
-import { tierForModel } from '../../packages/core/src/config.ts'
+import { briefRequest, classifyRequest, decideGate, denyText, parseBrief, parseClassify, skillOffText } from '../../packages/core/src/decide.ts'
+import { modelForTier } from '../../packages/core/src/config.ts'
+import { parseDuration } from '../../packages/core/src/duration.ts'
 import { extractMentions, extractPromptFlag } from '../../packages/core/src/gatecmd.ts'
 import { makeItem, normalizeItems, parseSkillListing, renderSkillListing, skillListingItems } from '../../packages/core/src/items.ts'
 import { ruleToItem } from '../../packages/core/src/mdc.ts'
@@ -15,29 +16,79 @@ import { evalSource, newBudget, truthy } from '../../packages/core/src/expr.ts'
 import type { ContextGateDecision, ContextGateManual } from '../../types'
 import { hasManual, isApplied, json } from '../state.ts'
 import { type Io, OWN_TOOL_PREFIX, type Runtime, debug, hash, join, now } from '../ctx.ts'
-import { ensureSession } from './config.ts'
+import { ensureSession, modelTier } from './config.ts'
+import { allowedBinary, runArgv } from './host.ts'
+import { trustState } from './trust.ts'
 import { ensureRules, relPath, rulesForPrompt } from './cursor-rules.ts'
 import { journal, pushEntry } from './journal.ts'
 import { refreshStatus } from './ui.ts'
 
 // ───────────────────────── items ─────────────────────────
 
+/** Script tools (`# gate-tool:` in `<prompt>/scripts`) registered by dsl.ts, as items (G-35). */
+function scriptTools(rt: Runtime): { name: string; path: string; description: string; tiers?: string[] }[] {
+  const out: { name: string; path: string; description: string; tiers?: string[] }[] = []
+  for (const t of rt.tools.values()) if (t.kind === 'script') out.push(t.tool)
+  return out
+}
+
+/** `claude-tools` sources with `match` (a regex on the tool name) narrow which MCP tools become items. */
+function toolFilter(rt: Runtime): (name: string) => boolean {
+  const pats = (rt.config?.itemSources ?? []).filter((s) => s.kind === 'claude-tools' && s.match).map((s) => s.match!)
+  if (!pats.length) return () => true
+  const res = pats.map((p) => { try { return new RegExp(p) } catch { return undefined } }).filter((r): r is RegExp => !!r)
+  return (name) => res.some((r) => r.test(name))
+}
+
+const itemKeys = new WeakMap<Runtime, string>()
+
 export async function ensureItems(io: Io, rt: Runtime): Promise<Item[]> {
   await ensureSession(io, rt)
   const rules = await ensureRules(io, rt)
-  if (rt.items && !rt.itemsDirty) return rt.items
+  const scripts = scriptTools(rt)
+  const scriptKey = scripts.map((t) => t.name).sort().join(',')
+  if (rt.items && !rt.itemsDirty && itemKeys.get(rt) === scriptKey) return rt.items
   const items: Item[] = []
   if (rt.listingText) items.push(...skillListingItems(parseSkillListing(rt.listingText)))
   if (rt.mcpTools === undefined) {
     const list = await io.tool.list().catch(() => [])
     rt.mcpTools = list.filter((t) => t.mcp && !t.name.startsWith(OWN_TOOL_PREFIX)).map((t) => t.name)
   }
-  for (const name of rt.mcpTools) items.push(makeItem('tool', name, { provenance: { source: 'claude-tools' } }))
+  const keep = toolFilter(rt)
+  for (const name of rt.mcpTools) if (keep(name)) items.push(makeItem('tool', name, { provenance: { source: 'claude-tools' } }))
+  for (const t of scripts) items.push(makeItem('tool', t.name, { description: t.description, provenance: { source: 'gate-tool', path: t.path }, ...(t.tiers ? { tags: t.tiers.map((x) => `tier:${x}`) } : {}) }))
   for (const name of rt.agentNames) items.push(makeItem('agent', name, { provenance: { source: 'claude-agents' } }))
   for (const r of rules) items.push(ruleToItem(r))
   rt.items = normalizeItems(items)
   rt.itemsDirty = false
+  itemKeys.set(rt, scriptKey)
   return rt.items
+}
+
+// ───────────────────────── per-agent gates (G-08) ─────────────────────────
+
+const agentGates = new WeakMap<Runtime, Map<string, { key: string; gate: ContextGateDecision }>>()
+
+/** The gate a subagent sees: the main decision's profile and manual groups on the agent's own tier
+ * (`agentTiers`, recorded on `turn.step`). Main loop, an unknown agent, a same-tier agent, shadow or off → the main gate. */
+export async function gateFor(io: Io, rt: Runtime, agentId: string | undefined): Promise<ContextGateDecision | null> {
+  const gate = await io.read('gate')
+  if (agentId === undefined || !rt.config || !isApplied(gate)) return gate
+  const tier = (await io.read('agentTiers'))[agentId]
+  if (!tier || tier === gate.tier) return gate
+  const items = await ensureItems(io, rt)
+  const manual = await io.read('manual')
+  const key = `${tier}|${gate.profile ?? ''}|${manual.add.join(',')}|${manual.remove.join(',')}|${effectiveItems(gate)}|${items.length}`
+  let cache = agentGates.get(rt)
+  if (!cache) { cache = new Map(); agentGates.set(rt, cache) }
+  const hit = cache.get(agentId)
+  if (hit && hit.key === key) return hit.gate
+  const signals: Signals = { paths: [], agentId }
+  if (gate.profile || manual.add.length || manual.remove.length) signals.manual = { add: manual.add, remove: manual.remove, ...(gate.profile ? { profile: gate.profile } : {}) }
+  const res = decideGate(autoConfig(rt.config), signals, { turn: 0 }, items, { tier })
+  const g: ContextGateDecision = json({ ...res.gate, trigger: gate.trigger, reason: [`субагент ${agentId}: tier ${tier} (основний цикл: ${gate.tier})`, ...res.gate.reason] })
+  cache.set(agentId, { key, gate: g })
+  return g
 }
 
 // ───────────────────────── signals ─────────────────────────
@@ -155,17 +206,26 @@ async function materialize(io: Io, rt: Runtime): Promise<void> {
 
 // ───────────────────────── classifier, brief ─────────────────────────
 
-export function parseClassify(text: string, profiles: readonly string[]): { profile: string; confidence: number } | undefined {
-  const m = /\{[\s\S]*?\}/.exec(text)
-  if (!m) return undefined
-  try {
-    const v = JSON.parse(m[0]) as { profile?: unknown; confidence?: unknown }
-    if (typeof v.profile !== 'string' || !profiles.includes(v.profile)) return undefined
-    const c = typeof v.confidence === 'number' ? v.confidence : Number(v.confidence)
-    return { profile: v.profile, confidence: Number.isFinite(c) ? Math.max(0, Math.min(1, c)) : 0 }
-  } catch {
+export { parseClassify }
+
+/** A `{ kind: 'cli' }` classify/brief provider: trusted repo + whitelisted binary, JSON on stdin (G-02). */
+async function runProvider(io: Io, rt: Runtime, what: string, p: { command: string[]; timeout?: string }, stdin: string, defaultMs: number): Promise<string | undefined> {
+  if (!p.command.length) return undefined
+  if ((await trustState(io, rt).catch(() => 'unknown')) !== 'trusted') {
+    debug(io, `${what} provider ${p.command[0]}: репозиторій не довірений — пропущено`)
     return undefined
   }
+  if (!(await allowedBinary(io, rt, p.command))) {
+    debug(io, `${what} provider ${p.command[0]}: бінарник поза білим списком (G201)`)
+    return undefined
+  }
+  const r = await runArgv(io, rt, p.command, { stdin, timeoutMs: parseDuration(p.timeout) ?? defaultMs })
+  if (r.exitCode !== 0) {
+    debug(io, `${what} provider ${p.command[0]}: exit ${r.exitCode} (G203) ${r.stderr.slice(0, 200)}`)
+    await journal(io, rt, { kind: 'debug', trigger: `${what}-provider`, data: { code: 'G203', exitCode: r.exitCode, command: p.command[0] } })
+    return undefined
+  }
+  return r.stdout
 }
 
 function classifySystem(cfg: GateConfig): string {
@@ -177,7 +237,10 @@ function classifySystem(cfg: GateConfig): string {
   ].join('\n')
 }
 
-/** Classifier: `io.model.complete` asking JSON; fallback `io.model.classify` (label only → below minConfidence, never auto-applies). */
+/** Classifier (G-02 `classify.provider`): `builtin` (default) asks `io.model.complete` for JSON, falling back
+ * to `io.model.classify` (label only → below minConfidence, never auto-applies); `jev` is the engine's label
+ * classifier on its own (the user chose it, so its label counts as minConfidence); `{ kind: 'cli' }` runs the
+ * command with `classifyRequest` JSON on stdin and reads `{ profile, confidence }` (trusted repos only). */
 export async function classify(io: Io, rt: Runtime, text: string, paths: string[]): Promise<{ profile: string; confidence: number } | undefined> {
   const cfg = rt.config
   if (!cfg) return undefined
@@ -185,6 +248,21 @@ export async function classify(io: Io, rt: Runtime, text: string, paths: string[
   if (!profiles.length) return undefined
   const prompt = `${text.slice(0, 4000)}${paths.length ? `\n\nФайли: ${paths.slice(-20).join(', ')}` : ''}`
   const model = cfg.classify?.model ?? 'haiku'
+  const provider = cfg.classify?.provider ?? 'builtin'
+  const minConf = cfg.classify?.minConfidence ?? 0.7
+  if (typeof provider === 'object') {
+    const out = await runProvider(io, rt, 'classify', provider, classifyRequest(cfg, text, paths, (await io.read('model')) ?? undefined), 8000)
+    return out === undefined ? undefined : parseClassify(out, profiles)
+  }
+  if (provider === 'jev') {
+    try {
+      const label = await io.model.classify(prompt, profiles, { model })
+      return label && profiles.includes(label) ? { profile: label, confidence: minConf } : undefined
+    } catch (err) {
+      debug(io, `jev classifier failed: ${String((err as Error)?.message ?? err)}`)
+      return undefined
+    }
+  }
   try {
     const r = await io.model.complete({ model, system: classifySystem(cfg), prompt, maxTokens: 64, timeoutMs: 8000 })
     if (r.isAnswered) {
@@ -209,7 +287,8 @@ const BRIEF_SYSTEM = [
   'Стисло й конкретно, без вступу.',
 ].join('\n')
 
-/** Task brief on a strong model for non-premium tiers, cached in state by text hash. */
+/** Task brief on a strong model for non-premium tiers, cached in state by text hash. `brief.provider`
+ * `{ kind: 'cli' }` (G-02) writes it with an external command instead (`briefRequest` JSON on stdin). */
 async function brief(io: Io, rt: Runtime, text: string, tier: string): Promise<string | undefined> {
   const b = rt.config?.brief
   const enabled = b?.enabled === true || rt.options.brief
@@ -220,6 +299,14 @@ async function brief(io: Io, rt: Runtime, text: string, tier: string): Promise<s
   const cached = await io.read('brief')
   if (cached?.key === key) return cached.text
   const maxChars = b?.maxChars ?? 2000
+  if (b?.provider && typeof b.provider === 'object') {
+    const stdout = await runProvider(io, rt, 'brief', b.provider, briefRequest(text, tier, maxChars, await io.read('recentPaths'), (await io.read('model')) ?? undefined), 60_000)
+    const out = stdout === undefined ? undefined : parseBrief(stdout, maxChars)
+    if (!out) return undefined
+    await io.update('brief', () => ({ key, text: out, at: now() }))
+    await journal(io, rt, { kind: 'debug', trigger: 'brief', tier, data: { chars: out.length, provider: 'cli' } })
+    return out
+  }
   try {
     const r = await io.model.complete({ model: b?.model ?? 'opus', system: BRIEF_SYSTEM, prompt: text.slice(0, 8000), maxTokens: Math.ceil(maxChars / 2), timeoutMs: 30000 })
     if (!r.isAnswered) return undefined
@@ -236,7 +323,7 @@ async function brief(io: Io, rt: Runtime, text: string, tier: string): Promise<s
 // ───────────────────────── escalation ─────────────────────────
 
 function modelHint(cfg: GateConfig, tier: string): string {
-  const glob = Object.entries(cfg.models).find(([, t]) => t === tier)?.[0]
+  const glob = modelForTier(cfg, tier)
   return glob ? glob.replace(/\*/g, '').replace(/^-+|-+$/g, '').replace(/^claude-/, '') : tier
 }
 
@@ -278,8 +365,8 @@ export function skillOff(gate: ContextGateDecision | null, name: string): boolea
   return d === 'off'
 }
 
-export async function skillOffMessage(io: Io, rt: Runtime, name: string): Promise<string | undefined> {
-  const gate = await io.read('gate')
+export async function skillOffMessage(io: Io, rt: Runtime, name: string, agentId?: string): Promise<string | undefined> {
+  const gate = await gateFor(io, rt, agentId)
   if (!rt.config || !skillOff(gate, name)) return undefined
   return skillOffText(name, asGate(gate!), rt.config)
 }
@@ -328,12 +415,12 @@ export async function gatePromptSubmit(io: Io, rt: Runtime, input: { text: strin
 }
 
 /** MCP tool outside the applied profile → the deny text (counted for H010). */
-export async function mcpGate(io: Io, rt: Runtime, tool: string): Promise<string | undefined> {
+export async function mcpGate(io: Io, rt: Runtime, tool: string, agentId?: string): Promise<string | undefined> {
   await ensureSession(io, rt)
-  const gate = await io.read('gate')
+  const gate = await gateFor(io, rt, agentId)
   if (!rt.config || !isApplied(gate) || gate.items[`tool:${tool}`] !== 'off') return undefined
   rt.denies[tool] = (rt.denies[tool] ?? 0) + 1
-  await journal(io, rt, { kind: 'deny', trigger: 'mcp', tier: gate.tier, data: { tool, count: rt.denies[tool] } })
+  await journal(io, rt, { kind: 'deny', trigger: 'mcp', tier: gate.tier, data: { tool, count: rt.denies[tool], ...(agentId !== undefined ? { agent: agentId } : {}) } })
   return denyText('tool', tool, asGate(gate), rt.config)
 }
 
@@ -352,7 +439,7 @@ export async function listingAfter(io: Io, rt: Runtime, agentId: string | undefi
       await materialize(io, rt)
     }
   }
-  const gate = await io.read('gate')
+  const gate = await gateFor(io, rt, agentId)
   if (!isApplied(gate)) return text
   if (!names.length) {
     if (!rt.unknownListingLogged) {
@@ -378,11 +465,11 @@ export async function describeMcp(io: Io, rt: Runtime, tool: string): Promise<{ 
 }
 
 /** tool.call Skill: remember args for skill.prompt; a gated-off skill is denied before it loads. */
-export async function skillCall(io: Io, rt: Runtime, skill: string, args: string | undefined): Promise<string | undefined> {
+export async function skillCall(io: Io, rt: Runtime, skill: string, args: string | undefined, agentId?: string): Promise<string | undefined> {
   await ensureSession(io, rt)
   rt.skillArgs.set(skill, args ?? '')
-  const off = await skillOffMessage(io, rt, skill)
-  if (off) await journal(io, rt, { kind: 'deny', trigger: 'skill', data: { skill } })
+  const off = await skillOffMessage(io, rt, skill, agentId)
+  if (off) await journal(io, rt, { kind: 'deny', trigger: 'skill', data: { skill, ...(agentId !== undefined ? { agent: agentId } : {}) } })
   return off
 }
 
@@ -407,13 +494,14 @@ export async function observeStep(io: Io, rt: Runtime, model: string, agentId: s
       const prev = await io.read('model')
       if (model !== prev) {
         await io.update('model', () => model)
-        await io.update('tier', () => tierForModel(rt.config!, model).tier)
+        const cw = await io.session.usage().then((u) => u.context.window, () => undefined)
+        await io.update('tier', () => modelTier(rt, model, cw))
         if (prev) await recompute(io, rt, 'model-change', { prevModel: prev })
       }
     } else {
       const tiers = await io.read('agentTiers')
       if (!(agentId in tiers)) {
-        const t = tierForModel(rt.config, model).tier
+        const t = modelTier(rt, model)
         await io.update('agentTiers', (m) => json({ ...m, [agentId]: t }))
       }
     }

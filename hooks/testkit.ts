@@ -16,6 +16,8 @@ export interface RepoOptions {
   complete?: (req: { model: string; prompt: string; system?: string }) => string | undefined
   ask?: string
   percent?: number
+  /** Answers `fs.exists` first (paths outside the repo, e.g. the plugin folder); undefined → the repo. */
+  exists?: (path: string) => boolean | undefined
 }
 
 export interface Repo {
@@ -58,7 +60,7 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
     const f = repo.files.get(rel(e.path))
     return f ? { value: f.text } : { deny: `ENOENT: ${e.path}` }
   })
-  on('fs.exists', ($, e) => ({ value: repo.files.has(rel(e.path)) || isDir(rel(e.path)) }))
+  on('fs.exists', ($, e) => ({ value: opts.exists?.(e.path) ?? (repo.files.has(rel(e.path)) || isDir(rel(e.path))) }))
   on('fs.stat', ($, e) => {
     const r = rel(e.path)
     const f = repo.files.get(r)

@@ -23,6 +23,8 @@ test('parseGateCommand table', () => {
     ['/gate render prompt://workflow', { cmd: 'render', id: 'workflow' }],
     ['/gate render workflow', { cmd: 'render', id: 'workflow' }],
     ['/gate trust revoke', { cmd: 'trust', action: 'revoke' }],
+    ['/gate edit workflow', { cmd: 'edit', id: 'workflow' }],
+    ['/gate edit prompt://main', { cmd: 'edit', id: 'main' }],
     ['/gate collect kind=skill | where group=frontend | off', {
       cmd: 'pipe',
       stages: [
@@ -48,6 +50,9 @@ test('parseGateCommand errors', () => {
     ['/gate +', 'G506'],
     ['/gate render', 'G505'],
     ['/gate render prompt://', 'G505'],
+    ['/gate edit', 'G505'],
+    ['/gate edit ../etc/passwd', 'G505'],
+    ['/gate edit a b', 'G504'],
     ['/gate trust me', 'G507'],
     ['/gate why now', 'G504'],
     ['/gate off now', 'G504'],

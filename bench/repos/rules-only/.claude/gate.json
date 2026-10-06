@@ -1,0 +1,4 @@
+{
+  "itemSources": [ { "kind": "cursor-mdc", "dir": ".cursor/rules" } ],
+  "cursorRules": { "enabled": true, "maxCharsPerInjection": 20000 }
+}

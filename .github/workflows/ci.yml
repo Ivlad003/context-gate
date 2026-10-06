@@ -30,6 +30,25 @@ jobs:
         run: npm run build
       - name: Build hooks adapter
         run: npm run build:hooks-adapter
+      # dist/ is committed (the installed plugin runs dist/cli.js without npm install): it must match the sources.
+      - name: dist/ is up to date
+        run: |
+          if ! git diff --exit-code --stat -- dist; then
+            echo "::error::dist/ differs from a fresh build: run 'npm run build:all' and commit dist/"
+            exit 1
+          fi
+          test -z "$(git status --porcelain -- dist)" || { git status --porcelain -- dist; echo "::error::untracked files in dist/"; exit 1; }
+      - name: Built CLI runs without node_modules (installed plugin layout)
+        run: |
+          plug="$RUNNER_TEMP/plugin" && mkdir -p "$plug"
+          cp -r dist packages examples schema "$plug/"
+          HOME="$RUNNER_TEMP/home" node "$plug/dist/cli.js" run --root test/fixtures/cli-repo --dry-scripts --no-build > /dev/null
+      - name: npm package contents
+        run: npm pack --dry-run --json | node -e 'const [p]=JSON.parse(require("fs").readFileSync(0,"utf8")); const f=p.files.map(x=>x.path); for (const need of ["dist/cli.js","dist/hooks-adapter.js","packages/jsx/src/index.ts","schema/context-gate.schema.json","README.md"]) if(!f.includes(need)){console.error("missing "+need);process.exit(1)} console.log(f.length+" files")'
+      - name: Build @context-gate/jsx
+        run: npm --prefix packages/jsx run build
+      - name: Bench (dry, every repo in bench/repos.json)
+        run: HOME="$RUNNER_TEMP/home" node dist/cli.js bench > /dev/null
       - name: Smoke-test the hooks adapter bundle
         run: |
           out=$(echo '{"hook_event_name":"SessionStart","session_id":"ci","cwd":"examples/basic","source":"startup"}' \
@@ -47,9 +66,13 @@ jobs:
         run: |
           if command -v claude >/dev/null 2>&1; then
             claude plugin validate --strict .
+            claude plugin validate --strict probe/context-gate-probe
           else
             echo "claude CLI not found: skipping plugin validation"
           fi
+      # SPEC "Валідація перед релізом": only the expected $ calls (scripts/expected-calls.txt); skips without claude.
+      - name: Expected call list
+        run: scripts/validate-calls.sh
       - name: Mod typecheck and plugin tests
         run: |
           if command -v claude >/dev/null 2>&1 && [ -f .claude-plugin/types/claude-code/index.d.ts ]; then

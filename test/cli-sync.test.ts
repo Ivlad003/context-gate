@@ -112,3 +112,42 @@ test('migrate: legacy skillGroups/mcpGroups → groups, with a backup; second ru
   assert.match(again.out, /уже в новому форматі/)
   assert.ok(!existsSync(join(root, '.claude/gate.json.bak.1')))
 })
+
+test('sync --install-hook: SessionStart settings-hook running «sync --hook»; idempotent; others kept; --uninstall-hook', async () => {
+  const root = copyFixture()
+  const other = { matcher: 'startup', hooks: [{ type: 'command', command: 'echo hi' }] }
+  writeFileSync(join(root, '.claude/settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, hooks: { SessionStart: [other], Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] } }))
+  const r = await cli(root, ['sync', '--install-hook'])
+  assert.equal(r.code, 0, r.err)
+  assert.match(r.out, /додано SessionStart-хук .*sync --hook.* у \.claude\/settings\.local\.json/)
+  const s = JSON.parse(read(root, '.claude/settings.local.json'))
+  assert.deepEqual(s.permissions, { allow: ['Bash(ls)'] })
+  assert.equal(s.hooks.SessionStart.length, 2)
+  assert.deepEqual(s.hooks.SessionStart[0], other)
+  assert.deepEqual(s.hooks.SessionStart[1], { hooks: [{ type: 'command', command: 'npx --no-install context-gate sync --hook', timeout: 60 }] })
+  assert.ok(s.hooks.Stop)
+  assert.match((await cli(root, ['sync', '--install-hook'])).out, /без змін/)
+  assert.equal(JSON.parse(read(root, '.claude/settings.local.json')).hooks.SessionStart.length, 2)
+  assert.match((await cli(root, ['sync', '--uninstall-hook'])).out, /прибрано/)
+  assert.deepEqual(JSON.parse(read(root, '.claude/settings.local.json')).hooks.SessionStart, [other])
+})
+
+test('sync --hook: syncs and prints the SessionStart output with reloadSkills only when skills changed', async () => {
+  const root = copyFixture()
+  const first = await cli(root, ['sync', '--hook'])
+  assert.equal(first.code, 0, first.err)
+  assert.deepEqual(JSON.parse(first.out), { hookSpecificOutput: { hookEventName: 'SessionStart', reloadSkills: true } })
+  assert.ok(existsSync(join(root, '.claude/skills/cursor-api/SKILL.md')))
+  // Nothing changed: an empty JSON object (no reload).
+  assert.deepEqual(JSON.parse((await cli(root, ['sync', '--hook'])).out), {})
+})
+
+test('syncHookCommand / mergeSyncHook', async () => {
+  const { syncHookCommand, mergeSyncHook } = await import('../packages/cli/src/cmd-sync.ts')
+  assert.equal(syncHookCommand('/opt/cg/dist/cli.js'), 'node /opt/cg/dist/cli.js sync --hook')
+  assert.equal(syncHookCommand("/my dir/cli.js"), "node '/my dir/cli.js' sync --hook")
+  assert.equal(syncHookCommand('/x/main.ts'), 'npx --no-install context-gate sync --hook')
+  const once = mergeSyncHook({}, 'a sync --hook')
+  assert.deepEqual(mergeSyncHook(once, 'b sync --hook'), { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'b sync --hook', timeout: 60 }] }] } })
+  assert.deepEqual(mergeSyncHook(once, '', true), {})
+})

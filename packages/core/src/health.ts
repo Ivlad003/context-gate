@@ -16,6 +16,32 @@ export interface HealthExtras {
   denies?: Record<string, number>
   /** Prompt ids whose .compiled is older than its sources. */
   compiledStale?: string[]
+  /** Per-gate counters (`hooks/layers/gates.ts gateStats`, or the journal): attempts, blocks, total ms, manual overrides. */
+  gates?: Record<string, GateStat>
+  /** Real usage of the last request (`turn.step` `usage`, PROBE): H002 from cache hits, H012 the prompt share. */
+  usage?: UsageStat
+  /** Compactions in this session. */
+  compactions?: number
+  /** Gate decision of the session: profile, classifier confidence, manual overrides. */
+  decision?: { profile?: string | null; confidence?: number; manualOverrides?: number }
+  /** USD per 1k input tokens of the session model (`models` attributes); with `usage.sessionInputTokens` → a cost estimate. */
+  costPer1k?: number
+  /** Session cost as the engine reports it (`$.session.usage().cost`), preferred over the estimate. */
+  costUsd?: number
+  /** Skills in the listing without a description (nameOnly or dropped by the native 1 % budget). */
+  skillsNoDescription?: number
+}
+
+export interface GateStat { attempts: number; blocks: number; ms?: number; overrides?: number }
+
+export interface UsageStat {
+  /** `input_tokens` of the last request (uncached part). */
+  inputTokens?: number
+  cacheReadTokens?: number
+  cacheCreationTokens?: number
+  outputTokens?: number
+  /** Input tokens summed over the session (cost estimate). */
+  sessionInputTokens?: number
 }
 
 export type HealthThresholds = Partial<Record<Code, number>>
@@ -29,8 +55,15 @@ export const DEFAULT_THRESHOLDS: Record<string, number> = {
   H007: 0, // unverified items
   H009: 1, // listing % of context
   H010: 3, // denies of one tool
+  H011: 30, // % of attempts a gate blocks
+  H012: 40, // % of input tokens that is the system prompt
   H013: 0, // stale compiled prompts
+  D001: 0, // failed @assert
 }
+
+/** Names of informational metrics the status line reads; the rest of the uncoded ones show under «Сесія». */
+const INTERNAL = new Set(['tokens', 'chars', 'static-pct', 'tokens:static', 'tokens:profile', 'tokens:volatile', 'ctx-pct'])
+const SCRIPT_KINDS = new Set(['run', 'call', 'mcp'])
 
 const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
@@ -61,12 +94,22 @@ export function computeHealth(current: RenderResult, previous?: RenderResult, ex
     advice: biggest ? `\`${biggest.id}\` ${fmtK(biggest.tokens)} → додати \`budget\` або перевести частину в \`ref\`/\`lazy\`` : undefined,
   })
 
+  const u = extras.usage
+  const usageIn = u ? (u.inputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheCreationTokens ?? 0) : 0
+  const realStable = u && usageIn > 0 && u.cacheReadTokens !== undefined ? Math.round(((u.cacheReadTokens ?? 0) / usageIn) * 100) : undefined
+  if (realStable !== undefined) {
+    add({
+      code: 'H002', name: 'Стабільна частка (prompt cache), %', value: realStable, threshold: th('H002'), ok: realStable >= th('H002'),
+      advice: `з usage: cache_read ${fmtK(u!.cacheReadTokens ?? 0)} з ${fmtK(usageIn)} вхідних → винести змінне у volatile в кінці`,
+    })
+  }
+
   if (previous) {
     const prev = new Map(previous.sections.filter(s => s.included).map(s => [s.id, s]))
     const stableChars = inc.filter(s => prev.get(s.id)?.hash === s.hash).reduce((a, s) => a + s.chars, 0)
     const stablePct = chars ? Math.round((stableChars / chars) * 100) : 100
     const changed = inc.filter(s => prev.get(s.id)?.hash !== s.hash)
-    add({
+    if (realStable === undefined) add({
       code: 'H002', name: 'Стабільна частка (prompt cache), %', value: stablePct, threshold: th('H002'), ok: stablePct >= th('H002'),
       advice: changed.length ? `змінились: ${changed.map(s => s.id).join(', ')} → винести змінне у volatile` : undefined,
     })
@@ -84,17 +127,24 @@ export function computeHealth(current: RenderResult, previous?: RenderResult, ex
       code: 'H003', name: 'Дрейф поза volatile (токени)', value: drift, threshold: th('H003'), ok: drift <= th('H003'),
       advice: drifted.length ? `${drifted.join(', ')} → стабілізувати або перевести у volatile` : undefined,
     })
-  } else {
+  } else if (realStable === undefined) {
     metrics.push({ code: 'H002', name: 'Стабільна частка (prompt cache), %', value: '—', ok: true })
   }
 
   const runMs = current.trace.filter(t => (t.kind === 'run' || t.kind === 'call' || t.kind === 'mcp') && t.source === 'run').reduce((a, t) => a + (t.ms ?? 0), 0)
   const noScripts = Math.max(0, current.ms - runMs)
-  const slowest = current.trace.filter(t => t.ms !== undefined).sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0))[0]
+  const slow = current.trace.filter(t => t.ms !== undefined && SCRIPT_KINDS.has(t.kind)).sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0))
+  const slowest = slow[0] ?? current.trace.filter(t => t.ms !== undefined).sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0))[0]
+  const top = slow.slice(0, 3).map(t => `${t.section} ${t.kind} ${t.ms} мс`).join(', ')
+  const scripted = current.trace.filter(t => SCRIPT_KINDS.has(t.kind) && (t.source === 'cache' || t.source === 'run'))
+  const hits = scripted.filter(t => t.source === 'cache').length
+  const hitPct = scripted.length ? Math.round((hits / scripted.length) * 100) : undefined
+  if (hitPct !== undefined) metrics.push({ name: 'Cache hit rate @run/@call/@mcp, %', value: hitPct, ok: true, advice: `${hits} з ${scripted.length}` })
+  if (top) metrics.push({ name: 'Найдовші @run і провайдери', value: top, ok: true })
   add({ code: 'H004', name: 'Час рендера без скриптів, мс', value: noScripts, threshold: th('H004'), ok: noScripts <= th('H004'), advice: 'спростити вирази або перенести логіку в провайдер' })
   add({
     code: 'H005', name: 'Час рендера разом, мс', value: current.ms, threshold: th('H005'), ok: current.ms <= th('H005'),
-    advice: slowest ? `найдовше: ${slowest.section} ${slowest.kind} ${slowest.ms} мс → додати \`cache=\`` : 'додати `cache=` до @run',
+    advice: top ? `найдовші: ${top}${hitPct !== undefined ? `; cache hit ${hitPct} %` : ''} → додати \`cache=\`` : slowest ? `найдовше: ${slowest.section} ${slowest.kind} ${slowest.ms} мс → додати \`cache=\`` : 'додати `cache=` до @run',
   })
 
   // H006: sections rendered from data past its cache window (`stale` is set by render.ts).
@@ -116,14 +166,59 @@ export function computeHealth(current: RenderResult, previous?: RenderResult, ex
 
   if (extras.skillListingChars !== undefined && extras.contextWindow) {
     const pct = Math.round(((extras.skillListingChars / 4) / extras.contextWindow) * 1000) / 10
-    add({ code: 'H009', name: 'Листинг skills, % контексту', value: pct, threshold: th('H009'), ok: pct <= th('H009'), advice: 'вимкнути групи skills у профілі або скоротити описи' })
+    const noDesc = extras.skillsNoDescription
+    add({ code: 'H009', name: 'Листинг skills, % контексту', value: pct, threshold: th('H009'), ok: pct <= th('H009') && !noDesc, advice: `${noDesc ? `${noDesc} skills без опису; ` : ''}вимкнути групи skills у профілі або скоротити описи` })
   }
+  if (extras.skillsNoDescription !== undefined) metrics.push({ name: 'Skills без опису в листингу', value: extras.skillsNoDescription, ok: true })
 
   if (extras.denies) {
     const worst = Object.entries(extras.denies).sort((a, b) => b[1] - a[1])[0]
     const n = worst?.[1] ?? 0
     add({ code: 'H010', name: 'Deny одного інструмента', value: n, threshold: th('H010'), ok: n <= th('H010'), advice: worst ? `\`${worst[0]}\` → увімкнути його групу в профілі або пояснити в промпті` : undefined })
   }
+
+  if (extras.gates && Object.keys(extras.gates).length) {
+    let worst: [string, number] | undefined
+    for (const [name, g] of Object.entries(extras.gates)) {
+      if (!g.attempts) continue
+      const pct = Math.round((g.blocks / g.attempts) * 100)
+      const avg = g.ms !== undefined ? Math.round(g.ms / g.attempts) : undefined
+      metrics.push({ name: `Гейт ${name}`, value: `${g.blocks}/${g.attempts} заблоковано (${pct} %)${avg !== undefined ? `, ${avg} мс у середньому` : ''}${g.overrides ? `, «все одно» ${g.overrides}` : ''}`, ok: true })
+      if (!worst || pct > worst[1]) worst = [name, pct]
+    }
+    if (worst) {
+      const g = extras.gates[worst[0]]
+      add({
+        code: 'H011', name: 'Гейт блокує спроб, %', value: worst[1], threshold: th('H011'), ok: worst[1] <= th('H011'),
+        advice: `\`${worst[0]}\` ${g.blocks}/${g.attempts}${g.overrides ? `, ручних «все одно» ${g.overrides} (false positives?)` : ''} → звузити \`tiers\`, \`onlyNew\` + \`baseline\` або послабити \`pass\``,
+      })
+    }
+  }
+
+  if (u && usageIn > 0) {
+    const pct = Math.round((tokens / usageIn) * 100)
+    add({
+      code: 'H012', name: 'Системний промпт, % вхідних токенів', value: pct, threshold: th('H012'), ok: pct <= th('H012'),
+      advice: biggest ? `промпт ${fmtK(tokens)} з ${fmtK(usageIn)} → \`${biggest.id}\` ${fmtK(biggest.tokens)} у \`ref\`/\`lazy\` або \`budget\`` : undefined,
+    })
+    if (u.cacheReadTokens !== undefined) metrics.push({ name: 'Токени кешу (cache_read / cache_creation)', value: `${fmtK(u.cacheReadTokens)} / ${fmtK(u.cacheCreationTokens ?? 0)}`, ok: true })
+  }
+  const cost = extras.costUsd ?? (extras.costPer1k !== undefined && u?.sessionInputTokens !== undefined ? (u.sessionInputTokens / 1000) * extras.costPer1k : undefined)
+  if (cost !== undefined) {
+    const share = u && usageIn > 0 ? ` (промпт ≈ ${Math.round((tokens / usageIn) * 100)} %)` : ''
+    metrics.push({ name: `Вартість сесії, $${extras.costUsd === undefined ? ' (оцінка)' : ''}`, value: `${cost.toFixed(2)}${share}`, ok: true })
+  }
+  if (extras.compactions !== undefined) metrics.push({ name: 'Компакції за сесію', value: extras.compactions, ok: true })
+  if (extras.decision) {
+    const d = extras.decision
+    metrics.push({ name: 'Рішення gate', value: `профіль ${d.profile ?? '—'}${d.confidence !== undefined ? `, confidence ${d.confidence.toFixed(2)}` : ''}${d.manualOverrides ? `, ручних перевизначень ${d.manualOverrides}` : ''}`, ok: true })
+  }
+
+  const asserts = current.diagnostics.filter(d => d.code === 'D001')
+  add({
+    code: 'D001', name: 'Assert не пройшов', value: asserts.length, threshold: th('D001'), ok: asserts.length <= th('D001'),
+    advice: asserts.length ? `${asserts.slice(0, 3).map(d => d.message).join('; ')} → перевірити дані або умову \`@assert\`` : undefined,
+  })
 
   if (extras.compiledStale) {
     const n = extras.compiledStale.length
@@ -147,6 +242,11 @@ export function formatHealth(report: HealthReport): string {
   for (const m of report.metrics) {
     if (!m.code) continue
     lines.push(`| ${m.code} | ${esc(m.name)} | ${m.value} | ${m.threshold ?? ''} | ${m.ok ? 'ok' : '⚠'} | ${m.ok ? '' : esc(m.advice ?? '')} |`)
+  }
+  const info = report.metrics.filter(m => !m.code && !INTERNAL.has(m.name))
+  if (info.length) {
+    lines.push('', '| Сесія | Значення |', '| --- | --- |')
+    for (const m of info) lines.push(`| ${esc(m.name)} | ${esc(String(m.value))}${m.advice ? ` (${esc(m.advice)})` : ''} |`)
   }
   if (report.sections.length) {
     lines.push('', '| Секція | scope | символи | токени |', '| --- | --- | --- | --- |')

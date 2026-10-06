@@ -1,0 +1,10 @@
+{
+  "name": "context-gate-probe",
+  "version": "0.1.0",
+  "description": "Live probe for context-gate (SPEC Р6 stage 0): records which unverified mods API points fire, into .claude/probe.json",
+  "author": {
+    "name": "kosmodev"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

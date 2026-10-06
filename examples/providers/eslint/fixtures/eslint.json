@@ -1,0 +1,9 @@
+[
+  { "filePath": "src/app.ts", "errorCount": 0, "warningCount": 1, "messages": [
+    { "ruleId": "prefer-const", "severity": 1, "message": "'n' is never reassigned. Use 'const' instead.", "line": 4, "column": 7 } ] },
+  { "filePath": "src/users.ts", "errorCount": 2, "warningCount": 0, "messages": [
+    { "ruleId": "no-unused-vars", "severity": 2, "message": "'db' is defined but never used.", "line": 2, "column": 7 },
+    { "ruleId": "eqeqeq", "severity": 2, "message": "Expected '===' and instead saw '=='.", "line": 9, "column": 12 } ] },
+  { "filePath": "src/legacy.ts", "errorCount": 5, "warningCount": 0, "messages": [
+    { "ruleId": "no-undef", "severity": 2, "message": "'$' is not defined.", "line": 1, "column": 1 } ] }
+]

@@ -1,0 +1,8 @@
+[project]
+name = "py-data"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["polars", "duckdb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

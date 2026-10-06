@@ -69,6 +69,7 @@ export function loadModel(root: string): { model: CtxModel; config?: Partial<Gat
     ...(index ? { index } : {}),
     ...(ctxDts ? { ctxDts } : {}),
     ...(trace ? { trace } : {}),
+    readFile: (rel: string) => readText(join(root, rel)),
   })
   const entry = { key, model, ...(config ? { config } : {}) }
   modelCache.set(root, entry)

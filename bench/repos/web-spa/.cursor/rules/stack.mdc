@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+SPA на Vite + React 19 + TypeScript. Стан — React Query для сервера, useState для UI. Тести — vitest.

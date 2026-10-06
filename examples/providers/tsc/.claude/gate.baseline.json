@@ -1,0 +1,7 @@
+{
+  "typecheck": [
+    "src/legacy/report.ts(14,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+    "src/legacy/report.ts(31,19): error TS7006: Parameter 'row' implicitly has an 'any' type.",
+    "src/api/client.ts(8,3): error TS2564: Property 'token' has no initializer and is not definitely assigned in the constructor."
+  ]
+}

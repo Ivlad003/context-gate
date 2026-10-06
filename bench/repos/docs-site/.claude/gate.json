@@ -1,0 +1,14 @@
+{
+  "groups": {
+    "core": ["skill:docs-style", "skill:git-conventions"],
+    "writing": ["skill:writing-for-agents", "skill:diataxis", "skill:screenshots"],
+    "i18n": ["skill:translations"]
+  },
+  "tiers": { "premium": { "groups": ["core"] }, "standard": { "groups": ["core"] }, "quick": { "groups": ["core"], "preload": ["docs-style"] } },
+  "profiles": {
+    "writing": { "groups": ["writing"], "when": { "paths": ["docs/**"] } },
+    "i18n": { "groups": ["i18n"], "when": { "branch": "^i18n/" } }
+  },
+  "classify": { "mode": "shadow" },
+  "providers": { "git": { "kind": "module", "builtin": true }, "fs": { "kind": "module", "builtin": true } }
+}

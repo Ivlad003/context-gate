@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+// Fake `eslint -f json …` for demos: prints fixtures/eslint.json, exit 1 when any file has errors (like eslint).
+import { readFileSync } from 'node:fs'
+const report = JSON.parse(readFileSync(new URL('../fixtures/eslint.json', import.meta.url), 'utf8'))
+process.stdout.write(JSON.stringify(report) + '\n')
+process.exitCode = report.some((f) => f.errorCount > 0) ? 1 : 0

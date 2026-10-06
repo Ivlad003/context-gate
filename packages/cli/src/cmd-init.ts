@@ -9,6 +9,28 @@ import { ensureGitignore, readText, writeJson, writeText } from './util.ts'
 
 export const GITIGNORE_LINES = ['.claude/prompt/.compiled/', '.claude/prompt/.trace/', '.claude/gate.debug.log', '.claude/gate.log.jsonl', '.claude/gate.index.json']
 
+/** `.gitignore` lines for a config (G-16, Р3): `prompt.commitCompiled: true` keeps `.compiled/` in git;
+ * a custom `prompt.dir` moves the `.compiled/` and `.trace/` lines. */
+export function gitignoreLines(cfg: { prompt?: { dir?: string; commitCompiled?: boolean } }): string[] {
+  const dir = (cfg.prompt?.dir ?? '.claude/prompt').replace(/^\.\//, '').replace(/\/+$/, '')
+  return [
+    ...(cfg.prompt?.commitCompiled ? [] : [`${dir}/.compiled/`]),
+    `${dir}/.trace/`, '.claude/gate.debug.log', '.claude/gate.log.jsonl', '.claude/gate.index.json',
+  ]
+}
+
+/** Drop `.gitignore` lines (exact match), e.g. `.compiled/` once `commitCompiled` is on. Returns the removed lines. */
+export function removeGitignoreLines(root: string, lines: string[]): string[] {
+  const path = join(root, '.gitignore')
+  const cur = readText(path)
+  if (cur === undefined) return []
+  const drop = new Set(lines)
+  const kept = cur.split('\n').filter((l) => !drop.has(l.trim()))
+  const removed = cur.split('\n').filter((l) => drop.has(l.trim())).map((l) => l.trim())
+  if (removed.length) writeText(path, kept.join('\n'))
+  return removed
+}
+
 const isDir = (p: string): boolean => { try { return statSync(p).isDirectory() } catch { return false } }
 const listDirs = (p: string): string[] => { try { return readdirSync(p).filter((d) => !d.startsWith('.') && isDir(join(p, d))).sort() } catch { return [] } }
 
@@ -54,7 +76,7 @@ export function guessProfiles(root: string): InitGuess {
   return { profiles, groups, notes }
 }
 
-export function initConfig(root: string): { json: Record<string, unknown>; guess: InitGuess } {
+export function initConfig(root: string, o: { commitCompiled?: boolean } = {}): { json: Record<string, unknown>; guess: InitGuess } {
   const guess = guessProfiles(root)
   const json: Record<string, unknown> = {
     groups: guess.groups,
@@ -64,22 +86,25 @@ export function initConfig(root: string): { json: Record<string, unknown>; guess
     classify: { mode: 'shadow', minConfidence: 0.7, recheckOn: ['/gate new', 'compact'] },
     budgets: { default: { softContextPct: 70, hardContextPct: 85 } },
     cursorRules: { enabled: true, nested: existsSync(join(root, 'packages')) || existsSync(join(root, 'apps')), maxCharsPerInjection: 30000 },
-    prompt: { dir: '.claude/prompt', runCacheDefault: '5m' },
+    prompt: { dir: '.claude/prompt', runCacheDefault: '5m', ...(o.commitCompiled ? { commitCompiled: true } : {}) },
   }
   return { json, guess }
 }
 
-export function initCommand(root: string, o: { force?: boolean; dryRun?: boolean }): { code: number; out: string } {
+export function initCommand(root: string, o: { force?: boolean; dryRun?: boolean; commitCompiled?: boolean }): { code: number; out: string } {
   const path = join(root, '.claude', 'gate.json')
   if (existsSync(path) && !o.force) return { code: 1, out: `.claude/gate.json уже існує — додай --force, щоб перезаписати, або context-gate migrate\n` }
-  const { json, guess } = initConfig(root)
+  const { json, guess } = initConfig(root, { commitCompiled: o.commitCompiled })
   const check = loadConfig(JSON.stringify(json))
   const errs = check.diagnostics.filter((d) => d.severity === 'error')
   if (errs.length) return { code: 1, out: errs.map((d) => `${d.code} ${d.message}`).join('\n') + '\n' }
   if (o.dryRun) return { code: 0, out: JSON.stringify(json, null, 2) + '\n' }
   writeJson(path, json)
-  const added = ensureGitignore(root, GITIGNORE_LINES)
+  const cfg = json as { prompt?: { dir?: string; commitCompiled?: boolean } }
+  const added = ensureGitignore(root, gitignoreLines(cfg))
+  const removed = cfg.prompt?.commitCompiled ? removeGitignoreLines(root, gitignoreLines({ ...cfg, prompt: { ...cfg.prompt, commitCompiled: false } }).slice(0, 1)) : []
   const lines = ['створено .claude/gate.json (classify.mode: shadow — нічого не фільтрується, /gate why показує пропозиції)']
+  if (cfg.prompt?.commitCompiled) lines.push(`prompt.commitCompiled: true — ${cfg.prompt.dir ?? '.claude/prompt'}/.compiled/ комітиться разом із джерелами (Р3)${removed.length ? '; рядок прибрано з .gitignore' : ''}`)
   lines.push(guess.notes.length ? `профілі: ${guess.notes.join('; ')}` : 'профілі не вгадано: структура без apps/, packages/, docs/ — додай їх у profiles вручну')
   if (added.length) lines.push(`.gitignore: + ${added.join(', ')}`)
   return { code: 0, out: lines.join('\n') + '\n' }

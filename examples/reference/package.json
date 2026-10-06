@@ -1,0 +1,13 @@
+{
+  "name": "acme-reference",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "lint": "eslint -f json apps",
+    "typecheck": "tsc --noEmit -p apps/web && tsc --noEmit -p apps/api",
+    "storybook": "npm run storybook -w apps/web"
+  }
+}

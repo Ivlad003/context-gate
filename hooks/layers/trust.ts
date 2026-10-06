@@ -19,7 +19,9 @@ interface Stored { decision: 'trusted' | 'denied'; commandsHash: string; at: num
 export function commandsHash(cfg: GateConfig | undefined): string {
   if (!cfg) return hash('')
   const providers = Object.fromEntries(Object.entries(cfg.providers ?? {}).filter(([, p]) => p.kind === 'cli' || p.kind === 'mcp'))
-  return hash(stableJson({ executors: cfg.executors ?? {}, providers, gates: (cfg.gates ?? []).filter((g) => g.run).map((g) => ({ name: g.name, run: g.run })), build: cfg.prompt?.build ?? 'auto' }))
+  // cli classify / brief providers (G-02) run repo commands too; keyed only when present so older hashes hold.
+  const models = Object.fromEntries([['classify', cfg.classify?.provider], ['brief', cfg.brief?.provider]].filter(([, p]) => p && typeof p === 'object'))
+  return hash(stableJson({ executors: cfg.executors ?? {}, providers, gates: (cfg.gates ?? []).filter((g) => g.run).map((g) => ({ name: g.name, run: g.run })), build: cfg.prompt?.build ?? 'auto', ...models }))
 }
 
 export async function repoKey(io: Io, rt: Runtime): Promise<string> {

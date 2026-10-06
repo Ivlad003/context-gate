@@ -13,14 +13,15 @@ import type { EngineInterface, Register } from 'claude-code'
 import { type FileCall, type Io, OWN_TOOL_PREFIX, newRuntime, readOptions } from './ctx.ts'
 import { INITIAL, type State, type StateKey } from './state.ts'
 import { ensureSession } from './layers/config.ts'
-import { classicSessionStart, compactAfter, compactInstructions, configFileChanged, sessionEnd, sessionStart } from './layers/session.ts'
-import { gateCommand } from './layers/commands.ts'
+import { classicSessionStart, compactAfter, compactInstructions, configFileChanged, recordStepUsage, sessionEnd, sessionStart } from './layers/session.ts'
+import { editSection, gateCommand, rerenderHealth, rerenderSection } from './layers/commands.ts'
 import { bashAfter, bashBefore, gatesAfterFile, gatesBeforeFile, gatesMentioned, promptGates, turnAfter } from './layers/gates.ts'
 import { relPath, ruleCommand, rulesAfterFile, rulesBeforeFile, rulesContextAfter, rulesContextBefore, rulesFileChanged } from './layers/cursor-rules.ts'
 import { describeMcp, gatePromptSubmit, listingAfter, mcpGate, observeStep, offerAgent, recompute, skillCall } from './layers/skill-gate.ts'
 import { checkBudgets } from './layers/budgets.ts'
-import { captureSkillArgs, composeAfter, dslFileChanged, serveOwnTool, skillPrompt, trustOnPrompt } from './layers/dsl.ts'
-import { WHY_PANE, applyProposed, bandProps, resetAuto, whyPane } from './layers/ui.ts'
+import { captureSkillArgs, composeAfter, dslContextBefore, dslFileChanged, serveOwnTool, skillPrompt, trustOnPrompt } from './layers/dsl.ts'
+import { HEALTH_PANE, SECTION_PANE, WHY_PANE, applyProposed, bandProps, buildErrorOf, healthPane, resetAuto, sectionPane, whyPane } from './layers/ui.ts'
+import { indexWatched, writeIndex } from './layers/index.ts'
 
 export { bandLine, gateLine } from './layers/ui.ts'
 
@@ -40,6 +41,7 @@ const agentTiersAtom = atom({ plugin: 'context-gate', key: 'agentTiers' } as con
 const ctxPercentAtom = atom({ plugin: 'context-gate', key: 'ctxPercent' } as const, INITIAL.ctxPercent)
 const briefAtom = atom({ plugin: 'context-gate', key: 'brief' } as const, INITIAL.brief)
 const configAtom = atom({ plugin: 'context-gate', key: 'config' } as const, INITIAL.config)
+const sectionViewAtom = atom({ plugin: 'context-gate', key: 'sectionView' } as const, INITIAL.sectionView)
 
 function readState($: EngineInterface, key: StateKey): Promise<unknown> {
   switch (key) {
@@ -58,6 +60,7 @@ function readState($: EngineInterface, key: StateKey): Promise<unknown> {
     case 'ctxPercent': return read($, ctxPercentAtom)
     case 'brief': return read($, briefAtom)
     case 'config': return read($, configAtom)
+    case 'sectionView': return read($, sectionViewAtom)
   }
 }
 
@@ -78,6 +81,7 @@ function updateState($: EngineInterface, key: StateKey, fn: (v: never) => unknow
     case 'ctxPercent': return update($, ctxPercentAtom, fn as (v: State['ctxPercent']) => State['ctxPercent'])
     case 'brief': return update($, briefAtom, fn as (v: State['brief']) => State['brief'])
     case 'config': return update($, configAtom, fn as (v: State['config']) => State['config'])
+    case 'sectionView': return update($, sectionViewAtom, fn as (v: State['sectionView']) => State['sectionView'])
   }
 }
 
@@ -91,6 +95,7 @@ function port($: EngineInterface): Io {
       list: (path) => $.fs.list(path),
       exists: (path) => $.fs.exists(path),
       write: (path, text) => $.fs.write(path, text),
+      stat: (path) => $.fs.stat(path),
     },
     session: {
       id: () => $.session.id(),
@@ -101,13 +106,14 @@ function port($: EngineInterface): Io {
       append: (args) => $.session.append(args),
       compact: (input) => $.session.compact(input),
     },
-    env: { os: () => $.env.get('OS'), home: () => $.env.get('HOME') },
+    env: { os: () => $.env.get('OS'), home: () => $.env.get('HOME'), cacheHome: () => $.env.get('XDG_CACHE_HOME') },
     store: {
       get: (key) => $.store.get(key),
       set: (key, value) => $.store.set(key, value),
       delete: (key) => $.store.delete(key),
     },
-    process: { run: (argv, init) => $.process.run(argv, init) },
+    process: { run: (argv, init) => $.process.run(argv, init), spawn: (request) => $.process.spawn(request) },
+    settings: { read: () => $.settings.read() as Promise<Record<string, unknown>> },
     mcp: { call: (server, tool, args) => $.mcp.call(server, tool, args) },
     model: {
       complete: (request, options) => $.model.complete(request, options),
@@ -140,7 +146,9 @@ export const register: Register = (on, options) => {
   // ───────── core: lifecycle, commands ─────────
 
   on('session.start', async ($, e, next) => {
-    await sessionStart(port($), rt, e)
+    const io = port($)
+    await sessionStart(io, rt, e)
+    await writeIndex(io, rt, 'session.start')
     return next(e)
   }).catch(pass)
 
@@ -169,10 +177,16 @@ export const register: Register = (on, options) => {
     rulesFileChanged(rt, e.file_path)
     await dslFileChanged(io, rt, e.file_path)
     await configFileChanged(io, rt, e.file_path)
+    if (indexWatched(rt, e.file_path)) await writeIndex(io, rt, 'file-changed')
     return next(e)
   }).catch(pass)
 
-  on('command.run', { command: 'gate' }, async ($, e) => gateCommand(port($), rt, e.args))
+  on('command.run', { command: 'gate' }, async ($, e) => {
+    const io = port($)
+    const r = await gateCommand(io, rt, e.args)
+    await writeIndex(io, rt, 'gate')
+    return r
+  })
 
   on('command.run', { command: 'rule' }, async ($, e) => {
     const io = port($)
@@ -190,6 +204,7 @@ export const register: Register = (on, options) => {
   on('prompt.context', async ($, e, next) => {
     const io = port($)
     await rulesContextBefore(io, rt)
+    await dslContextBefore(io, rt)
     return rulesContextAfter(io, rt, e, await next(e))
   }).catch(pass)
 
@@ -202,7 +217,7 @@ export const register: Register = (on, options) => {
     gatesMentioned(rt, g.mentioned)
     const context = [...(e.context ?? []), ...g.context]
     if (!g.text.trimStart().startsWith('/')) {
-      const failed = await promptGates(io, rt)
+      const failed = await promptGates(io, rt, e.text)
       if (failed) context.push(failed)
     }
     if (g.text === e.text && context.length === (e.context?.length ?? 0)) return next(e)
@@ -210,8 +225,11 @@ export const register: Register = (on, options) => {
   }).catch(pass)
 
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
+    const io = port($)
     const r = await next(e)
-    const text = await listingAfter(port($), rt, e.agentId, r.text)
+    const before = rt.listingText
+    const text = await listingAfter(io, rt, e.agentId, r.text)
+    if (rt.listingText !== before) void writeIndex(io, rt, 'listing')
     return text === r.text ? r : { text }
   }).catch(pass)
 
@@ -242,7 +260,7 @@ export const register: Register = (on, options) => {
   }).catch(pass)
 
   on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
-    const deny = await skillCall(port($), rt, e.skill, e.args)
+    const deny = await skillCall(port($), rt, e.skill, e.args, e.agentId)
     return deny ? { deny } : next(e)
   }).catch(pass)
 
@@ -250,7 +268,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__/ }, async ($, e, next) => {
     const io = port($)
     if (e.tool.startsWith(OWN_TOOL_PREFIX)) return (await serveOwnTool(io, rt, e as unknown as { tool: string } & Record<string, unknown>)) ?? next(e)
-    const deny = await mcpGate(io, rt, e.tool)
+    const deny = await mcpGate(io, rt, e.tool, e.agentId)
     return deny ? { deny } : next(e)
   }).catch(pass)
 
@@ -267,7 +285,9 @@ export const register: Register = (on, options) => {
 
   on('turn.step', async function* ($, e, next) {
     await observeStep(port($), rt, e.model, e.agentId)
-    return yield* next(e)
+    const res = yield* next(e)
+    recordStepUsage(rt, res.usage, e.agentId)
+    return res
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -314,6 +334,28 @@ export const register: Register = (on, options) => {
       rows: Math.max(3, (e.viewport?.rows ?? 30) - 12),
       onApply: () => { const io = port($); void applyProposed(io, rt, (t) => recompute(io, rt, t)) },
       onAuto: () => { const io = port($); void resetAuto(io, (t) => recompute(io, rt, t)) },
+    })
+    return tree as ReturnType<typeof els.Box>
+  })
+
+  on('ui.render', { component: 'Pane', requestId: HEALTH_PANE }, async ($, e) => {
+    const els = $.ui.resolve(e)
+    await read($, healthAtom) // subscribes: a new render redraws the pane
+    const tree = healthPane(els as never, {
+      report: rt.lastHealth,
+      buildError: buildErrorOf(rt),
+      onRerender: () => { void rerenderHealth(port($), rt) },
+    })
+    return tree as ReturnType<typeof els.Box>
+  })
+
+  on('ui.render', { component: 'Pane', requestId: SECTION_PANE }, async ($, e) => {
+    const els = $.ui.resolve(e)
+    const view = await read($, sectionViewAtom)
+    const tree = sectionPane(els as never, {
+      view,
+      onEdit: () => { if (view) void editSection(port($), rt, view.id) },
+      onRerender: () => { void rerenderSection(port($), rt) },
     })
     return tree as ReturnType<typeof els.Box>
   })

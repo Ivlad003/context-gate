@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+// Fake `keylang` for demos and tests: deterministic JSON, no real analysis.
+//   keylang parse --json             → { deny, violations: [], symbols }
+//   keylang check --changed --json   → { violations } (one violation when KEYLANG_FAKE_VIOLATION=1)
+//   keylang explain <id> --json      → { id, explain }
+const [cmd, ...rest] = process.argv.slice(2)
+const deny = [
+  { from: 'domain', to: 'infrastructure', reason: 'домен не знає про БД і HTTP' },
+  { from: 'ui', to: 'domain/internal', reason: 'UI працює лише через application-сервіси' },
+]
+const violation = { code: 'KL001', explain: 'domain/user.ts імпортує infrastructure/db.ts: domain не імпортує infrastructure', file: 'src/domain/user.ts', line: 3 }
+const out = (v) => process.stdout.write(JSON.stringify(v) + '\n')
+if (cmd === 'parse') out({ deny, violations: [], symbols: ['application.purchase.buy', 'domain.user.create'] })
+else if (cmd === 'check') {
+  const violations = process.env.KEYLANG_FAKE_VIOLATION === '1' ? [violation] : []
+  out({ violations })
+  process.exitCode = violations.length ? 1 : 0
+} else if (cmd === 'explain') out({ id: rest[0] ?? '', explain: `${rest[0] ?? '?'}: use case купівлі; викликає domain.order і infrastructure.payments через порт` })
+else {
+  process.stderr.write(`keylang (fake): невідома команда ${cmd ?? ''}\n`)
+  process.exitCode = 2
+}

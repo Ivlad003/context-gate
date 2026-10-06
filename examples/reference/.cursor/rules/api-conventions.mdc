@@ -1,0 +1,8 @@
+---
+description: Умовності API-сервісу
+globs: apps/api/src/**/*.ts
+alwaysApply: false
+---
+- Контролер лише розбирає запит і викликає сервіс; бізнес-логіка — в `*.service.ts`.
+- Помилки — `HttpException` з тілом `{ code, message }`, `code` у SCREAMING_SNAKE_CASE.
+- Списки — курсорна пагінація `{ items, nextCursor }`, `take` ≤ 100.

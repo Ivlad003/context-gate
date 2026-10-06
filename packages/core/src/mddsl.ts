@@ -192,6 +192,10 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
   const diag = (code: Diagnostic['code'], message: string, line: number, severity: Diagnostic['severity'] = 'error', hint?: string): void => {
     diagnostics.push({ code, severity, message, path, line, ...(hint ? { hint } : {}) })
   }
+  // Р5: `store=` on @run/@call is the legacy form of `@store`; accepted until 1.0 with G180.
+  const legacyStore = (d: 'run' | 'call', key: string, as: string | undefined, line: number): void => {
+    diag('G180', `store= на @${d} — застаріла форма збереження`, line, 'warning', `@${d} … as=${as ?? key}, потім «@store ${as ?? key}»`)
+  }
   const checkExpr = (src: string, line: number): void => {
     for (const d of parseExpr(src).diagnostics) diagnostics.push({ ...d, path, line })
   }
@@ -385,7 +389,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         if (bare.length > 1) diag('G004', `Зайві аргументи @run: ${bare.slice(1).join(' ')}`, line, 'warning')
         if (kv.as) node.as = kv.as
         if (kv.cache) node.cache = kv.cache
-        if (kv.store) node.store = kv.store
+        if (kv.store) { node.store = kv.store; legacyStore('run', kv.store, node.as, line) }
         if (kv.needs) node.needs = kv.needs.split(',').map(s => s.trim()).filter(Boolean)
         if (!kv.cache && scope === 'static') diag('G163', '@run без cache у static-секції', line, 'error', 'додати cache=… або перенести у volatile')
         run = { node, lines: [], line }
@@ -400,7 +404,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         const node: Extract<Node, { t: 'call' }> = { t: 'call', fn: c.name, args: c.args, as: bare[1] }
         if (Object.keys(c.kwargs).length) node.kwargs = c.kwargs
         if (kv.cache) node.cache = kv.cache
-        if (kv.store) node.store = kv.store
+        if (kv.store) { node.store = kv.store; legacyStore('call', kv.store, node.as, line) }
         target().push(node)
         break
       }
@@ -601,4 +605,100 @@ export function resolveTierVariant(base: SectionNode, variants: Record<Tier, Sec
   // A variant file is already the variant for this tier: a `tier` filter inherited from the base must not drop it.
   delete out.tier
   return out
+}
+
+// ───────────────────────── AST → Markdown form ─────────────────────────
+
+/**
+ * Prints AST nodes back in the Markdown DSL form (`@if`, `@each`, `{{ }}` …). Used by `expand` to show a
+ * TSX section to the model as canonical text (SPEC «Шар 3а»), and by tooling that wants a readable view
+ * of a compiled section. The output parses back into an equivalent section (`parseMarkdownPrompt`).
+ */
+export function printMarkdownNodes(nodes: readonly Node[]): string {
+  let out = ''
+  const nl = (): void => { if (out && !out.endsWith('\n')) out += '\n' }
+  const dir = (line: string): void => { nl(); out += line + '\n' }
+  const text = (s: string): void => { out += s.replace(/(^|\n)([ \t]*)@/g, '$1$2\\@') }
+  const q = (s: string): string => JSON.stringify(s)
+  const opts = (kv: Record<string, string | undefined>): string => Object.entries(kv).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => ` ${k}=${/\s/.test(v!) ? q(v!) : v}`).join('')
+  const inline = (list: readonly Node[]): string => { const save = out; out = ''; walk(list, undefined); const r = out; out = save; return r }
+  const walk = (list: readonly Node[], listKind: 'ol' | 'ul' | undefined): void => {
+    for (const n of list) {
+      switch (n.t) {
+        case 'text': text(n.value); break
+        case 'expr': out += `{{ ${n.expr} }}`; break
+        case 'el': {
+          const inner = (): string => inline(n.children)
+          switch (n.tag) {
+            case 'li': nl(); out += (listKind === 'ol' ? '1. ' : '- ') + inner().trim() + '\n'; break
+            case 'ol': case 'ul': nl(); walk(n.children.filter((c) => !(c.t === 'text' && !c.value.trim())), n.tag); break
+            case 'code': out += '`' + inner() + '`'; break
+            case 'pre': nl(); out += '```' + (n.attrs?.lang ?? '') + '\n' + inner().replace(/^\n+|\n+$/g, '') + '\n```\n'; break
+            case 'b': out += `**${inner()}**`; break
+            case 'i': out += `*${inner()}*`; break
+            case 'p': nl(); out += inner().trim() + '\n\n'; break
+            case 'br': out += '\n'; break
+            default: {
+              const h = /^h([1-6])$/.exec(n.tag)
+              if (h) { nl(); out += '#'.repeat(Number(h[1])) + ' ' + inner().trim() + '\n' } else out += inner()
+            }
+          }
+          break
+        }
+        case 'if': {
+          dir(`@if ${n.test}`)
+          walk(n.then, listKind)
+          if (n.else?.length) { dir('@else'); walk(n.else, listKind) }
+          dir('@end')
+          break
+        }
+        case 'each': dir(`@each ${n.as}${n.index ? `, ${n.index}` : ''} in ${n.of}`); walk(n.children, listKind); dir('@end'); break
+        case 'let': case 'set': dir(`@${n.t} ${n.name} = ${n.value}`); break
+        case 'repeat': dir(`@repeat ${n.n}`); walk(n.children, listKind); dir('@end'); break
+        case 'break': case 'continue': dir(`@${n.t}`); break
+        case 'store': dir(`@store ${n.name}`); break
+        case 'run': dir(`@run ${n.lang}${opts({ as: n.as, cache: n.cache, store: n.store, needs: n.needs?.join(',') })}`); out += n.code + '\n'; dir('@end'); break
+        case 'use': dir(`@use ${n.name} ${n.path}`); break
+        case 'call': {
+          const args = [...n.args, ...Object.entries(n.kwargs ?? {}).map(([k, v]) => `${k}=${v}`)].join(', ')
+          dir(`@call ${n.fn}(${args}) as ${n.as}${opts({ cache: n.cache, store: n.store })}`)
+          break
+        }
+        case 'include': {
+          if (n.source === 'text') { text(n.text ?? ''); break }
+          if (n.source === 'mcp') { dir(`@mcp ${n.ref}(${Object.entries(n.args ?? {}).map(([k, v]) => `${k}=${v}`).join(', ')})${n.as ? ` as ${n.as}` : ''}`); break }
+          const d = n.source === 'file' ? 'include' : n.source
+          dir(`@${d} ${n.source === 'section' ? `prompt://${n.ref}` : n.ref} ${n.mode}${opts({ budget: n.budget === undefined ? undefined : String(n.budget), as: n.source === 'file' ? n.as : undefined })}${n.description ? ` ${q(n.description)}` : ''}`)
+          break
+        }
+        case 'tier': dir(`@tier${n.is === 'non-premium' ? '' : ' ' + n.is.join(', ')}`); walk(n.children, listKind); dir('@end'); break
+        case 'fence': nl(); out += '```' + (n.lang ?? '') + (n.title ? ` ${n.title}` : '') + '\n' + inline(n.children).replace(/^\n+|\n+$/g, '') + '\n```\n'; break
+        case 'list': walk(n.children, n.ordered ? 'ol' : 'ul'); break
+        case 'table': {
+          nl()
+          out += `| ${n.columns.join(' | ')} |\n|${n.columns.map(() => ' --- |').join('')}\n`
+          dir(`@each row in ${n.rows}`)
+          out += `| ${n.cells.map((c) => `{{ ${c} }}`).join(' | ')} |\n`
+          dir('@end')
+          break
+        }
+        case 'debug': dir(`@debug ${n.message ? q(n.message) + (n.exprs.length ? ' ' : '') : ''}${n.exprs.join(', ')}`); break
+        case 'assert': dir(`@assert ${n.test}${n.message ? `, ${q(n.message)}` : ''}`); break
+        case 'log': dir(`@log level=${n.level} ${q(n.message)}`); break
+        case 'trace': dir(`@trace ${n.on ? 'on' : 'off'}`); break
+      }
+    }
+  }
+  walk(nodes, undefined)
+  return out.replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/** True when the nodes already carry tier variants (`tier` nodes anywhere). */
+export function hasTierNodes(nodes: readonly Node[]): boolean {
+  for (const n of nodes) {
+    if (n.t === 'tier') return true
+    if (n.t === 'if' && (hasTierNodes(n.then) || hasTierNodes(n.else ?? []))) return true
+    if ('children' in n && Array.isArray(n.children) && hasTierNodes(n.children)) return true
+  }
+  return false
 }

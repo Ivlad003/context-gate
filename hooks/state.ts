@@ -25,6 +25,7 @@ export const INITIAL: State = {
   ctxPercent: null,
   brief: null,
   config: { ok: true, disabled: {}, diagnostics: 0 },
+  sectionView: null,
 }
 
 /** `$.state.set` takes JSON only: drop `undefined` fields. */

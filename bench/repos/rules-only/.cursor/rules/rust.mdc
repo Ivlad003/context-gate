@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+Rust 2024 edition, `cargo clippy -- -D warnings` без попереджень, помилки через `thiserror`, без `unwrap()` поза тестами.

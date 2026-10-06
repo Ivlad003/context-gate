@@ -45,6 +45,16 @@ test('components → canonical AST nodes', () => {
     ['br', h('br', null), { t: 'el', tag: 'br', children: [] }],
   ]
   for (const [name, got, want] of cases) assert.deepEqual(got, want, name)
+  // Р5: `store=` on Run is the legacy form of <Store> (G180), the only diagnostic of the table.
+  assert.deepEqual(codes(), ['G180'])
+})
+
+test('G180: store= on Run and Call is legacy, the node keeps it', () => {
+  assert.deepEqual(h(Call, { fn: 'util.sum', as: 'sum', store: 'total' }), { t: 'call', fn: 'util.sum', args: [], as: 'sum', store: 'total' })
+  const ds = takeDiagnostics()
+  assert.deepEqual(ds.map((d) => [d.code, d.severity]), [['G180', 'warning']])
+  assert.match(ds[0]!.hint!, /<Store name="sum"/)
+  h(Run, { lang: 'bash', as: 'log' }, 'git log')
   assert.deepEqual(codes(), [])
 })
 

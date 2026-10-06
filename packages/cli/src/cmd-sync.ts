@@ -107,3 +107,68 @@ export function formatSync(res: SyncResult): string {
   lines.push(`без змін: ${res.unchanged}; skillOverrides: ${Object.keys(res.overrides).length}`)
   return lines.join('\n') + '\n'
 }
+
+// ───────────────────────── SessionStart settings-hook (SPEC «Транспілятор») ─────────────────────────
+
+/** Marks our hook entry in settings, so a re-install replaces it instead of adding a duplicate. */
+export const SYNC_HOOK_MARK = 'sync --hook'
+const SETTINGS_LOCAL = '.claude/settings.local.json'
+
+interface HookCmd { type: 'command'; command: string; timeout?: number }
+interface HookMatcherEntry { matcher?: string; hooks: HookCmd[] }
+
+/** The command the hook runs: this CLI bundle when we run from it, else `npx context-gate`. */
+export function syncHookCommand(cliPath: string | undefined = process.argv[1]): string {
+  const q = (s: string) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`)
+  const bin = cliPath && /(^|[\\/])cli\.[cm]?js$/.test(cliPath) ? `node ${q(cliPath)}` : 'npx --no-install context-gate'
+  return `${bin} ${SYNC_HOOK_MARK}`
+}
+
+const isOurHook = (m: HookMatcherEntry): boolean => Array.isArray(m?.hooks) && m.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(SYNC_HOOK_MARK))
+
+/** Settings with our SessionStart entry added (replacing a previous one) or, with `uninstall`, removed. Other hooks are kept. */
+export function mergeSyncHook(settings: Record<string, unknown>, command: string, uninstall = false): Record<string, unknown> {
+  const out = { ...settings }
+  const hooks: Record<string, HookMatcherEntry[]> = { ...((settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {}) as Record<string, HookMatcherEntry[]>) }
+  const kept = (Array.isArray(hooks.SessionStart) ? hooks.SessionStart : []).filter((m) => !isOurHook(m))
+  if (!uninstall) kept.push({ hooks: [{ type: 'command', command, timeout: 60 }] })
+  if (kept.length) hooks.SessionStart = kept
+  else delete hooks.SessionStart
+  if (Object.keys(hooks).length) out.hooks = hooks
+  else delete out.hooks
+  return out
+}
+
+/** `sync --install-hook` / `--uninstall-hook`: writes `.claude/settings.local.json`. */
+export function installSyncHook(root: string, o: { uninstall?: boolean; command?: string } = {}): { path: string; changed: boolean; command: string } {
+  const abs = join(root, SETTINGS_LOCAL)
+  const cur = readJson<Record<string, unknown>>(abs) ?? {}
+  const command = o.command ?? syncHookCommand()
+  const next = mergeSyncHook(cur, command, o.uninstall)
+  const changed = JSON.stringify(next) !== JSON.stringify(cur) || (!existsSync(abs) && !o.uninstall)
+  if (changed) writeJson(abs, next)
+  return { path: SETTINGS_LOCAL, changed, command }
+}
+
+/**
+ * stdout of `sync --hook` for Claude Code's SessionStart: `reloadSkills: true` when the sync wrote or removed
+ * skills (the generated `cursor-*` skills or SKILL.md), so the session sees them without a restart.
+ */
+export function syncHookOutput(res: SyncResult): string {
+  const skills = [...res.written, ...res.removed].some((p) => p.startsWith('.claude/skills/'))
+  return JSON.stringify(skills ? { hookSpecificOutput: { hookEventName: 'SessionStart', reloadSkills: true } } : {}) + '\n'
+}
+
+/** `sync --hook` (run from the SessionStart hook), `--install-hook`, `--uninstall-hook`. Never fails the hook. */
+export async function syncHookMode(o: ContextOptions & { noPrompt?: boolean; noOverrides?: boolean; hard?: boolean }, mode: 'hook' | 'install' | 'uninstall'): Promise<{ code: number; out: string; err: string }> {
+  if (mode !== 'hook') {
+    const r = installSyncHook(o.root, { uninstall: mode === 'uninstall' })
+    const what = mode === 'install' ? `SessionStart-хук «${r.command}» (reloadSkills)` : 'SessionStart-хук context-gate sync'
+    return { code: 0, out: r.changed ? `${mode === 'install' ? 'додано' : 'прибрано'} ${what} у ${r.path}\n` : `${r.path}: без змін\n`, err: '' }
+  }
+  try {
+    return { code: 0, out: syncHookOutput(await syncCommand(o)), err: '' }
+  } catch (e) {
+    return { code: 0, out: '{}\n', err: `context-gate sync: ${(e as Error).message}\n` }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "groups": {
+    "core": ["skill:tdd", "skill:git-conventions"],
+    "ui": ["skill:react-*", "skill:tailwind", "skill:a11y", "skill:vitest"],
+    "ops": ["skill:deploy-*"]
+  },
+  "tiers": { "premium": { "groups": ["core"] }, "standard": { "groups": ["core"] }, "quick": { "groups": ["core"], "preload": ["react-components"] } },
+  "profiles": {
+    "ui": { "groups": ["ui"], "when": { "paths": ["src/**"] } },
+    "release": { "groups": ["ops"], "when": { "branch": "^release/" } }
+  },
+  "classify": { "mode": "shadow" },
+  "providers": { "git": { "kind": "module", "builtin": true }, "pkg": { "kind": "file", "path": "package.json", "pick": ["scripts"] } },
+  "itemSources": [ { "kind": "cursor-mdc", "dir": ".cursor/rules" } ]
+}

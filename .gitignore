@@ -1,5 +1,6 @@
 node_modules/
-dist/
+# dist/cli.js and dist/hooks-adapter.js are committed: the installed plugin runs them (CI checks they are current).
+packages/jsx/dist/
 .claude/prompt/.compiled/
 .claude/prompt/.trace/
 **/.claude/prompt/.compiled/

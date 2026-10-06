@@ -1,0 +1,4 @@
+---
+globs: src/**/*.rs
+---
+Публічний API модуля — у `mod.rs`/`lib.rs`; внутрішнє — `pub(crate)`.

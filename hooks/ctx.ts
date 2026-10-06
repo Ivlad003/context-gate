@@ -20,6 +20,8 @@ export interface Io {
     list(path: string): ReturnType<E['fs']['list']>
     exists(path: string): Promise<boolean>
     write(path: string, text: string): Promise<void>
+    /** `$.fs.stat` (optional: layers fall back to the parent's `list`). */
+    stat?(path: string): Promise<{ kind: string; size: number; mtimeMs: number }>
   }
   session: {
     id(): Promise<string>
@@ -30,9 +32,20 @@ export interface Io {
     append: E['session']['append']
     compact(input?: { instructions?: string }): Promise<unknown>
   }
-  env: { os(): Promise<string | undefined>; home(): Promise<string | undefined> }
+  env: {
+    os(): Promise<string | undefined>
+    home(): Promise<string | undefined>
+    /** `XDG_CACHE_HOME` (optional; the cache dir falls back to `<home>/.cache`). */
+    cacheHome?(): Promise<string | undefined>
+  }
   store: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; delete(key: string): Promise<void> }
-  process: { run: E['process']['run'] }
+  process: {
+    run: E['process']['run']
+    /** `$.process.spawn` (WP2: `/gate edit` starts the browser editor; optional for fake ports). */
+    spawn?: E['process']['spawn']
+  }
+  /** `$.settings.read()`: merged settings, `env` block included (G-03 env whitelist; optional for fake ports). */
+  settings?: { read(): Promise<Record<string, unknown>> }
   mcp: { call: E['mcp']['call'] }
   model: { complete: E['model']['complete']; classify: E['model']['classify'] }
   tool: { register: E['tool']['register']; list: E['tool']['list'] }
@@ -85,6 +98,10 @@ export interface PromptSet {
   diagnostics: Diagnostic[]
   /** Absolute paths worth watching. */
   watch: string[]
+  /** Every source (entry and imports) of the compiled prompts, repo-relative: their mtimes feed staleness. */
+  sources?: string[]
+  /** Where the compiled prompts came from: the repo `.compiled`, the CLI's per-repo cache (Р3), or nowhere. */
+  compiledFrom?: 'repo' | 'cache' | 'none'
 }
 
 export interface ScriptTool {
@@ -94,6 +111,8 @@ export interface ScriptTool {
   /** JSON Schema from the `# input:` header (core `parseToolHeader`). */
   inputSchema: Record<string, unknown>
   tiers?: string[]
+  /** Function-level tool (`# gate-tool: <fn>` in a module): call this export through the shim. */
+  fn?: string
 }
 
 export interface Runtime {
@@ -149,6 +168,20 @@ export interface Runtime {
   buildAttempted: Set<string>
   whitelist?: string[]
   unknownListingLogged: boolean
+  /** `turn.step` usage of the main loop (G-43, health H002/H012): totals and the last step. */
+  stepUsage?: { steps: number; input: number; cacheRead: number; cacheCreation: number; output: number; last?: { input: number; cacheRead: number; cacheCreation: number; output: number; model: string } }
+  /** Last failed prompt build (H013 / G*), for the `prompt ⚠ build` status marker; cleared by a good build. */
+  buildError?: { code: string; message: string; at: number }
+  /** Model calls of each lazy include (`get_<name>`), by ref. */
+  lazyCalls: Map<string, number>
+  /** Module exports asked once per session (G158): module path → names (null when the shim can't tell). */
+  moduleExports: Map<string, string[] | null>
+  /** `.trace/last.json` throttle: last write time and content hash. */
+  traceWrite?: { at: number; hash: string }
+  /** Hash of the last journaled debug/assert/log batch (dedup across renders). */
+  lastDebug?: string
+  /** `.claude/gate.debug.log` text kept in memory (no append API). */
+  debugLogText?: string
 }
 
 export function newRuntime(options: Options): Runtime {
@@ -182,6 +215,8 @@ export function newRuntime(options: Options): Runtime {
     building: false,
     buildAttempted: new Set(),
     unknownListingLogged: false,
+    lazyCalls: new Map(),
+    moduleExports: new Map(),
   }
 }
 

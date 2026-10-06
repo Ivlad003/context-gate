@@ -191,3 +191,92 @@ test('codes: explain and diag', () => {
   assert.ok(d.hint)
   assert.equal(diag('G303', 'x', { path: 'p' }).path, 'p')
 })
+
+// ───────────── G-01: models attributes, tier from thresholds ─────────────
+
+test('models: attribute entries infer the tier from tiers[*].thresholds; harness attrs for unknown models', async () => {
+  const { inferTier, modelForTier } = await import('../packages/core/src/config.ts')
+  const cfg = defaultConfig()
+  cfg.tiers = {
+    premium: { groups: [], thresholds: { minCostPer1k: 0.01 } },
+    standard: { groups: [], thresholds: { minCostPer1k: 0.002 } },
+    quick: { groups: [], thresholds: { maxContextWindow: 64000 } },
+  }
+  cfg.models = {
+    'claude-opus-*': 'premium',
+    'local-big': { contextWindow: 128000, costPer1k: 0.005 },
+    cheap: { match: 'llama-*', contextWindow: 32000, costPer1k: 0 },
+    pinned: { match: 'gemma-*', tier: 'quick', contextWindow: 999999 },
+  }
+  const cases: [string, Parameters<typeof tierForModel>[2], string, boolean][] = [
+    ['claude-opus-4-5', undefined, 'premium', false],
+    ['local-big', undefined, 'standard', false],
+    ['llama-3-8b', undefined, 'quick', false],
+    ['gemma-2', undefined, 'quick', false],
+    ['mystery', { costPer1k: 0.02 }, 'premium', false],
+    ['mystery', { contextWindow: 16000 }, 'quick', false],
+    ['mystery', undefined, 'standard', true],
+    ['mystery', { contextWindow: 200000 }, 'standard', true],
+  ]
+  for (const [model, attrs, tier, fallback] of cases) {
+    const r = tierForModel(cfg, model, attrs)
+    assert.equal(r.tier, tier, `${model} ${JSON.stringify(attrs)}: ${r.reason}`)
+    assert.equal(r.fallback, fallback, model)
+  }
+  assert.match(tierForModel(cfg, 'local-big').reason, /поріг tier standard/)
+  // No thresholds declared anywhere → built-in cost thresholds on premium/standard/quick.
+  const d = defaultConfig()
+  assert.equal(inferTier(d, { costPer1k: 0.015 }), 'premium')
+  assert.equal(inferTier(d, { costPer1k: 0.003 }), 'standard')
+  assert.equal(inferTier(d, { costPer1k: 0.0008 }), 'quick')
+  assert.equal(inferTier(d, {}), undefined)
+  assert.equal(modelForTier(cfg, 'quick'), 'gemma-*')
+  assert.equal(modelForTier(cfg, 'premium'), 'claude-opus-*')
+})
+
+test('schema: models attributes, thresholds, classify/brief providers, prompt.packages, debugLog, assertFail', () => {
+  const ok = validateConfig({
+    tiers: { premium: { thresholds: { minCostPer1k: 0.01 } }, standard: {}, quick: {} },
+    models: { 'x-*': { contextWindow: 32000, costPer1k: 0.001 }, y: 'quick', z: { tier: 'premium', match: 'zz-*' } },
+    classify: { mode: 'auto', provider: { kind: 'cli', command: ['node', 'scripts/classify.js'], timeout: '5s' } },
+    brief: { enabled: true, provider: 'builtin' },
+    prompt: { packages: ['@acme/prompts'], commitCompiled: true },
+    debug: true, debugLog: { path: '.claude/x.log', maxBytes: 1000 }, assertFail: 'fail',
+  })
+  assert.deepEqual(ok.diagnostics.filter((d) => d.severity === 'error'), [])
+  assert.ok(ok.config)
+  assert.equal(validateConfig({ classify: { mode: 'auto', provider: 'jev' } }).config?.classify?.provider, 'jev')
+  const bad = [
+    { classify: { mode: 'auto', provider: 'gpt' } },
+    { classify: { mode: 'auto', provider: { kind: 'cli' } } },
+    { models: { x: { contextWindow: 'big' } } },
+    { assertFail: 'warn' },
+    { tiers: { quick: { thresholds: { minCostPer1k: -1 } } } },
+  ]
+  for (const b of bad) assert.ok(validateConfig(b).diagnostics.some((d) => d.severity === 'error'), JSON.stringify(b))
+  assert.ok(validateConfig({ models: { x: { tier: 'nope' } } }).diagnostics.some((d) => d.code === 'G305'))
+})
+
+test('itemSources: markdown-dir needs dir, provider needs a declared provider (G313, warnings)', () => {
+  const r = validateConfig({
+    providers: { arch: { kind: 'file', path: 'arch.json' } },
+    itemSources: [{ kind: 'markdown-dir' }, { kind: 'provider' }, { kind: 'provider', name: 'nope' }, { kind: 'provider', name: 'arch', field: 'deny', as: 'always' }, { kind: 'markdown-dir', dir: 'docs/rules' }],
+  })
+  assert.ok(r.config, 'warnings only')
+  assert.equal(r.diagnostics.filter((d) => d.code === 'G313').length, 3)
+})
+
+// ───────────── G-03: env whitelist, masking; debug log path ─────────────
+
+test('filterEnv keeps whitelisted, set names; maskSecrets hides every value; debugLogPath only with debug', async () => {
+  const { filterEnv, envMaskValues, maskSecrets, debugLogPath, DEBUG_LOG_PATH } = await import('../packages/core/src/config.ts')
+  const env = filterEnv({ API_TOKEN: 'sekret-123', HOME: '/home/u', NUM: 5, EMPTY: undefined }, ['API_TOKEN', 'NUM', 'EMPTY', 'MISSING'])
+  assert.deepEqual(env, { API_TOKEN: 'sekret-123' })
+  assert.deepEqual(filterEnv({ A: 'x' }, undefined), {})
+  const mask = envMaskValues({ ...env, SHORT: 'ab' })
+  assert.deepEqual(mask, ['sekret-123'])
+  assert.equal(maskSecrets('token=sekret-123; again sekret-123', mask), 'token=***; again ***')
+  assert.equal(debugLogPath({}), undefined)
+  assert.deepEqual(debugLogPath({}, true), { path: DEBUG_LOG_PATH, maxBytes: 1024 * 1024 })
+  assert.deepEqual(debugLogPath({ debug: true, debugLog: { path: 'x.log', maxBytes: 10 } }), { path: 'x.log', maxBytes: 10 })
+})

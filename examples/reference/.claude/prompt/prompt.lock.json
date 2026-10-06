@@ -1,0 +1,23 @@
+{
+  "compiler": "context-gate@0.1.0",
+  "prompts": {
+    "main": {
+      "entry": ".claude/prompt/main.prompt.tsx",
+      "sourceHash": "a5856e6189a802cc177c32d680629eef11cfdf38c1c76b241c6b4292e2b9fa7b",
+      "sources": [
+        {
+          "path": ".claude/prompt/main.prompt.tsx",
+          "hash": "7292373e953e8b08e090849525d00c16ec257a19f0d6ec075041a78fd2d648cb"
+        },
+        {
+          "path": ".claude/prompt/shared/base.prompt.tsx",
+          "hash": "9ed67200f6d4f5c9cb26d29abedb11cf2e6e30ad7d1e9538a0919954648533c4"
+        },
+        {
+          "path": "CONVENTIONS.md",
+          "hash": "2d948ee88c3e5ac28123eae6c2f3cd786caf229e944e799452638fab6fc4497e"
+        }
+      ]
+    }
+  }
+}

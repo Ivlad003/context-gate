@@ -30,6 +30,7 @@ export async function resetConversation(io: Io, rt: Runtime, trigger: string): P
   rt.escalated.clear()
   rt.staticCache.clear()
   rt.lastRender = undefined
+  rt.stepUsage = undefined
   await journal(io, rt, { kind: 'debug', trigger })
 }
 
@@ -39,7 +40,7 @@ function recheckOn(rt: Runtime, what: string): boolean {
 
 async function watchList(io: Io, rt: Runtime): Promise<string[]> {
   const out = [join(rt.root, GATE_JSON), join(rt.root, '.cursor/rules')]
-  for (const r of await ensureRules(io, rt)) out.push(join(rt.root, r.path))
+  for (const r of await ensureRules(io, rt)) if (!r.source?.startsWith('provider:')) out.push(join(rt.root, r.path))
   const set = await loadPrompts(io, rt)
   out.push(...set.watch, join(rt.root, `${promptDir(rt)}/scripts`))
   return [...new Set(out)]
@@ -106,4 +107,12 @@ export async function configFileChanged(io: Io, rt: Runtime, path: string): Prom
   if (!rt.root || path !== join(rt.root, GATE_JSON)) return
   await loadGateConfig(io, rt)
   await recompute(io, rt, 'config').catch(() => null)
+}
+
+/** turn.step, after `next`: the main loop's token usage (prompt-cache hits for health H002/H012, G-43). */
+export function recordStepUsage(rt: Runtime, usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens?: number; model?: string } | null | undefined, agentId: string | undefined): void {
+  if (!usage || agentId !== undefined) return
+  const last = { input: usage.input_tokens ?? 0, cacheRead: usage.cache_read_input_tokens ?? 0, cacheCreation: usage.cache_creation_input_tokens ?? 0, output: usage.output_tokens ?? 0, model: usage.model ?? '' }
+  const u = rt.stepUsage ?? { steps: 0, input: 0, cacheRead: 0, cacheCreation: 0, output: 0 }
+  rt.stepUsage = { steps: u.steps + 1, input: u.input + last.input, cacheRead: u.cacheRead + last.cacheRead, cacheCreation: u.cacheCreation + last.cacheCreation, output: u.output + last.output, last }
 }

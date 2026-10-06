@@ -38,6 +38,15 @@ export interface DefaultCtx {
   data: Record<string, any>
 }
 
+/**
+ * TSX level 2: `ctx.gate.profile.in(['frontend', 'backend'])` is rewritten at build into `gate.profile in [...]`.
+ * Type-only (never called at runtime); level-1 files simply do not use it.
+ */
+declare global {
+  interface String { in(list: readonly string[]): boolean }
+  interface Number { in(list: readonly number[]): boolean }
+}
+
 /** Augmented by the generated `.types/ctx.d.ts` (`declare module '@context-gate/jsx' { interface CtxOverrides {...} }`). */
 export interface CtxOverrides {}
 

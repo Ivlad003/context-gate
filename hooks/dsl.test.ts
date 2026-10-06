@@ -129,3 +129,43 @@ describe('prompt DSL', () => {
     expect(r.result).toBe('Вітаю, Світ')
   })
 })
+
+describe('prompt DSL: build state, builtins, function tools (WP1)', () => {
+  test('plan-then-act joins prompt.compose below premium (G-54)', async ($, on) => {
+    mountRepo(on, { files: FILES })
+    on('prompt.compose', () => ({ sections: [] }))
+    const std = await $.prompt.compose(COMPOSE('claude-sonnet-4-5'))
+    expect(std.sections.find((s) => s.id === 'context-gate:plan-then-act')?.text).toContain('план → правка → перевірка')
+  })
+
+  test('an edited import makes the entry stale; the failed build shows `prompt ⚠ build` in /gate health (G-11, G-14)', { options: { trustBuild: 'always' } }, async ($, on) => {
+    const entry = compiled('main', {
+      sources: [{ path: '.claude/prompt/main.prompt.tsx', hash: 'a' }, { path: '.claude/prompt/shared/base.prompt.tsx', hash: 'b' }],
+      sections: [{ id: 'identity', scope: 'static', children: [{ t: 'text', value: 'Стара збірка.' }] }],
+    })
+    // mtimes follow insertion order: the import is newer than the compiled JSON.
+    const repo = mountRepo(on, {
+      files: { '.claude/prompt/main.prompt.tsx': 'x', '.claude/prompt/.compiled/main.json': entry, '.claude/prompt/shared/base.prompt.tsx': 'y' },
+      exists: (p) => (p.endsWith('/dist/cli.js') ? true : undefined),
+      run: (argv) => (argv.includes('build') ? { exitCode: 1, stdout: '', stderr: 'G164 Збірка: shared/base.prompt.tsx: unexpected token' } : undefined) ?? { exitCode: 0, stdout: '', stderr: '' },
+    })
+    on('prompt.compose', () => ({ sections: [] }))
+    const r = await $.prompt.compose(COMPOSE('claude-sonnet-4-5'))
+    expect(repo.runs.some((a) => a.includes('--only') && a.includes('.claude/prompt/main.prompt.tsx'))).toBe(true)
+    expect(r.sections.find((s) => s.id === 'context-gate:identity')?.text).toBe('Стара збірка.')
+    const h = await $.command.run({ command: 'gate', args: 'health', ...RUN })
+    expect(h.text).toContain('prompt ⚠ build: G164')
+  })
+
+  test('`# gate-tool: <fn>` over a module export registers a tool and calls it through the shim (G-36)', { options: { trustBuild: 'always' } }, async ($, on) => {
+    const repo = mountRepo(on, {
+      files: { ...FILES, '.claude/prompt/lib/ver.mjs': '// gate-tool: next_version\n// input: { "bump": "string" }\nexport function next_version({ bump }) { return bump }\n' },
+      run: (argv) => (argv[0] === 'node' && argv.includes('-e') ? { exitCode: 0, stdout: '{"results":["2.0.0"],"errors":[null]}', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }),
+    })
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(repo.tools).toContain('next_version')
+    const r = await $.tool.call({ tool: 'mcp__context-gate__next_version', tool_use_id: 't1', bump: 'major' } as never)
+    expect(r.result).toBe('2.0.0')
+  })
+})

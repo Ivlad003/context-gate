@@ -2,7 +2,7 @@
 // SPEC "Конфігурація `.claude/gate.json`", "Єдина модель" (groups with kind prefixes, G310).
 // Never throws: a schema error returns diagnostics and no config (the skill-gate layer is disabled).
 
-import type { BudgetPct, Diagnostic, GateConfig, ItemSourceConfig, ProfileConfig, Tier, TierConfig } from './types.ts'
+import type { BudgetPct, Diagnostic, GateConfig, ItemSourceConfig, ModelSpec, ProfileConfig, Tier, TierConfig, TierThresholds } from './types.ts'
 import { diag } from './codes.ts'
 import { parseDuration } from './duration.ts'
 import { compileGlob } from './glob.ts'
@@ -44,6 +44,22 @@ const onExceedAction: S = {
     { type: 'object', additionalProperties: false, required: ['do'], properties: { do: { enum: ['compact'] }, instructions: str } },
   ],
 }
+const num0: S = { type: 'number', minimum: 0 }
+const modelSpec: S = {
+  type: 'object', additionalProperties: false,
+  description: 'Model attributes: with `tier` a direct mapping; without it the tier is inferred from `tiers[*].thresholds`.',
+  properties: { tier: tierRef, match: { type: 'string', description: 'Glob on the model id (the key is then a label).' }, contextWindow: { type: 'integer', minimum: 1 }, costPer1k: num0 },
+}
+const thresholds: S = {
+  type: 'object', additionalProperties: false,
+  properties: { minContextWindow: { type: 'integer', minimum: 0 }, maxContextWindow: { type: 'integer', minimum: 0 }, minCostPer1k: num0, maxCostPer1k: num0 },
+}
+const providerRef: S = {
+  anyOf: [
+    { enum: ['builtin', 'jev'] },
+    { type: 'object', additionalProperties: false, required: ['kind', 'command'], properties: { kind: { enum: ['cli'] }, command: strArr, timeout: { type: 'string', format: 'duration' } } },
+  ],
+}
 const groupMap: S = { type: 'object', additionalProperties: strArr, description: 'Group name → globs.' }
 const itemSource: S = {
   type: 'object',
@@ -81,10 +97,10 @@ export const gateJsonSchema = {
       type: 'object',
       additionalProperties: {
         type: 'object', additionalProperties: false,
-        properties: { groups: strArr, skills: { ...strArr, description: 'Legacy (G310).' }, preload: strArr },
+        properties: { groups: strArr, skills: { ...strArr, description: 'Legacy (G310).' }, preload: strArr, thresholds },
       },
     },
-    models: { type: 'object', additionalProperties: tierRef, description: 'Model id glob → tier.' },
+    models: { type: 'object', additionalProperties: { anyOf: [tierRef, modelSpec] }, description: 'Model id glob → tier, or model attributes (`contextWindow`, `costPer1k`).' },
     profiles: {
       type: 'object',
       additionalProperties: {
@@ -102,7 +118,7 @@ export const gateJsonSchema = {
       type: 'object', additionalProperties: false, required: ['mode'],
       properties: {
         mode: { enum: ['shadow', 'auto'] }, model: str,
-        minConfidence: { type: 'number', minimum: 0, maximum: 1 }, recheckOn: strArr, provider: str,
+        minConfidence: { type: 'number', minimum: 0, maximum: 1 }, recheckOn: strArr, provider: providerRef,
       },
     },
     budgets: { type: 'object', additionalProperties: false, properties: { default: budgetPct, tiers: { type: 'object', additionalProperties: budgetPct } } },
@@ -116,7 +132,7 @@ export const gateJsonSchema = {
     },
     brief: {
       type: 'object', additionalProperties: false, required: ['enabled'],
-      properties: { enabled: bool, model: str, maxChars: { type: 'integer', minimum: 0 }, tiers: { type: 'array', items: tierRef } },
+      properties: { enabled: bool, model: str, maxChars: { type: 'integer', minimum: 0 }, tiers: { type: 'array', items: tierRef }, provider: providerRef },
     },
     providers: {
       type: 'object',
@@ -156,12 +172,14 @@ export const gateJsonSchema = {
     },
     prompt: {
       type: 'object', additionalProperties: false,
-      properties: { dir: str, runCacheDefault: { type: 'string', format: 'duration' }, build: { enum: ['auto', 'never'] }, commitCompiled: bool, persist: bool },
+      properties: { dir: str, runCacheDefault: { type: 'string', format: 'duration' }, build: { enum: ['auto', 'never'] }, commitCompiled: bool, persist: bool, packages: { ...strArr, description: 'Prompt library packages whose exported skills `build` builds.' }, transform: { enum: ['level1', 'level2'], description: 'TSX level 2: native TS expressions in runtime props (Р1).' }, skillBody: { enum: ['live', 'static', 'both'], description: 'SKILL.md body: live render line, pre-rendered static body, or both (Р6).' } },
     },
     health: { type: 'object', additionalProperties: { type: 'number' }, description: 'Code (H001…) → threshold.' },
     debug: bool,
+    debugLog: { type: 'object', additionalProperties: false, properties: { path: str, maxBytes: { type: 'integer', minimum: 1 } }, description: 'Debug log file (written only with `debug: true` or CLI `--debug`).' },
+    assertFail: { enum: ['skip', 'fail'], description: 'A false `@assert`: skip the section (default) or fail the render.' },
     log: { type: 'object', additionalProperties: false, properties: { file: bool } },
-    env: strArr,
+    env: { ...strArr, description: 'Env vars visible to the DSL as `env.*` (masked in debug output).' },
     allowBinaries: { ...strArr, description: 'Binaries repo executors/providers may start. Narrows the user whitelist (~/.claude/context-gate.json), never widens it (Р2).' },
   },
 } as const
@@ -275,9 +293,21 @@ function semanticChecks(raw: Record<string, unknown>, out: Diagnostic[]): void {
   const tierNames = new Set(Object.keys(tiers ?? defaultConfig().tiers))
   if (isObj(raw.models)) {
     for (const [glob, t] of Object.entries(raw.models)) {
-      if (typeof t === 'string' && !tierNames.has(t)) out.push(diag('G305', `$.models.${glob}: tier "${t}" не оголошено в tiers`))
+      const tt = typeof t === 'string' ? t : isObj(t) && typeof t.tier === 'string' ? t.tier : undefined
+      if (tt !== undefined && !tierNames.has(tt)) out.push(diag('G305', `$.models.${glob}: tier "${tt}" не оголошено в tiers`))
     }
   }
+  const sources = [...(Array.isArray(raw.itemSources) ? raw.itemSources : []), ...(Array.isArray(raw.ruleSources) ? raw.ruleSources : [])]
+  const providerNames = new Set(Object.keys(isObj(raw.providers) ? raw.providers : {}))
+  sources.forEach((src, i) => {
+    if (!isObj(src)) return
+    const where = `$.itemSources[${i}] (${String(src.kind)})`
+    if (src.kind === 'markdown-dir' && typeof src.dir !== 'string') out.push(diag('G313', `${where}: потрібне поле dir`))
+    if (src.kind === 'provider') {
+      if (typeof src.name !== 'string') out.push(diag('G313', `${where}: потрібне поле name`))
+      else if (!providerNames.has(src.name)) out.push(diag('G313', `${where}: провайдер "${src.name}" не оголошено в providers`))
+    }
+  })
   const esc = raw.escalation
   if (isObj(esc) && Array.isArray(esc.order)) {
     for (const t of esc.order) if (typeof t === 'string' && !tierNames.has(t)) out.push(diag('G305', `$.escalation.order: tier "${t}" не оголошено в tiers`))
@@ -459,16 +489,107 @@ export function normalizeModelId(model: string): string {
   return model.trim().replace(/\[[^\]]*\]$/, '').replace(/^(?:[a-z]{2}\.)?anthropic\./, '')
 }
 
-/** Tier for a model id: exact key first, then globs in declaration order, then `standard`. */
-export function tierForModel(cfg: Pick<GateConfig, 'models' | 'tiers'>, modelId: string | undefined): { tier: Tier; reason: string; matched?: string; fallback: boolean } {
+export interface ModelAttrs { contextWindow?: number; costPer1k?: number }
+
+/** Default thresholds when no tier declares any: premium ≥ $0.01/1k input, standard ≥ $0.002/1k, quick below. */
+const DEFAULT_THRESHOLDS: Record<string, TierThresholds> = { premium: { minCostPer1k: 0.01 }, standard: { minCostPer1k: 0.002 }, quick: {} }
+
+function meets(t: TierThresholds, a: ModelAttrs): boolean {
+  const cw = a.contextWindow
+  const cost = a.costPer1k
+  if (t.minContextWindow !== undefined && (cw === undefined || cw < t.minContextWindow)) return false
+  if (t.maxContextWindow !== undefined && (cw === undefined || cw > t.maxContextWindow)) return false
+  if (t.minCostPer1k !== undefined && (cost === undefined || cost < t.minCostPer1k)) return false
+  if (t.maxCostPer1k !== undefined && (cost === undefined || cost > t.maxCostPer1k)) return false
+  return true
+}
+
+/** Tier from model attributes: the first tier (declaration order) whose `thresholds` all hold. Tiers without
+ * `thresholds` are skipped unless no tier declares any, in which case DEFAULT_THRESHOLDS apply to the
+ * premium/standard/quick tiers that exist. undefined when nothing matches or no attributes are known. */
+export function inferTier(cfg: Pick<GateConfig, 'tiers'>, attrs: ModelAttrs): Tier | undefined {
+  if (attrs.contextWindow === undefined && attrs.costPer1k === undefined) return undefined
+  const tiers = Object.entries(cfg.tiers ?? {})
+  const declared = tiers.filter(([, t]) => t.thresholds)
+  const table: [Tier, TierThresholds][] = declared.length
+    ? declared.map(([n, t]) => [n, t.thresholds!])
+    : Object.keys(DEFAULT_THRESHOLDS).filter((n) => tiers.some(([k]) => k === n)).map((n) => [n, DEFAULT_THRESHOLDS[n]!])
+  for (const [name, t] of table) if (meets(t, attrs)) return name
+  return undefined
+}
+
+function attrText(a: ModelAttrs): string {
+  return [a.contextWindow !== undefined ? `contextWindow ${a.contextWindow}` : '', a.costPer1k !== undefined ? `costPer1k ${a.costPer1k}` : ''].filter(Boolean).join(', ')
+}
+
+/** Tier for a model id: exact key first, then globs (`match` or the key) in declaration order; an entry
+ * with attributes and no `tier` infers it from thresholds; no entry → `attrs` from the harness (when given)
+ * through thresholds; then `standard`. */
+export function tierForModel(cfg: Pick<GateConfig, 'models' | 'tiers'>, modelId: string | undefined, attrs?: ModelAttrs): { tier: Tier; reason: string; matched?: string; fallback: boolean } {
   if (!modelId) return { tier: DEFAULT_TIER, reason: `модель невідома → ${DEFAULT_TIER}`, fallback: true }
   const id = normalizeModelId(modelId)
   const models = cfg.models ?? {}
-  if (models[id] !== undefined) return { tier: models[id], reason: `модель ${id} → ${models[id]}`, matched: id, fallback: false }
-  for (const [glob, tier] of Object.entries(models)) {
-    if (compileGlob(glob, { nocase: true })(id)) return { tier, reason: `модель ${id} ~ ${glob} → ${tier}`, matched: glob, fallback: false }
+  const resolve = (key: string, how: string, v: Tier | ModelSpec) => {
+    if (typeof v === 'string') return { tier: v, reason: `модель ${id} ${how} → ${v}`, matched: key, fallback: false }
+    if (v.tier) return { tier: v.tier, reason: `модель ${id} ${how} → ${v.tier}`, matched: key, fallback: false }
+    const a: ModelAttrs = { ...attrs, ...(v.contextWindow !== undefined ? { contextWindow: v.contextWindow } : {}), ...(v.costPer1k !== undefined ? { costPer1k: v.costPer1k } : {}) }
+    const t = inferTier(cfg, a)
+    if (t) return { tier: t, reason: `модель ${id} ${how}: ${attrText(a)} → поріг tier ${t}`, matched: key, fallback: false }
+    return { tier: DEFAULT_TIER, reason: `модель ${id} ${how}: атрибути (${attrText(a) || '—'}) не відповідають порогам жодного tier → ${DEFAULT_TIER}`, matched: key, fallback: true }
+  }
+  const exact = models[id]
+  if (exact !== undefined && (typeof exact === 'string' || !exact.match)) return resolve(id, '→', exact)
+  for (const [key, v] of Object.entries(models)) {
+    const glob = typeof v === 'string' ? key : (v.match ?? key)
+    if (compileGlob(glob, { nocase: true })(id)) return resolve(key, `~ ${glob}`, v)
+  }
+  if (attrs) {
+    const t = inferTier(cfg, attrs)
+    if (t) return { tier: t, reason: `модель ${id} немає в models; ${attrText(attrs)} → поріг tier ${t}`, fallback: false }
   }
   return { tier: DEFAULT_TIER, reason: `модель ${id} не збігається з жодним glob у models → ${DEFAULT_TIER}`, fallback: true }
+}
+
+/** A model glob/label that maps to `tier` (for `/model` hints). */
+export function modelForTier(cfg: Pick<GateConfig, 'models'>, tier: Tier): string | undefined {
+  for (const [key, v] of Object.entries(cfg.models ?? {})) {
+    if (typeof v === 'string' ? v === tier : v.tier === tier) return typeof v === 'string' ? key : (v.match ?? key)
+  }
+  return undefined
+}
+
+// ───────────────────────── debug log, env ─────────────────────────
+
+export const DEBUG_LOG_PATH = '.claude/gate.debug.log'
+export const DEBUG_LOG_MAX_BYTES = 1024 * 1024
+
+/** Where the debug log goes, or undefined when it is off (`debug: true` in gate.json, or `force` = CLI `--debug`). */
+export function debugLogPath(cfg: Pick<GateConfig, 'debug' | 'debugLog'>, force = false): { path: string; maxBytes: number } | undefined {
+  if (!cfg.debug && !force) return undefined
+  return { path: cfg.debugLog?.path ?? DEBUG_LOG_PATH, maxBytes: cfg.debugLog?.maxBytes ?? DEBUG_LOG_MAX_BYTES }
+}
+
+/** `env.*` for the render scope: only whitelisted names (gate.json `env`) that are set. */
+export function filterEnv(source: Readonly<Record<string, unknown>> | undefined, whitelist: readonly string[] | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!source || !whitelist?.length) return out
+  for (const name of whitelist) {
+    const v = source[name]
+    if (typeof v === 'string') out[name] = v
+  }
+  return out
+}
+
+/** Values to mask in debug output: every whitelisted env value (the spec masks all `env` values in debug). Short values (< 4 chars) are skipped. */
+export function envMaskValues(env: Readonly<Record<string, string>>): string[] {
+  return Object.values(env).filter((v) => v.length >= 4).sort((a, b) => b.length - a.length)
+}
+
+/** Replace every mask value in `text` with `***`. */
+export function maskSecrets(text: string, values: readonly string[]): string {
+  let out = text
+  for (const v of values) if (v) out = out.split(v).join('***')
+  return out
 }
 
 export function budgetFor(cfg: Pick<GateConfig, 'budgets'>, tier: Tier): Required<BudgetPct> {

@@ -11,6 +11,12 @@ import {
 /** A runtime expression: a string in the expression language, or a `ctx`/`Each` reference. */
 export type Expr = string | ExprRef
 
+/**
+ * A runtime condition. Level 1: an `Expr`. Level 2 (`prompt.transform: "level2"` or `// @context-gate level2`):
+ * also a native TS boolean expression over `ctx` (`ctx.ctx.percent > ctx.budgets.soft`), rewritten at build.
+ */
+export type Cond = Expr | boolean
+
 type WithChildren = { children?: Child }
 
 function req(v: string | undefined, comp: string, prop: string): string {
@@ -89,7 +95,7 @@ export interface SectionProps extends WithChildren {
   id: string
   scope: Scope
   /** Section is present only when the expression is true. */
-  when?: Expr
+  when?: Cond
   /** Max characters; overflow is truncated with a marker. */
   budget?: number
   /** Insert after this section id (within the scope). */
@@ -114,7 +120,7 @@ export const Section = builtin('Section', (props: SectionProps): SectionMarker =
 
 // ───────────────────────── Control flow ─────────────────────────
 
-export interface IfProps extends WithChildren { test: Expr }
+export interface IfProps extends WithChildren { test: Cond }
 
 export const If = builtin('If', (props: IfProps): Node => {
   const then: Node[] = []
@@ -177,9 +183,9 @@ export const Each = builtin('Each', (props: EachProps): JsxValue => {
   return node
 })
 
-export const Let = builtin('Let', (props: { name: string; value: Expr | number }): Node => ({ t: 'let', name: req(props.name, 'Let', 'name'), value: req(exprOf(props.value, '<Let> value'), 'Let', 'value') }))
+export const Let = builtin('Let', (props: { name: string; value: Expr | number | boolean | object | null }): Node => ({ t: 'let', name: req(props.name, 'Let', 'name'), value: req(exprOf(props.value, '<Let> value'), 'Let', 'value') }))
 
-export const Set = builtin('Set', (props: { name: string; value: Expr | number }): Node => ({ t: 'set', name: req(props.name, 'Set', 'name'), value: req(exprOf(props.value, '<Set> value'), 'Set', 'value') }))
+export const Set = builtin('Set', (props: { name: string; value: Expr | number | boolean | object | null }): Node => ({ t: 'set', name: req(props.name, 'Set', 'name'), value: req(exprOf(props.value, '<Set> value'), 'Set', 'value') }))
 
 /** Persist a section variable to `data.<name>`. */
 export const Store = builtin('Store', (props: { name: string }): Node => ({ t: 'store', name: req(props.name, 'Store', 'name') }))
@@ -210,10 +216,18 @@ export const Run = builtin('Run', (props: RunProps): Node => {
   if (!node.code) report('G001', 'error', '<Run> без коду.')
   if (props.as) node.as = props.as
   if (props.cache) node.cache = props.cache
-  if (props.store) node.store = props.store
+  if (props.store) { node.store = props.store; legacyStore('Run', props.store, node.as) }
   if (props.needs?.length) node.needs = [...props.needs]
   return node
 })
+
+/**
+ * Р5: `store=` on `Run`/`Call` is the legacy form of `<Store>`; accepted until 1.0 with G180. The field stays
+ * on the node (the renderer keeps the run's cache metadata for `data.*` freshness).
+ */
+function legacyStore(comp: string, key: string, as: string | undefined): void {
+  report('G180', 'warning', `<${comp} store="${key}"> — застаріла форма збереження.`, `використай <${comp} as="${as ?? key}" … /> і <Store name="${as ?? key}" />`)
+}
 
 /** Bind a script module to a namespace (`gitx` → `scripts/git-extra.js`). */
 export const Use = builtin('Use', (props: { name: string; path: string }): Node => ({ t: 'use', name: req(props.name, 'Use', 'name'), path: req(props.path, 'Use', 'path') }))
@@ -233,7 +247,7 @@ export const Call = builtin('Call', (props: CallProps): Node => {
   const node: Node = { t: 'call', fn, args: (props.args ?? []).map((a, i) => exprOf(a, `<Call> args[${i}]`) ?? 'null'), as: props.as ?? fn.split('.').pop()! }
   if (props.kwargs) node.kwargs = Object.fromEntries(Object.entries(props.kwargs).map(([k, v]) => [k, exprOf(v, `<Call> kwargs.${k}`) ?? 'null']))
   if (props.cache) node.cache = props.cache
-  if (props.store) node.store = props.store
+  if (props.store) { node.store = props.store; legacyStore('Call', props.store, node.as) }
   return node
 })
 
@@ -370,7 +384,7 @@ export const Debug = builtin('Debug', (props: { exprs?: Expr[]; message?: string
   return node
 })
 
-export const Assert = builtin('Assert', (props: { test: Expr; message?: string }): Node => {
+export const Assert = builtin('Assert', (props: { test: Cond; message?: string }): Node => {
   const node: Node = { t: 'assert', test: req(exprOf(props.test, '<Assert> test'), 'Assert', 'test') }
   if (props.message) node.message = props.message
   return node

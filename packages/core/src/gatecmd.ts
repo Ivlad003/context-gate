@@ -32,6 +32,8 @@ export type GateCommand =
   | { cmd: 'build' }
   | { cmd: 'help' }
   | { cmd: 'render'; id: string }
+  /** `/gate edit <id>`: the browser editor (packages/editor-web) for a prompt file or section. */
+  | { cmd: 'edit'; id: string }
   | { cmd: 'trust'; action: 'revoke' }
   | { cmd: 'pipe'; stages: PipeStage[] }
 
@@ -140,6 +142,13 @@ export function parseGateCommand(input: string, opts: ParseGateOptions = {}): Ga
     const id = ref.replace(/^prompt:\/\//, '')
     if (!id) return { error: 'G505 /gate render prompt://<id>: бракує id' }
     return { cmd: 'render', id }
+  }
+  if (head === 'edit') {
+    const id = (ws[1] ?? '').replace(/^prompt:\/\//, '')
+    if (!id) return { error: 'G505 /gate edit <id>: бракує id секції або файлу промпту' }
+    if (ws.length > 2) return { error: `G504 /gate edit приймає один id, отримано «${ws.slice(1).join(' ')}»` }
+    if (!/^[\w./@-]+$/.test(id) || id.split('/').includes('..')) return { error: `G505 /gate edit: невірний id «${id}»` }
+    return { cmd: 'edit', id }
   }
   if (head === 'trust') {
     if (ws[1] === 'revoke' && ws.length === 2) return { cmd: 'trust', action: 'revoke' }

@@ -1,0 +1,53 @@
+# `$` calls the context-gate mod may make (SPEC "Валідація перед релізом": «Будь-що поза списком — регресія»).
+# scripts/validate-calls.sh compares this list with the `calls:` line of `claude plugin validate --strict .`.
+# One entry per line: an exact call (`$.fs.read`) or a namespace glob (`$.ui.*`). `#` starts a comment.
+
+# ── The spec list ──
+$.fs.read
+$.fs.list
+$.fs.exists
+$.fs.stat
+$.session.root
+$.session.cwd
+$.session.model
+$.session.usage
+$.session.repo
+$.state.get
+$.state.set
+$.store.get
+$.store.set
+$.tool.register
+$.command.register
+$.model.classify
+# process.run: only with @run / cli providers / gates / the build, and only in a trusted repo (Р2).
+$.process.run
+$.ui.*
+
+# ── Sanctioned by docs/PROBE.md (the spec list predates these API facts) ──
+# setTimeout for $.session.compact outside a running turn (PROBE contradiction 8)
+$.clock.after
+# literal names only: HOME, OS (PROBE contradiction 9)
+$.env.get
+# .claude/gate.log.jsonl, .claude/gate.debug.log, gate.baseline.json, .trace/last.json, gate.index.json
+$.fs.write
+# @mcp / mcp providers, trusted repos only (Р2)
+$.mcp.call
+# classifier with confidence and the task brief (PROBE contradiction 1)
+$.model.complete
+# transcript notices: turn gates, escalation (PROBE contradiction 2)
+$.session.append
+# onExceed: compact
+$.session.compact
+$.session.id
+# trust revoke, cache entries
+$.store.delete
+# MCP servers of the session (index, /gate why)
+$.tool.list
+
+# ── Planned (SPEC-COVERAGE work packages) ──
+# G-03 env whitelist / Р2 binary whitelist from user settings (PROBE: "$.settings.read")
+$.settings.read
+# G-46 /gate edit: the browser editor as a background server
+$.process.spawn
+# per-agent tiers (PROBE: "$.agent list maps agentId to its type")
+$.agent.list

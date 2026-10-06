@@ -1,0 +1,59 @@
+{
+  "$schema": "../../../schema/context-gate.schema.json",
+  "groups": {
+    "core":     ["skill:tdd", "skill:diagnosing-bugs", "skill:project-conventions"],
+    "frontend": ["skill:react-*", "skill:tailwind", "skill:storybook", "skill:a11y", "skill:playwright-e2e",
+                 "tool:mcp__figma__*", "tool:mcp__playwright__*", "agent:ui-reviewer"],
+    "backend":  ["skill:nestjs", "skill:prisma", "skill:api-design", "skill:postgres-queries", "skill:security-audit",
+                 "tool:mcp__postgres__*", "agent:db-reviewer"],
+    "git":      ["skill:git-conventions", "skill:resolving-merge-conflicts", "skill:release-notes", "skill:changelog"],
+    "docs":     ["skill:writing-for-agents", "skill:docs-style", "skill:adr"],
+    "ops":      ["skill:docker", "skill:ci-pipelines"]
+  },
+  "tiers": {
+    "premium":  { "groups": ["core"] },
+    "standard": { "groups": ["core", "git"] },
+    "quick":    { "groups": ["core", "git", "docs"], "preload": ["project-conventions"] }
+  },
+  "models": { "claude-opus-*": "premium", "claude-sonnet-*": "standard", "claude-haiku-*": "quick" },
+  "profiles": {
+    "frontend": { "groups": ["frontend"],
+                  "when": { "paths": ["apps/web/**"], "branch": "^feat/ui" } },
+    "backend":  { "groups": ["backend", "ops"],
+                  "when": { "paths": ["apps/api/**", "prisma/**", "**/migrations/**"] } },
+    "git":      { "groups": ["git"], "when": { "ticketType": ["git"] } },
+    "docs":     { "groups": ["docs"], "when": { "paths": ["docs/**"], "ticketType": ["docs"] } }
+  },
+  "classify": { "mode": "shadow", "model": "haiku", "minConfidence": 0.7, "recheckOn": ["/gate new", "compact"] },
+  "budgets": {
+    "default": { "softContextPct": 70, "hardContextPct": 85 },
+    "tiers":   { "quick": { "softContextPct": 55, "hardContextPct": 70 } }
+  },
+  "onExceed": {
+    "softContextPct": { "do": "section", "section": "budget-warning" },
+    "hardContextPct": { "do": "compact", "instructions": "Збережи профіль, tier і список активних правил." }
+  },
+  "escalation": { "order": ["quick", "standard", "premium"], "after": { "verifyFailed": 2, "stallTurns": 6 } },
+  "brief": { "enabled": false, "model": "opus", "maxChars": 2000, "tiers": ["quick"] },
+  "providers": {
+    "git":    { "kind": "module", "builtin": true },
+    "fs":     { "kind": "module", "builtin": true, "functions": ["examples"] },
+    "pkg":    { "kind": "file", "path": "package.json", "pick": ["name", "workspaces", "scripts"] },
+    "eslint": { "kind": "cli", "command": ["sh", "-c", "eslint -f json apps || [ $? -eq 1 ]"], "cache": "10m", "onError": "unverified" }
+  },
+  "itemSources": [
+    { "kind": "claude-skills" },
+    { "kind": "claude-tools", "match": "^mcp__" },
+    { "kind": "claude-agents" },
+    { "kind": "cursor-mdc", "dir": ".cursor/rules" },
+    { "kind": "prompt-dir", "dir": ".claude/prompt", "as": "section" }
+  ],
+  "gates": [
+    { "name": "read-before-write", "on": "write", "builtin": true, "tiers": ["quick", "standard"] },
+    { "name": "tests", "on": "commit", "run": ["npm", "test"], "pass": "exitCode == 0", "message": "Тести впали, виправ перед комітом" },
+    { "name": "typecheck", "on": "turn", "tiers": ["quick"], "run": ["tsc", "--noEmit", "--pretty", "false", "-p", "apps/api"],
+      "pass": "exitCode == 0", "onlyNew": true, "baseline": ".claude/gate.baseline.json" }
+  ],
+  "cursorRules": { "enabled": true, "nested": false, "maxCharsPerInjection": 30000 },
+  "prompt": { "dir": ".claude/prompt", "runCacheDefault": "5m" }
+}

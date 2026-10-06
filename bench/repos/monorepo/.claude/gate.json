@@ -1,0 +1,18 @@
+{
+  "groups": {
+    "core": ["skill:tdd", "skill:diagnosing-bugs", "skill:vitest", "skill:typescript-types"],
+    "ui": ["skill:react-*", "skill:storybook"],
+    "server": ["skill:node-server"],
+    "repo": ["skill:turbo", "skill:changesets", "skill:pnpm-*", "skill:git-conventions", "skill:resolving-merge-conflicts", "agent:reviewer"]
+  },
+  "tiers": { "premium": { "groups": ["core"] }, "standard": { "groups": ["core"] }, "quick": { "groups": ["core", "repo"] } },
+  "profiles": {
+    "ui": { "groups": ["ui"], "when": { "paths": ["packages/ui/**"] } },
+    "server": { "groups": ["server"], "when": { "paths": ["packages/server/**"] } },
+    "release": { "groups": ["repo"], "when": { "ticketType": ["release", "git"] } }
+  },
+  "classify": { "mode": "shadow" },
+  "providers": { "git": { "kind": "module", "builtin": true } },
+  "itemSources": [ { "kind": "cursor-mdc", "dir": ".cursor/rules", "nested": true } ],
+  "cursorRules": { "enabled": true, "nested": true }
+}

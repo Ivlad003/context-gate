@@ -4,9 +4,35 @@
   "description": "Runtime and DSL for Claude Code context: Cursor .mdc rules, skill-gate, TSX prompt DSL",
   "type": "module",
   "license": "MIT",
+  "author": "kosmodev",
+  "keywords": [
+    "claude-code",
+    "cursor-rules",
+    "skills",
+    "mcp",
+    "prompt",
+    "dsl",
+    "context"
+  ],
   "bin": {
-    "context-gate": "dist/cli.js"
+    "context-gate": "dist/cli.js",
+    "context-gate-hooks": "dist/hooks-adapter.js"
   },
+  "exports": {
+    "./package.json": "./package.json",
+    "./schema.json": "./schema/context-gate.schema.json"
+  },
+  "files": [
+    "dist/cli.js",
+    "dist/hooks-adapter.js",
+    "packages/core/src/",
+    "packages/jsx/src/",
+    "examples/skills/",
+    "schema/",
+    "README.md",
+    "README.uk.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=22.18"
   },
@@ -18,7 +44,12 @@
     "build:editors": "npm --prefix packages/lsp run build && node editors/vscode/scripts/build.mjs",
     "typecheck:mod": "scripts/sync-mod-types.sh >/dev/null && tsc -p hooks/tsconfig.json",
     "test:mod": "scripts/plugin-test.sh",
-    "validate:mod": "claude plugin validate --strict ."
+    "validate:mod": "claude plugin validate --strict .",
+    "build:all": "npm run build && npm run build:hooks-adapter",
+    "check:dist": "npm run build:all && git diff --exit-code -- dist",
+    "validate:calls": "scripts/validate-calls.sh",
+    "e2e": "scripts/e2e.sh",
+    "prepublishOnly": "npm test && npm run typecheck && npm run build:all"
   },
   "dependencies": {
     "esbuild": "^0.28.2"
@@ -26,5 +57,8 @@
   "devDependencies": {
     "typescript": "^5.9.0",
     "@types/node": "^24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

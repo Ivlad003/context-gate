@@ -1,0 +1,15 @@
+{
+  "compiler": "context-gate@0.1.0",
+  "prompts": {
+    "main": {
+      "entry": ".claude/prompt/main.prompt.tsx",
+      "sourceHash": "c9c385ad1e556791d0ec464605a5d617782217cca4a7d6793e69f1eae4b3e080",
+      "sources": [
+        {
+          "path": ".claude/prompt/main.prompt.tsx",
+          "hash": "fa19546c0bc5869c608d066da001f2aa54ad65b59bde8b64d4eed586d4759067"
+        }
+      ]
+    }
+  }
+}

@@ -5,7 +5,7 @@
 import { pathToFileURL } from 'node:url'
 import { startEditorServer } from './server.ts'
 
-export interface MainArgs { id?: string; root: string; port: number; cli?: string; json: boolean; help: boolean }
+export interface MainArgs { id?: string; root: string; port: number; cli?: string; json: boolean; help: boolean; /** `--no-stdin-watch`: the parent owns the lifetime (`$.process.spawn` kills the child), stdin may be closed. */ noStdinWatch?: boolean }
 
 export function parseMainArgs(argv: string[]): MainArgs {
   const out: MainArgs = { root: process.cwd(), port: 0, json: false, help: false }
@@ -16,6 +16,7 @@ export function parseMainArgs(argv: string[]): MainArgs {
     else if (a === '--port') out.port = Number(next())
     else if (a === '--cli') out.cli = next()
     else if (a === '--json') out.json = true
+    else if (a === '--no-stdin-watch') out.noStdinWatch = true
     else if (a === '-h' || a === '--help') out.help = true
     else if (!a.startsWith('-') && !out.id) out.id = a
     else throw new Error(`Невідомий аргумент ${a}`)
@@ -23,7 +24,7 @@ export function parseMainArgs(argv: string[]): MainArgs {
   return out
 }
 
-const USAGE = 'Використання: context-gate-edit <id> [--root <шлях>] [--port <n>] [--cli "<команда>"] [--json]'
+const USAGE = 'Використання: context-gate-edit <id> [--root <шлях>] [--port <n>] [--cli "<команда>"] [--json] [--no-stdin-watch]'
 
 export async function main(argv: string[]): Promise<number> {
   let args: MainArgs
@@ -36,7 +37,7 @@ export async function main(argv: string[]): Promise<number> {
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)
     // Spawned by the mod (--json): exit when the parent closes our stdin.
-    if (args.json && !process.stdin.isTTY) { process.stdin.resume(); process.stdin.once('end', stop) }
+    if (args.json && !args.noStdinWatch && !process.stdin.isTTY) { process.stdin.resume(); process.stdin.once('end', stop) }
   })
   return 0
 }

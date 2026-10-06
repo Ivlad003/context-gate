@@ -12,7 +12,7 @@ import { PIPE_STAGES, type PipeStage, type PipeStageName } from '../../core/src/
 import { buildPrompts, generateCtxTypes } from './build.ts'
 import { bool, helpText, list, parseArgv, str, type FlagSpec, type ParsedArgv } from './argv.ts'
 import { healthCommand, runCommand } from './cmd-run.ts'
-import { formatSync, syncCommand, syncWatchPaths } from './cmd-sync.ts'
+import { formatSync, syncCommand, syncHookMode, syncWatchPaths } from './cmd-sync.ts'
 import { exampleCommand, initCommand, migrateCommand } from './cmd-init.ts'
 import { formatStageOut, runPipe, runStage } from './cmd-pipe.ts'
 import { benchCommand, reportCommand } from './cmd-report.ts'
@@ -159,6 +159,7 @@ export const COMMANDS: Record<string, Command> = {
       diff: { type: 'string', desc: 'різниця з тим, що модель отримала (session:latest)', arg: '<src>' },
       watch: { type: 'bool', desc: 'перерендер при зміні .claude/prompt/**, gate.json, scripts/' },
       build: { type: 'bool', desc: 'автозбірка застарілого TSX (за замовчуванням, якщо довірено; --no-build вимикає)' },
+      debug: { type: 'bool', desc: '@debug обчислюється і пишеться в .claude/gate.debug.log (як debug: true у gate.json)' },
     },
     extra: 'Для skill-промпту помилка аргументів друкує секцію usage (код виходу 0 — це текст для моделі).',
     async run(p, root, io) {
@@ -174,6 +175,7 @@ export const COMMANDS: Record<string, Command> = {
           ...(str(p, 'args') !== undefined ? { argsRaw: str(p, 'args') } : p.tail.length ? { argsRaw: p.tail.join(' ') } : {}),
           ...(str(p, 'diff') ? { diff: str(p, 'diff') } : {}),
           ...(p.flags.build === false ? { autoBuild: false } : {}),
+          ...(bool(p, 'debug') ? { debug: true } : {}),
         })
         io.out(r.stdout)
         if (r.stderr) io.err(r.stderr)
@@ -227,10 +229,10 @@ export const COMMANDS: Record<string, Command> = {
   },
   init: {
     summary: 'створити .claude/gate.json із профілями зі структури репозиторію (classify: shadow) і .gitignore',
-    usage: ['init [--force] [--dry-run]'],
-    flags: { force: { type: 'bool', desc: 'перезаписати наявний gate.json' }, 'dry-run': { type: 'bool', desc: 'лише надрукувати JSON' } },
+    usage: ['init [--force] [--dry-run] [--commit-compiled]'],
+    flags: { force: { type: 'bool', desc: 'перезаписати наявний gate.json' }, 'dry-run': { type: 'bool', desc: 'лише надрукувати JSON' }, 'commit-compiled': { type: 'bool', desc: 'prompt.commitCompiled: true — .compiled/ комітиться (не в .gitignore)' } },
     async run(p, root, io) {
-      const r = initCommand(root, { force: bool(p, 'force'), dryRun: bool(p, 'dry-run') })
+      const r = initCommand(root, { force: bool(p, 'force'), dryRun: bool(p, 'dry-run'), commitCompiled: bool(p, 'commit-compiled') })
       ;(r.code ? io.err : io.out)(r.out)
       return r.code
     },
@@ -247,9 +249,11 @@ export const COMMANDS: Record<string, Command> = {
   },
   sync: {
     summary: 'static-адаптер без mods: .mdc → .claude/rules/cursor + skills, профіль → skillOverrides, DSL → prompt.generated.md',
-    usage: ['sync [--profile p] [--tier t] [--watch]'],
-    flags: { ...ctxFlags, watch: { type: 'bool', desc: 'перегенеровувати при змінах' }, json: { type: 'bool', desc: 'результат JSON' }, 'no-prompt': { type: 'bool', desc: 'без prompt.generated.md' }, 'no-overrides': { type: 'bool', desc: 'без skillOverrides' }, hard: { type: 'bool', desc: 'вимкнені skills → off (інакше user-invocable-only: /name лишається)' } },
+    usage: ['sync [--profile p] [--tier t] [--watch]', 'sync --install-hook | --uninstall-hook', 'sync --hook'],
+    flags: { ...ctxFlags, watch: { type: 'bool', desc: 'перегенеровувати при змінах' }, json: { type: 'bool', desc: 'результат JSON' }, 'no-prompt': { type: 'bool', desc: 'без prompt.generated.md' }, 'no-overrides': { type: 'bool', desc: 'без skillOverrides' }, hard: { type: 'bool', desc: 'вимкнені skills → off (інакше user-invocable-only: /name лишається)' }, hook: { type: 'bool', desc: 'режим SessionStart-хука: stdout — JSON (reloadSkills, коли змінились skills)' }, 'install-hook': { type: 'bool', desc: 'записати SessionStart settings-хук «sync --hook» у .claude/settings.local.json' }, 'uninstall-hook': { type: 'bool', desc: 'прибрати цей хук' } },
     async run(p, root, io) {
+      const hookMode = bool(p, 'hook') ? 'hook' : bool(p, 'install-hook') ? 'install' : bool(p, 'uninstall-hook') ? 'uninstall' : undefined
+      if (hookMode) { const r = await syncHookMode({ ...ctxOpts(p, root), noPrompt: bool(p, 'no-prompt'), noOverrides: bool(p, 'no-overrides'), hard: bool(p, 'hard') }, hookMode); io.out(r.out); if (r.err) io.err(r.err); return r.code }
       const once = async (): Promise<number> => {
         const r = await syncCommand({ ...ctxOpts(p, root), noPrompt: bool(p, 'no-prompt'), noOverrides: bool(p, 'no-overrides'), hard: bool(p, 'hard') })
         io.out(bool(p, 'json') ? JSON.stringify(r) + '\n' : formatSync(r))

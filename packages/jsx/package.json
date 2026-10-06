@@ -5,9 +5,43 @@
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts",
-    "./jsx-runtime": "./src/jsx-runtime.ts",
-    "./jsx-dev-runtime": "./src/jsx-runtime.ts",
-    "./compile": "./src/compile.ts"
+    ".": {
+      "types": "./dist/types/jsx/src/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./jsx-runtime": {
+      "types": "./dist/types/jsx/src/jsx-runtime.d.ts",
+      "import": "./dist/jsx-runtime.js"
+    },
+    "./jsx-dev-runtime": {
+      "types": "./dist/types/jsx/src/jsx-runtime.d.ts",
+      "import": "./dist/jsx-runtime.js"
+    },
+    "./compile": {
+      "types": "./dist/types/jsx/src/compile.d.ts",
+      "import": "./dist/compile.js"
+    }
+  },
+  "types": "./dist/types/jsx/src/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "context-gate",
+    "claude-code",
+    "prompt",
+    "jsx",
+    "dsl"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts src/jsx-runtime.ts src/compile.ts --bundle --format=esm --platform=neutral --target=es2022 --outdir=dist && tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

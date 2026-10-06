@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+Python 3.12, типи в сигнатурах, polars замість pandas, форматування ruff. Запуск тестів: `uv run pytest`.

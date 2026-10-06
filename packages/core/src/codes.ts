@@ -81,6 +81,7 @@ export const CODES: Record<string, CodeInfo> = {
   G310: { severity: 'warning', title: 'Застарілий формат конфігурації', explain: 'Поля `skillGroups`, `mcpGroups`, `ruleSources` і `skills`/`mcp`/`agents` у профілях чи tiers — старий формат. Вони конвертуються в єдині `groups` з kind-префіксами (`skill:…`, `tool:mcp__<server>__*`, `agent:…`) і `itemSources`.', hint: 'Запусти `context-gate migrate`, щоб переписати gate.json у новому форматі.' },
   G311: { severity: 'error', title: 'Відсутнє обов\'язкове поле', explain: 'Обов\'язкове поле об\'єкта відсутнє.' },
   G312: { severity: 'warning', title: 'softContextPct ≥ hardContextPct', explain: 'М\'який поріг бюджету не менший за жорсткий: попередження ніколи не встигне спрацювати.' },
+  G313: { severity: 'warning', title: 'Невірне джерело елементів', explain: 'Запис `itemSources`/`ruleSources` неповний: `markdown-dir` потребує `dir`, `provider` — `name` провайдера, оголошеного в `providers`. Джерело пропущено.' },
   // ── G5xx: pipe / /gate command ──
   G501: { severity: 'error', title: 'Невідома стадія pipe', explain: 'Стадія конвеєра не входить у граматику.', hint: 'Відомі стадії: collect, normalize, decide, budget, render, deliver, observe, where, tokens, on, off, why, take, sort, preview.' },
   G502: { severity: 'error', title: 'Невідомий профіль або підкоманда', explain: 'Слово після `/gate` не є підкомандою і не збігається з жодним профілем з gate.json.', hint: '`/gate` без аргументів показує профілі; `/gate help` — підкоманди.' },

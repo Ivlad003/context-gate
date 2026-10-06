@@ -231,8 +231,8 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
     if (it.kind === 'skill' && preloadMatch.some((m) => m(it.name))) d = 'preload'
     else if (noGroups || enabled.has(it.id)) d = 'on'
     else if (it.kind === 'section' || it.kind === 'datum') d = 'on'
+    else if (grouped) d = 'off' // script tools (`# gate-tool:`) obey groups like MCP tools (G-35)
     else if (it.kind === 'tool' && !isMcpTool(it)) d = 'on'
-    else if (grouped) d = 'off'
     else if (it.kind === 'skill') d = 'nameOnly'
     else if (it.kind === 'tool') d = 'off' // MCP tools outside the profile are off
     else d = 'on' // ungrouped agents and rules stay available
@@ -354,4 +354,43 @@ export function skillOverridesFor(gate: Pick<Gate, 'skills'>, opts: { hard?: boo
   for (const n of gate.skills.nameOnly) out[name(n)] = 'name-only'
   for (const n of gate.skills.off) out[name(n)] = opts.hard ? 'off' : 'user-invocable-only'
   return out
+}
+
+// ───────────────────────── classify / brief providers (G-02) ─────────────────────────
+
+/** The CLI classify provider's stdin: `{ text, profiles: [{ name, groups }], paths, model }`. */
+export function classifyRequest(config: Pick<GateConfig, 'profiles'>, text: string, paths: readonly string[], model?: string): string {
+  const profiles = Object.entries(config.profiles ?? {}).map(([name, p]) => ({ name, groups: p.groups ?? [] }))
+  return JSON.stringify({ text: text.slice(0, 4000), profiles, paths: paths.slice(-20), ...(model ? { model } : {}) })
+}
+
+/** `{ "profile", "confidence" }` anywhere in the text (a model answer or a CLI's stdout); confidence clamped to 0…1. */
+export function parseClassify(text: string, profiles: readonly string[]): { profile: string; confidence: number } | undefined {
+  const m = /\{[\s\S]*?\}/.exec(text)
+  if (!m) return undefined
+  try {
+    const v = JSON.parse(m[0]) as { profile?: unknown; confidence?: unknown }
+    if (typeof v.profile !== 'string' || !profiles.includes(v.profile)) return undefined
+    const c = typeof v.confidence === 'number' ? v.confidence : Number(v.confidence)
+    return { profile: v.profile, confidence: Number.isFinite(c) ? Math.max(0, Math.min(1, c)) : 0 }
+  } catch {
+    return undefined
+  }
+}
+
+/** The CLI brief provider's stdin: `{ text, tier, maxChars, paths, model }`. */
+export function briefRequest(text: string, tier: string, maxChars: number, paths: readonly string[], model?: string): string {
+  return JSON.stringify({ text: text.slice(0, 8000), tier, maxChars, paths: paths.slice(-20), ...(model ? { model } : {}) })
+}
+
+/** A brief provider's stdout: JSON `{ "text" }` or plain text, trimmed and cut at `maxChars`. */
+export function parseBrief(stdout: string, maxChars: number): string | undefined {
+  let t = stdout.trim()
+  if (t.startsWith('{')) {
+    try {
+      const v = JSON.parse(t) as { text?: unknown }
+      if (typeof v.text === 'string') t = v.text.trim()
+    } catch { /* plain text */ }
+  }
+  return t ? t.slice(0, maxChars) : undefined
 }

@@ -3,7 +3,7 @@
 // running on defaults (SPEC "Конфігурація", MOD-ADAPTER "session.start").
 
 
-import { defaultConfig, loadConfig, tierForModel } from '../../packages/core/src/config.ts'
+import { defaultConfig, envMaskValues, filterEnv, loadConfig, tierForModel } from '../../packages/core/src/config.ts'
 import { json } from '../state.ts'
 import { type Io, type Runtime, debug, initRoot, join } from '../ctx.ts'
 
@@ -49,9 +49,9 @@ export async function ensureSession(io: Io, rt: Runtime): Promise<void> {
     await loadGateConfig(io, rt)
     const model = await io.session.model().catch(() => undefined)
     if (model) {
-      const t = tierForModel(rt.cfg, model)
+      const cw = await io.session.usage().then((u) => u.context.window, () => undefined)
       await io.update('model', () => model)
-      await io.update('tier', () => t.tier)
+      await io.update('tier', () => modelTier(rt, model, cw))
     }
     if (rt.options.profile) {
       await io.update('manual', (m) => (m.profile !== undefined || m.off ? m : json({ ...m, profile: rt.options.profile })))
@@ -61,4 +61,41 @@ export async function ensureSession(io: Io, rt: Runtime): Promise<void> {
     debug(io, `bootstrap failed: ${String((err as Error)?.message ?? err)}`)
     if (!rt.cfg) rt.cfg = defaultConfig()
   }
+}
+
+/** Tier for a model (G-01): `models` globs and attribute entries, then the harness's context window
+ * (`$.session.usage().context.window`, main loop only) through `tiers[*].thresholds`. */
+export function modelTier(rt: Runtime, model: string, contextWindow?: number): string {
+  return tierForModel(rt.cfg ?? defaultConfig(), model, contextWindow ? { contextWindow } : undefined).tier
+}
+
+// ───────────────────────── env whitelist (G-03) ─────────────────────────
+// PROBE #9: `$.env.get` takes literal names only, so the gate.json `env` whitelist reads the settings `env`
+// block (`$.settings.read()`) instead. Only whitelisted names reach the DSL (`env.*`); their values are masked
+// in debug output (`envMask`).
+
+const envCache = new WeakMap<Runtime, { cfg: unknown; env: Record<string, string> }>()
+
+export async function ensureEnv(io: Io, rt: Runtime): Promise<Record<string, string>> {
+  const list = rt.cfg?.env
+  if (!list?.length) return {}
+  const hit = envCache.get(rt)
+  if (hit && hit.cfg === rt.cfg) return hit.env
+  let source: Record<string, unknown> | undefined
+  try {
+    const s = await io.settings?.read()
+    const e = s?.env
+    source = e && typeof e === 'object' && !Array.isArray(e) ? (e as Record<string, unknown>) : undefined
+  } catch (err) {
+    debug(io, `settings.read: ${String((err as Error)?.message ?? err)}`)
+  }
+  const env = filterEnv(source, list)
+  envCache.set(rt, { cfg: rt.cfg, env })
+  return env
+}
+
+/** Values to mask in debug output (trace, `$.ui.log`, `.claude/gate.debug.log`); empty before `ensureEnv`. */
+export function envMask(rt: Runtime): string[] {
+  const hit = envCache.get(rt)
+  return hit && hit.cfg === rt.cfg ? envMaskValues(hit.env) : []
 }

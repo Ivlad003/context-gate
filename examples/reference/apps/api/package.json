@@ -1,0 +1,7 @@
+{
+  "name": "@acme/api",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": { "test": "vitest run", "migrate": "prisma migrate deploy" },
+  "dependencies": { "@nestjs/common": "^11.0.0", "@prisma/client": "^6.0.0" }
+}

@@ -1,0 +1,4 @@
+---
+globs: apps/web/**/*.tsx, apps/web/**/*.css
+---
+Стилі лише утилітами Tailwind; кольори — з теми (`bg-blue-600`), без довільних `[#hex]`. Класи впорядковує prettier-plugin-tailwindcss.

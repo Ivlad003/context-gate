@@ -1,10 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { CompiledPrompt, GateConfig } from '../packages/core/src/types.ts'
-import { buildPrompts, checkStale, isStaleByMtime, generateCtxTypes, jsonSchemaToTs, splitFrontmatter, readLock, COMPILER, type BuildResult } from '../packages/cli/src/build.ts'
+import { buildPrompts, checkStale, isStaleByMtime, generateCtxTypes, jsonSchemaToTs, splitFrontmatter, readLock, renderSkillMd, validatePrompt, defaultArgs, COMPILER, type BuildResult } from '../packages/cli/src/build.ts'
+import { sandbox } from './cli-helpers.ts'
 import { preserveJsxText } from '../packages/cli/src/jsx-text.ts'
 
 const repo = new URL('..', import.meta.url).pathname
@@ -190,4 +191,135 @@ test('generateCtxTypes: unions from gate.json, provider schemas', () => {
     [{ type: 'array', items: { type: 'string' } }, 'string[]'], [{ type: 'object' }, '{\n  [key: string]: unknown\n}'], [undefined, 'unknown'],
   ]
   for (const [s, want] of cases) assert.equal(jsonSchemaToTs(s), want, JSON.stringify(s))
+})
+
+// ───────────────────────── WP4: imports, limits, G170, schema files, packages, static skills ─────────────────────────
+
+function miniRepo(files: Record<string, string>): string {
+  const root = sandbox()
+  for (const [p, text] of Object.entries(files)) { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), text) }
+  return root
+}
+const JSX = "import { Prompt, Section, If, Each, Let, Set, Repeat, Run, Call, ctx } from '@context-gate/jsx'\n"
+
+test('imports: .yaml and .toml are parsed at build into data (hash in sources); a broken file is G164 with its line', async () => {
+  const root = miniRepo({
+    '.claude/prompt/data/terms.yaml': '# terms\nterms:\n  - name: API\n    type: tech\n  - name: UI\n    type: design\n',
+    '.claude/prompt/data/cfg.toml': '[release]\nchannel = "beta"\nlimits = [1, 2]\n',
+    '.claude/prompt/main.prompt.tsx': `${JSX}import data from './data/terms.yaml'\nimport cfg from './data/cfg.toml'\nexport default <Prompt><Section id="g" scope="static">{data.terms.map((t: { name: string }) => t.name).join(', ')}; {cfg.release.channel} {cfg.release.limits.length}</Section></Prompt>\n`,
+  })
+  const r = await buildPrompts({ root })
+  assert.deepEqual(r.diagnostics, [])
+  const cp = r.compiled[0]!
+  assert.deepEqual(cp.sections[0]!.children, [{ t: 'text', value: 'API, UI; beta 2' }])
+  assert.deepEqual(cp.sources.map((s) => s.path), ['.claude/prompt/main.prompt.tsx', '.claude/prompt/data/cfg.toml', '.claude/prompt/data/terms.yaml'])
+  writeFileSync(join(root, '.claude/prompt/data/terms.yaml'), 'terms:\n  - a\n bad: 1\n')
+  const bad = await buildPrompts({ root, write: false })
+  assert.deepEqual(bad.diagnostics.map((d) => [d.code, d.path, d.line]), [['G164', '.claude/prompt/data/terms.yaml', 3]])
+  assert.match(bad.diagnostics[0]!.message, /terms\.yaml: /)
+})
+
+test('language limits for TSX: G153 (Let redefined), G156 (If > 3, Each/Repeat > 2)', async () => {
+  const deepIf = '<If test="a"><If test="b"><If test="c"><If test="d">x</If></If></If></If>'
+  const okIf = '<If test="a"><If test="b"><If test="c">x</If></If></If>'
+  const deepLoop = '<Each of="xs" as="x"><Each of="x.ys" as="y"><Repeat n={2}>z</Repeat></Each></Each>'
+  const root = miniRepo({
+    '.claude/prompt/a.prompt.tsx': `${JSX}export default <Prompt><Section id="a" scope="profile"><Let name="n" value="1" /><Let name="n" value="2" /><Set name="n" value="3" /><Let name="m" value="1" />${okIf}</Section><Section id="b" scope="profile">${deepIf}${deepLoop}<Each of="xs" as="x"><Repeat n={2}>ok</Repeat></Each></Section></Prompt>\n`,
+  })
+  const r = await buildPrompts({ root, write: false })
+  const got = r.diagnostics.map((d) => [d.code, d.severity, /секції "(\w)"|«(\w)»/.exec(d.message)?.slice(1).find(Boolean)])
+  assert.deepEqual(got, [['G153', 'error', 'n'], ['G153', 'error', 'n'], ['G156', 'error', 'b'], ['G156', 'error', 'b']])
+  assert.match(r.diagnostics[1]!.message, /<Set name="n">/)
+  assert.match(r.diagnostics[2]!.message, /<If> глибше за 3/)
+  assert.match(r.diagnostics[3]!.message, /циклів .* глибше за 2/)
+  assert.equal(r.diagnostics[0]!.path, '.claude/prompt/a.prompt.tsx')
+})
+
+test('G170 at build: field access on a provider without schema; schema inline, .schema.json or .d.ts silences it', async () => {
+  const prompt = `${JSX}export default <Prompt><Section id="s" scope="profile" when="arch.available"><Each of="arch.deny" as="d">{'{{ d.from }}'}</Each>{'{{ lint.count }} {{ typed.n }} {{ dts.deny }}'}<Run lang="bash" as="arch2" cache="1m">x</Run>{'{{ arch2.stdout }}'}</Section></Prompt>\n`
+  const gate = {
+    providers: {
+      arch: { kind: 'cli', command: ['arch'] },
+      lint: { kind: 'cli', command: ['lint'], schema: { type: 'object', properties: { count: { type: 'number' } } } },
+      typed: { kind: 'cli', command: ['t'], schema: 'schemas/typed.schema.json' },
+      dts: { kind: 'cli', command: ['d'], schema: 'types/arch.d.ts' },
+    },
+  }
+  const root = miniRepo({
+    '.claude/prompt/a.prompt.tsx': prompt,
+    '.claude/gate.json': JSON.stringify(gate),
+    'schemas/typed.schema.json': JSON.stringify({ type: 'object', properties: { n: { type: 'integer' } } }),
+    'types/arch.d.ts': 'export interface Rule { from: string; to: string }\nexport interface Arch { available: boolean; deny: Rule[] }\n',
+  })
+  const r = await buildPrompts({ root, write: false })
+  assert.deepEqual(r.diagnostics.map((d) => [d.code, d.severity, /Поле «([\w.]+)»/.exec(d.message)?.[1]]), [['G170', 'warning', 'arch.available'], ['G170', 'warning', 'arch.deny']])
+  assert.equal(r.diagnostics[0]!.path, '.claude/prompt/a.prompt.tsx')
+  // checkCtx: false turns it off; warnings never block the write.
+  assert.deepEqual((await buildPrompts({ root, write: false, checkCtx: false })).diagnostics, [])
+  assert.ok((await buildPrompts({ root })).written.includes('.claude/prompt/.compiled/a.json'))
+
+  // ctx.d.ts: .schema.json is converted, .d.ts re-exported, a missing file is unknown.
+  const text = generateCtxTypes({ root, config: { ...gate, providers: { ...gate.providers, gone: { kind: 'cli', schema: 'nope.schema.json' }, named: { kind: 'cli', schema: 'types/arch.d.ts#Rule' } } } as unknown as GateConfig, write: false })
+  assert.match(text, /typed: \{\n {6}n\?: number\n {4}\}/)
+  assert.match(text, /dts: import\("\.\.\/\.\.\/\.\.\/types\/arch\.js"\)\.Arch/)
+  assert.match(text, /named: import\("\.\.\/\.\.\/\.\.\/types\/arch\.js"\)\.Rule/)
+  assert.match(text, /gone: unknown/)
+})
+
+test('prompt.packages: exported skills of an npm prompt package → .claude/skills with provenance', async () => {
+  const pkgSrc = "import { Prompt, Section, arg } from '@context-gate/jsx'\n" +
+    "export const ReleaseNotes = <Prompt as=\"skill\" name=\"acme-release\" description=\"Release notes\" args={{ since: arg.string({ positional: 0 }) }}>\n  Нотатки від {'{{ args.since }}'}.\n</Prompt>\n" +
+    "export const Explain = <Prompt as=\"skill\" name=\"acme-explain\" description=\"Explain\">Поясни.</Prompt>\n" +
+    "export const Identity = () => <Section id=\"identity\" scope=\"static\">x</Section>\n"
+  const root = miniRepo({
+    'node_modules/@acme/prompts/package.json': JSON.stringify({ name: '@acme/prompts', version: '1.2.0', exports: { '.': './index.tsx' } }),
+    'node_modules/@acme/prompts/index.tsx': pkgSrc,
+    'node_modules/@acme/listed/package.json': JSON.stringify({ name: '@acme/listed', version: '0.1.0', 'context-gate': { skills: ['skills/hello.prompt.tsx'] } }),
+    'node_modules/@acme/listed/skills/hello.prompt.tsx': "import { Prompt } from '@context-gate/jsx'\nexport default <Prompt as=\"skill\" name=\"hello\" description=\"Hi\">\n  Привіт.\n\n  Другий абзац.\n</Prompt>\n",
+    '.claude/gate.json': JSON.stringify({ prompt: { packages: ['@acme/prompts', '@acme/listed', '@acme/missing'] } }),
+  })
+  const r = await buildPrompts({ root })
+  assert.deepEqual(r.diagnostics.map((d) => d.code), ['G164'])
+  assert.match(r.diagnostics[0]!.message, /@acme\/missing/)
+  assert.deepEqual(r.compiled.map((c) => c.id).sort(), ['acme-explain', 'acme-release', 'hello'])
+  const md = readFileSync(join(root, '.claude/skills/acme-release/SKILL.md'), 'utf8')
+  assert.match(md, /\nsource: "npm:@acme\/prompts@1\.2\.0"\n/)
+  assert.match(md, /\ngenerated-by: context-gate\n/)
+  assert.match(readFileSync(join(root, '.claude/skills/hello/SKILL.md'), 'utf8'), /\nsource: "npm:@acme\/listed@0\.1\.0"\n/)
+  // Package .prompt.tsx keeps Markdown text rules (blank lines survive).
+  const hello = readJson<CompiledPrompt>(join(root, '.claude/prompt/.compiled/hello.json'))
+  assert.deepEqual(hello.skill!.body, [{ t: 'text', value: 'Привіт.\n\nДругий абзац.' }])
+  assert.equal(readLock(root)!.prompts['acme-release']!.package, '@acme/prompts@1.2.0')
+  assert.equal(readLock(root)!.prompts['acme-release']!.entry, 'node_modules/@acme/prompts/index.tsx')
+})
+
+test('prompt.skillBody static | both: SKILL.md with a pre-rendered body (default args) marked static', async () => {
+  const skill = "import { Prompt, arg } from '@context-gate/jsx'\nexport default <Prompt as=\"skill\" name=\"notes\" description=\"Notes\" args={{ since: arg.string({ positional: 0, required: true }), format: arg.enum(['md', 'slack'], { default: 'md' }), dry: arg.flag() }}>\n  Формат {'{{ args.format }}'}, від {'{{ args.since ?? \"останнього тегу\" }}'}.\n</Prompt>\n"
+  const root = miniRepo({ '.claude/prompt/notes.prompt.tsx': skill, '.claude/gate.json': JSON.stringify({ prompt: { skillBody: 'static' } }) })
+  const r = await buildPrompts({ root })
+  assert.deepEqual(r.diagnostics, [])
+  const md = readFileSync(join(root, '.claude/skills/notes/SKILL.md'), 'utf8')
+  assert.match(md, /\ncontext-gate-body: static\n---\n<!-- context-gate: static — тіло попередньо відрендерено на збірці з дефолтними аргументами \(format=md, dry=false\)/)
+  assert.match(md, /\n\nФормат md, від останнього тегу\.\n$/)
+  assert.doesNotMatch(md, /!`node/)
+  writeFileSync(join(root, '.claude/gate.json'), JSON.stringify({ prompt: { skillBody: 'both' } }))
+  await buildPrompts({ root })
+  const both = readFileSync(join(root, '.claude/skills/notes/SKILL.md'), 'utf8')
+  assert.match(both, /\ncontext-gate-body: live\+static\n---\n!`node "\$\{CLAUDE_PLUGIN_ROOT\}\/dist\/cli\.js" run notes/)
+  assert.match(both, /статичний варіант[\s\S]*Формат md, від останнього тегу\.\n$/)
+  // Default stays live.
+  writeFileSync(join(root, '.claude/gate.json'), '{}')
+  await buildPrompts({ root })
+  assert.doesNotMatch(readFileSync(join(root, '.claude/skills/notes/SKILL.md'), 'utf8'), /static/)
+  assert.deepEqual(defaultArgs({ a: { type: 'flag' }, b: { type: 'string', default: 'x' }, c: { type: 'list' }, d: { type: 'number' } }), { a: false, b: 'x', c: [], d: null })
+})
+
+test('renderSkillMd options and validatePrompt on a skill body', () => {
+  const cp = { version: 1, compiler: COMPILER, id: 's', sourceHash: 'a'.repeat(64), sources: [], sections: [], diagnostics: [], skill: { name: 's', description: 'd', args: {}, invoke: { user: true, model: false }, body: [] } } as CompiledPrompt
+  assert.match(renderSkillMd(cp), /disable-model-invocation: true[\s\S]*!`node/)
+  // `static` without a rendered text falls back to live.
+  assert.match(renderSkillMd(cp, { body: 'static' }), /!`node/)
+  assert.match(renderSkillMd(cp, { body: 'static', staticText: 'T', source: 'npm:x@1' }), /source: "npm:x@1"\ncontext-gate-body: static\n---\n<!--[^\n]*без аргументів[^\n]*-->\n\nT\n$/)
+  const body = [{ t: 'let', name: 'x', value: '1' }, { t: 'let', name: 'x', value: '2' }] as CompiledPrompt['sections'][0]['children']
+  assert.deepEqual(validatePrompt({ sections: [], skill: { ...cp.skill!, body } }).map((d) => d.code), ['G153'])
 })

@@ -125,7 +125,8 @@ test('@run block keeps raw code and options; @call, @use, @mcp', () => {
     '@call util.summarize(commits, tier=gate.tier) as summary cache=1h store=sum',
     '@mcp github.list_prs(state="open") as prs',
   ].join('\n'))
-  assert.deepEqual(r.diagnostics, [])
+  // Р5: store= on @run/@call is accepted with G180 (canonical: as= + @store).
+  assert.deepEqual(r.diagnostics.map((d) => [d.code, d.severity, d.line]), [['G180', 'warning', 4], ['G180', 'warning', 12]])
   const [run1, run2, use, call, mcp] = r.section.children
   assert.deepEqual(run1, { t: 'run', lang: 'python', code: 'import json\nprint(json.dumps({"x": "{{ not interpolated }}"}))', as: 'diff', cache: '10m', store: 'api', needs: ['a', 'b'] })
   assert.deepEqual(run2, { t: 'run', lang: 'bash', code: 'git log --oneline -5' })

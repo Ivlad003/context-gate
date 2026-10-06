@@ -2,9 +2,11 @@
 //
 //   .claude/prompt/*.prompt.tsx  ──esbuild (bundle, jsx automatic, text/json loaders)──▶ temp bundle
 //   temp bundle ──node child, 10 s timeout──▶ JSON of the default export (via @context-gate/jsx/compile)
-//   ──validate (G1xx exprs, G160, G161, G162, G163)──▶ .claude/prompt/.compiled/<id>.json
+//   (`.yaml`/`.toml` imports parsed to data; TSX level 2 rewrites native expressions first, transform.ts)
+//   ──validate (G1xx exprs, G153, G156, G160, G161, G162, G163, G170)──▶ .claude/prompt/.compiled/<id>.json
 //                                                     + .claude/prompt/prompt.lock.json (committed)
 //                                                     + .claude/skills/<name>/SKILL.md for `as="skill"`
+//   prompt.packages (`@acme/prompts`) ──exported `as="skill"` prompts──▶ the same, with `source: npm:<pkg>@<v>`
 
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -12,11 +14,16 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import * as esbuild from 'esbuild'
-import type { CompiledPrompt, Diagnostic, GateConfig, Node, SectionNode } from '../../core/src/types.ts'
+import type * as esbuild from 'esbuild'
+import { loadEsbuild } from './esbuild-load.ts'
+import type { CompiledPrompt, Diagnostic, GateConfig, Node, Scope, SectionNode } from '../../core/src/types.ts'
 import { parseExpr } from '../../core/src/expr.ts'
 import { argumentHint } from '../../core/src/argparse.ts'
 import { preserveJsxText } from './jsx-text.ts'
+import { loadTypescript, transformLevel2, wantsLevel2 } from './transform.ts'
+import { parseToml, parseYaml } from './dataformats.ts'
+import { buildModel, isDtsSchema, readDts, resolveSchemaRef, splitSchemaRef, type CtxModel, type Shape } from '../../lsp/src/model.ts'
+import { checkExpr as checkCtxExpr } from '../../lsp/src/exprcheck.ts'
 
 export { isStaleByMtime, isStaleByMtimes } from './stale.ts'
 
@@ -42,7 +49,26 @@ export interface BuildOptions {
   jsxSrc?: string
   /** Write .compiled / lock / SKILL.md (default true). */
   write?: boolean
+  /** gate.json (raw JSON); default: read `<root>/.claude/gate.json`. Drives level 2, packages, skillBody and G170. */
+  config?: BuildConfig
+  /** Ctx-model check of expressions (G170); default from `config`. `false` disables. */
+  checkCtx?: CtxCheck | false
 }
+
+/** The parts of gate.json the compiler reads (raw JSON, so options newer than the schema still apply). */
+export type BuildConfig = Partial<GateConfig> & {
+  prompt?: GateConfig['prompt'] & {
+    /** `level2`: native TS expressions in runtime props (Р1 level 2). */
+    transform?: 'level1' | 'level2'
+    /** Prompt library packages whose exported `as="skill"` prompts are built into `.claude/skills/`. */
+    packages?: string[]
+    /** SKILL.md body: `live` (one `!\`…\`` render line, default), `static` (pre-rendered with default args), `both`. */
+    skillBody?: 'live' | 'static' | 'both'
+  }
+}
+
+/** Checks one expression against the Ctx model with the locals bound at that point. */
+export type CtxCheck = (src: string, locals: ReadonlySet<string>) => Diagnostic[]
 
 export interface BuildResult {
   compiled: CompiledPrompt[]
@@ -53,7 +79,7 @@ export interface BuildResult {
 
 export interface PromptLock {
   compiler: string
-  prompts: Record<string, { entry?: string; sourceHash: string; sources: { path: string; hash: string }[] }>
+  prompts: Record<string, { entry?: string; sourceHash: string; sources: { path: string; hash: string }[]; package?: string }>
 }
 
 const posix = (p: string) => p.split(sep).join('/')
@@ -119,13 +145,16 @@ export function splitFrontmatter(raw: string): { meta: Record<string, unknown>; 
 
 // ───────────────────────── esbuild plugin ─────────────────────────
 
-function promptPlugin(jsxSrc: string, notes: Diagnostic[], root: string): esbuild.Plugin {
+interface PluginOptions { transform?: unknown }
+
+function promptPlugin(jsxSrc: string, notes: Diagnostic[], root: string, po: PluginOptions = {}): esbuild.Plugin {
   const jsxMap: Record<string, string> = {
     '@context-gate/jsx': join(jsxSrc, 'index.ts'),
     '@context-gate/jsx/jsx-runtime': join(jsxSrc, 'jsx-runtime.ts'),
     '@context-gate/jsx/jsx-dev-runtime': join(jsxSrc, 'jsx-runtime.ts'),
     '@context-gate/jsx/compile': join(jsxSrc, 'compile.ts'),
   }
+  const relOf = (p: string) => posix(relative(root, p))
   return {
     name: 'context-gate',
     setup(b) {
@@ -137,14 +166,26 @@ function promptPlugin(jsxSrc: string, notes: Diagnostic[], root: string): esbuil
         const { meta, body } = splitFrontmatter(readFileSync(a.path, 'utf8'))
         return { contents: `export const meta = ${JSON.stringify(meta)};\nexport default ${JSON.stringify(body)};\n`, loader: 'js' }
       })
-      b.onLoad({ filter: /\.(ya?ml|toml)$/ }, (a) => ({
-        errors: [{ text: `Імпорт ${basename(a.path)}: YAML/TOML не підтримується без парсера; конвертуй у JSON або імпортуй як текст (.txt).` }],
-      }))
+      // SPEC «Імпорти»: `.yaml` / `.toml` are parsed at build time into data (dataformats.ts).
+      b.onLoad({ filter: /\.(ya?ml|toml)$/ }, (a) => {
+        const r = (a.path.endsWith('.toml') ? parseToml : parseYaml)(readFileSync(a.path, 'utf8'))
+        if (!r.ok) return { errors: [{ text: `Імпорт ${basename(a.path)}: ${r.error}`, location: { file: relOf(a.path), line: r.line, column: 0, lineText: '' } }] }
+        return { contents: JSON.stringify(r.value), loader: 'json' }
+      })
       b.onLoad({ filter: /\.[jt]sx$/ }, (a) => {
-        if (a.path.startsWith(jsxSrc) || a.path.includes(`${sep}node_modules${sep}`)) return undefined
-        const src = readFileSync(a.path, 'utf8')
+        // Package prompts (`node_modules/@acme/prompts/*.prompt.tsx`) keep Markdown text rules too.
+        if (a.path.startsWith(jsxSrc) || (a.path.includes(`${sep}node_modules${sep}`) && !a.path.endsWith('.prompt.tsx'))) return undefined
+        let src = readFileSync(a.path, 'utf8')
+        const rel = relOf(a.path)
+        if (a.path.endsWith('.tsx') && wantsLevel2(src, a.path.includes(`${sep}node_modules${sep}`) ? undefined : po.transform)) {
+          const ts = loadTypescript(root)
+          if (!ts.mod) return { errors: [{ text: ts.error!, location: { file: rel, line: 1, column: 0, lineText: '' } }] }
+          const t = transformLevel2(ts.mod, src, { path: rel })
+          notes.push(...t.diagnostics)
+          src = t.code
+        }
         const r = preserveJsxText(src)
-        if (!r.ok) notes.push(diag('G001', 'warning', `Текст JSX нормалізовано за правилами JSX (переноси рядків втрачено): ${r.error}.`, { path: posix(relative(root, a.path)), hint: 'спрости синтаксис файлу або загорни текст у {`…`}' }))
+        if (!r.ok) notes.push(diag('G001', 'warning', `Текст JSX нормалізовано за правилами JSX (переноси рядків втрачено): ${r.error}.`, { path: rel, hint: 'спрости синтаксис файлу або загорни текст у {`…`}' }))
         return { contents: r.code, loader: a.path.endsWith('.tsx') ? 'tsx' : 'jsx' }
       })
     },
@@ -170,9 +211,12 @@ function firstLines(s: string, n = 6): string {
 
 // ───────────────────────── Validation ─────────────────────────
 
-export interface ValidateOptions { validateExpr?: ValidateExpr }
+export interface ValidateOptions { validateExpr?: ValidateExpr; checkCtx?: CtxCheck }
 
 const defaultValidateExpr: ValidateExpr = (src) => parseExpr(src).diagnostics
+
+const MAX_IF_DEPTH = 3
+const MAX_LOOP_DEPTH = 2
 
 /** Expression strings of a node (its own, not its children's). */
 function nodeExprs(n: Node): string[] {
@@ -185,7 +229,7 @@ function nodeExprs(n: Node): string[] {
     case 'call': return [...n.args, ...Object.values(n.kwargs ?? {})]
     case 'include': return Object.values(n.args ?? {})
     case 'table': return [n.rows, ...n.cells]
-    case 'debug': return n.exprs
+    case 'debug': return [...n.exprs, ...(n.message ? placeholders(n.message) : [])]
     case 'assert': return [n.test]
     case 'fence': return n.title ? placeholders(n.title) : []
     case 'el': return Object.values(n.attrs ?? {}).flatMap(placeholders)
@@ -197,33 +241,87 @@ function placeholders(s: string): string[] {
   return [...s.matchAll(/\{\{\s*([\s\S]*?)\s*\}\}/g)].map((m) => m[1]!)
 }
 
-function walk(nodes: Node[], fn: (n: Node) => void): void {
-  for (const n of nodes) {
-    fn(n)
-    if (n.t === 'if') { walk(n.then, fn); if (n.else) walk(n.else, fn) }
-    else if ('children' in n && Array.isArray(n.children)) walk(n.children, fn)
+const LEAKED = /^(NaN|undefined|Infinity)$|\[object |^function\b|=>/
+
+function checkExpr(src: string, where: Partial<Diagnostic>, validate: ValidateExpr, out: Diagnostic[]): boolean {
+  if (LEAKED.test(src.trim())) {
+    out.push(diag('G160', 'error', `Вираз «${src}» — значення JS, обчислене на збірці, а не рядковий вираз.`, { ...where, hint: 'винести у module-провайдер або pipe-фільтр' }))
+    return false
+  }
+  const ds = validate(src)
+  for (const d of ds) out.push({ ...d, ...where, message: `${d.message} (вираз «${src}»)` })
+  return !ds.some((d) => d.severity === 'error')
+}
+
+/** Names a node binds for the rest of its section (`as=`, `let`, `use`, loop variables). */
+function boundBy(n: Node): string[] {
+  switch (n.t) {
+    case 'let': case 'set': return [n.name]
+    case 'run': return [n.as ?? 'run']
+    case 'call': return [n.as]
+    case 'use': return [n.name]
+    case 'include': return n.as ? [n.as] : []
+    default: return []
   }
 }
 
-const LEAKED = /^(NaN|undefined|Infinity)$|\[object |^function\b|=>/
-
-function checkExpr(src: string, where: Partial<Diagnostic>, validate: ValidateExpr, out: Diagnostic[]): void {
-  if (LEAKED.test(src.trim())) {
-    out.push(diag('G160', 'error', `Вираз «${src}» — значення JS, обчислене на збірці, а не рядковий вираз.`, { ...where, hint: 'винести у module-провайдер або pipe-фільтр' }))
-    return
+/**
+ * Walks one section body: G1xx/G160 per expression, G153 (`let` redefined by a later `let`/`set`), G156
+ * (`if` deeper than 3, `each`/`repeat` deeper than 2), G163, and the Ctx check (G170) with the locals bound
+ * so far. Same limits as the Markdown form (mddsl.ts).
+ */
+function validateBody(nodes: Node[], scope: Scope | undefined, sectionId: string, where: Partial<Diagnostic>, o: Required<Pick<ValidateOptions, 'validateExpr'>> & ValidateOptions, out: Diagnostic[], initial: string[] = []): void {
+  const lets = new Set<string>()
+  const locals = new Set<string>(initial)
+  const reported = new Set<string>()
+  const once = (d: Diagnostic) => { const k = `${d.code}:${d.message}`; if (!reported.has(k)) { reported.add(k); out.push(d) } }
+  const exprs = (n: Node) => {
+    for (const e of nodeExprs(n)) {
+      const ok = checkExpr(e, where, o.validateExpr, out)
+      if (ok && o.checkCtx) for (const d of o.checkCtx(e, locals)) once({ ...d, ...where })
+    }
   }
-  for (const d of validate(src)) out.push({ ...d, ...where, message: `${d.message} (вираз «${src}»)` })
+  const visit = (list: Node[], ifDepth: number, loopDepth: number): void => {
+    for (const n of list) {
+      exprs(n)
+      if (n.t === 'let' || n.t === 'set') {
+        if (lets.has(n.name)) once(diag('G153', 'error', `«${n.name}» оголошено через <Let> — його не можна перевизначати (<${n.t === 'let' ? 'Let' : 'Set'} name="${n.name}">).`, { ...where, hint: '<Let> з новим іменем або <Set> для змінної' }))
+        if (n.t === 'let') lets.add(n.name)
+      }
+      if (n.t === 'run' && scope === 'static' && !n.cache) {
+        out.push(diag('G163', 'error', `<Run lang="${n.lang}"> без cache у static-секції "${sectionId}": static рендериться один раз і має бути стабільною.`, { ...where, hint: 'додай cache="1h" або перенеси в scope="volatile"' }))
+      }
+      for (const b of boundBy(n)) locals.add(b)
+      if (n.t === 'if') {
+        if (ifDepth + 1 > MAX_IF_DEPTH) once(diag('G156', 'error', `Вкладення <If> глибше за ${MAX_IF_DEPTH} у секції "${sectionId}".`, { ...where, hint: 'розбий секцію' }))
+        visit(n.then, ifDepth + 1, loopDepth)
+        if (n.else) visit(n.else, ifDepth + 1, loopDepth)
+        continue
+      }
+      if (n.t === 'each' || n.t === 'repeat') {
+        if (loopDepth + 1 > MAX_LOOP_DEPTH) once(diag('G156', 'error', `Вкладення циклів (<Each>/<Repeat>) глибше за ${MAX_LOOP_DEPTH} у секції "${sectionId}".`, { ...where, hint: 'розбий секцію' }))
+        if (n.t === 'each') { locals.add(n.as); if (n.index) locals.add(n.index) } else locals.add('i')
+        visit(n.children, ifDepth, loopDepth + 1)
+        continue
+      }
+      if (n.t === 'table') locals.add('row')
+      if ('children' in n && Array.isArray(n.children)) visit(n.children, ifDepth, loopDepth)
+    }
+  }
+  visit(nodes, 0, 0)
 }
 
 /**
  * Post-build checks over a compiled prompt: expression syntax (G1xx via `validateExpr`), leaked
  * build-time values (G160), duplicate section ids across imports (G161), `Run` without `cache`
- * in a `static` section (G163). Size (G162) is checked by the writer.
+ * in a `static` section (G163), language limits (G153, G156) and, with `checkCtx`, provider fields
+ * without a schema (G170). Size (G162) is checked by the writer.
  */
-export function validatePrompt(cp: Pick<CompiledPrompt, 'sections' | 'skill'>, opts: ValidateOptions = {}): Diagnostic[] {
-  const validate = opts.validateExpr ?? defaultValidateExpr
+export function validatePrompt(cp: Pick<CompiledPrompt, 'sections' | 'skill' | 'uses'>, opts: ValidateOptions = {}): Diagnostic[] {
+  const o = { ...opts, validateExpr: opts.validateExpr ?? defaultValidateExpr }
   const out: Diagnostic[] = []
   const seen = new Map<string, SectionNode>()
+  const uses = Object.keys(cp.uses ?? {})
   for (const s of cp.sections) {
     const where: Partial<Diagnostic> = s.source ? { path: s.source.path, ...(s.source.line ? { line: s.source.line } : {}) } : {}
     const prev = seen.get(s.id)
@@ -232,34 +330,89 @@ export function validatePrompt(cp: Pick<CompiledPrompt, 'sections' | 'skill'>, o
       const b = s.source?.path ?? '?'
       out.push(diag('G161', 'error', `Секцію "${s.id}" оголошено двічі: ${a}${prev.source?.line ? `:${prev.source.line}` : ''} і ${b}${s.source?.line ? `:${s.source.line}` : ''}.`, { ...where, hint: 'перейменуй одну з секцій' }))
     } else seen.set(s.id, s)
-    if (s.when !== undefined) checkExpr(s.when, where, validate, out)
-    walk(s.children, (n) => {
-      for (const e of nodeExprs(n)) checkExpr(e, where, validate, out)
-      if (n.t === 'run' && s.scope === 'static' && !n.cache) {
-        out.push(diag('G163', 'error', `<Run lang="${n.lang}"> без cache у static-секції "${s.id}": static рендериться один раз і має бути стабільною.`, { ...where, hint: 'додай cache="1h" або перенеси в scope="volatile"' }))
-      }
-    })
+    if (s.when !== undefined) {
+      const ok = checkExpr(s.when, where, o.validateExpr, out)
+      if (ok && o.checkCtx) out.push(...o.checkCtx(s.when, new Set(uses)).map((d) => ({ ...d, ...where })))
+    }
+    validateBody(s.children, s.scope, s.id, where, o, out, uses)
   }
-  if (cp.skill) walk(cp.skill.body, (n) => { for (const e of nodeExprs(n)) checkExpr(e, {}, validate, out) })
+  if (cp.skill) validateBody(cp.skill.body, undefined, cp.skill.name, {}, o, out, uses)
   return out
+}
+
+/**
+ * The Ctx-model check used at build (Р4): the LSP model from gate.json (providers, schemas — inline or as
+ * `.schema.json` / `.d.ts` files), reporting only G170 (field access on a provider without a schema).
+ */
+export function ctxCheckFor(root: string, config: BuildConfig | undefined): CtxCheck | undefined {
+  if (!config?.providers || !Object.keys(config.providers).length) return undefined
+  const model: CtxModel = buildModel({ config, readFile: (p) => { try { return readFileSync(resolve(root, p), 'utf8') } catch { return undefined } } })
+  if (!Object.values(model.roots).some((r) => r.k === 'unknown')) return undefined
+  const any: Shape = { k: 'any' }
+  return (src, locals) => {
+    const bound = new Map<string, Shape>()
+    for (const l of locals) bound.set(l, any)
+    return checkCtxExpr(src, model, bound)
+      .filter((d) => d.code === 'G170')
+      .map((d) => ({ code: d.code, severity: d.severity, message: `${d.message} (вираз «${src}»)`, ...(d.hint ? { hint: d.hint } : {}) }))
+  }
 }
 
 // ───────────────────────── SKILL.md ─────────────────────────
 
 const yamlStr = (s: string) => JSON.stringify(s)
 
-/** `.claude/skills/<name>/SKILL.md` for a `<Prompt as="skill">`: one live-render command line. */
-export function renderSkillMd(cp: CompiledPrompt): string {
+export interface SkillMdOptions {
+  /** `live` (default): one `!\`…\`` render line; `static`: the pre-rendered body only; `both`: live line + static fallback. */
+  body?: 'live' | 'static' | 'both'
+  /** Pre-rendered body with default args (required for `static` / `both`). */
+  staticText?: string
+  /** Default args the static body was rendered with. */
+  staticArgs?: Record<string, unknown>
+  /** Provenance of a skill built from a prompt package: `npm:@acme/prompts@1.2.0`. */
+  source?: string
+}
+
+export const STATIC_MARK = 'context-gate-body: static'
+
+/**
+ * `.claude/skills/<name>/SKILL.md` for a `<Prompt as="skill">`. Default: one live-render command line (SPEC
+ * «Що генерує збірка»). With `prompt.skillBody: static | both` (Р6 fallback for harnesses without `!\`…\``):
+ * the body pre-rendered with default args, marked `static` in the frontmatter and in the text.
+ */
+export function renderSkillMd(cp: CompiledPrompt, o: SkillMdOptions = {}): string {
   const skill = cp.skill!
+  const body = o.staticText === undefined ? 'live' : o.body ?? 'live'
   const lines = ['---', `name: ${skill.name}`, `description: ${yamlStr(skill.description)}`]
   const hint = argumentHint(skill.args)
   if (hint) lines.push(`argument-hint: ${yamlStr(hint)}`)
   if (skill.invoke.model === false) lines.push('disable-model-invocation: true')
-  lines.push('generated-by: context-gate', `source-hash: ${cp.sourceHash.slice(0, 16)}`, '---')
-  lines.push('!`node "${CLAUDE_PLUGIN_ROOT}/dist/cli.js" run ' + skill.name + ' --args "$ARGUMENTS" --ctx-from live`')
+  lines.push('generated-by: context-gate', `source-hash: ${cp.sourceHash.slice(0, 16)}`)
+  if (o.source) lines.push(`source: ${yamlStr(o.source)}`)
+  if (body !== 'live') lines.push(body === 'static' ? STATIC_MARK : 'context-gate-body: live+static')
+  lines.push('---')
+  const live = '!`node "${CLAUDE_PLUGIN_ROOT}/dist/cli.js" run ' + skill.name + ' --args "$ARGUMENTS" --ctx-from live`'
+  const argsText = Object.entries(o.staticArgs ?? {}).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ') || 'без аргументів'
+  const staticNote = `<!-- context-gate: static — тіло попередньо відрендерено на збірці з дефолтними аргументами (${argsText}); аргументи виклику ($ARGUMENTS) і живий контекст сесії тут не застосовано. Актуальний рендер: npx context-gate run ${skill.name} --args "<аргументи>". Файл згенеровано, не редагуй вручну. -->`
+  if (body === 'static') {
+    lines.push(staticNote, '', o.staticText!.trim())
+    return lines.join('\n') + '\n'
+  }
+  lines.push(live)
   lines.push('')
+  if (body === 'both') {
+    lines.push(`<!-- context-gate: якщо рядок вище не виконався (harness без підтримки !\`…\`), нижче — статичний варіант. -->`, staticNote, '', o.staticText!.trim())
+    return lines.join('\n') + '\n'
+  }
   lines.push(`<!-- context-gate: тіло цього skill рендериться в момент виклику з .claude/prompt/.compiled/${cp.id}.json. Якщо рядок вище не виконався (harness без підтримки !\`…\`), виконай: npx context-gate run ${skill.name} --args "<аргументи>" — і використай його вивід як інструкцію. Файл згенеровано, не редагуй вручну. -->`)
   return lines.join('\n') + '\n'
+}
+
+/** Default args of a skill for the static body: `default`, `false` for flags, else null. */
+export function defaultArgs(args: Record<string, { type: string; default?: unknown }>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, a] of Object.entries(args)) out[k] = a.default !== undefined ? a.default : a.type === 'flag' ? false : a.type === 'list' || a.type === 'rest' ? [] : null
+  return out
 }
 
 // ───────────────────────── Lock file ─────────────────────────
@@ -278,24 +431,54 @@ export function computeSourceHash(sources: { path: string; hash: string }[], com
 
 // ───────────────────────── Build ─────────────────────────
 
-interface EntryBuild { entry: string; rel: string; compiled?: CompiledPrompt; diagnostics: Diagnostic[] }
+interface EntryBuild { entry: string; rel: string; compiled?: CompiledPrompt; diagnostics: Diagnostic[]; package?: string }
 
-async function buildEntry(root: string, entry: string, jsxSrc: string, timeoutMs: number, validate: ValidateExpr): Promise<EntryBuild> {
+type Part = Pick<CompiledPrompt, 'sections' | 'skill' | 'uses' | 'diagnostics'> & { id?: string }
+
+interface EntryJob {
+  /** Absolute entry file (the prompt, or the package module). */
+  entry: string
+  /** `default`: the default export is one `<Prompt>`; `skills`: every exported `<Prompt as="skill">`. */
+  kind: 'default' | 'skills'
+  /** Package name@version for package skills. */
+  package?: string
+}
+
+interface EntryEnv { root: string; jsxSrc: string; timeoutMs: number; validate: ValidateExpr; checkCtx?: CtxCheck; transform?: unknown }
+
+function wrapperFor(job: EntryJob, rel: string, root: string): string {
+  const opts = `{ root: ${JSON.stringify(posix(root))}, file: ${JSON.stringify(rel)} }`
+  if (job.kind === 'default') {
+    return [
+      `import def from ${JSON.stringify(job.entry)}`,
+      `import { compilePrompt } from '@context-gate/jsx/compile'`,
+      `const r = compilePrompt(def, ${opts})`,
+      `process.stdout.write('\\n' + ${JSON.stringify(SENTINEL)} + JSON.stringify(r) + '\\n')`,
+    ].join('\n')
+  }
+  return [
+    `import * as m from ${JSON.stringify(job.entry)}`,
+    `import { compilePrompt } from '@context-gate/jsx/compile'`,
+    `const isSkill = (v) => v && typeof v === 'object' && v.$cg === 'prompt' && v.skill`,
+    `const vals = [...Object.values(m), ...(m.default && typeof m.default === 'object' && !m.default.$cg ? Object.values(m.default) : [])]`,
+    `const r = [...new Set(vals.filter(isSkill))].map((v) => compilePrompt(v, ${opts}))`,
+    `process.stdout.write('\\n' + ${JSON.stringify(SENTINEL)} + JSON.stringify({ multi: r }) + '\\n')`,
+  ].join('\n')
+}
+
+async function buildEntry(env: EntryEnv, job: EntryJob): Promise<EntryBuild[]> {
+  const { root, jsxSrc, timeoutMs, validate } = env
+  const { entry } = job
   const rel = posix(relative(root, entry))
   const notes: Diagnostic[] = []
   const tmp = mkdtempSync(join(tmpdir(), 'context-gate-build-'))
   const outfile = join(tmp, 'bundle.mjs')
+  const fail = (diagnostics: Diagnostic[]): EntryBuild[] => [{ entry, rel, diagnostics, ...(job.package ? { package: job.package } : {}) }]
   try {
-    const wrapper = [
-      `import def from ${JSON.stringify(entry)}`,
-      `import { compilePrompt } from '@context-gate/jsx/compile'`,
-      `const r = compilePrompt(def, { root: ${JSON.stringify(posix(root))}, file: ${JSON.stringify(rel)} })`,
-      `process.stdout.write('\\n' + ${JSON.stringify(SENTINEL)} + JSON.stringify(r) + '\\n')`,
-    ].join('\n')
     let result: esbuild.BuildResult<{ write: false; metafile: true }>
     try {
-      result = await esbuild.build({
-        stdin: { contents: wrapper, resolveDir: dirname(entry), sourcefile: '<context-gate-entry>', loader: 'ts' },
+      result = await (await loadEsbuild(root)).build({
+        stdin: { contents: wrapperFor(job, rel, root), resolveDir: dirname(entry), sourcefile: '<context-gate-entry>', loader: 'ts' },
         absWorkingDir: root,
         bundle: true,
         platform: 'node',
@@ -304,7 +487,7 @@ async function buildEntry(root: string, entry: string, jsxSrc: string, timeoutMs
         jsx: 'automatic',
         jsxImportSource: '@context-gate/jsx',
         loader: { '.json': 'json' },
-        plugins: [promptPlugin(jsxSrc, notes, root)],
+        plugins: [promptPlugin(jsxSrc, notes, root, { transform: env.transform })],
         metafile: true,
         sourcemap: 'inline',
         sourcesContent: false,
@@ -317,7 +500,7 @@ async function buildEntry(root: string, entry: string, jsxSrc: string, timeoutMs
       const diags = errors.length
         ? errors.map((m) => diag('G164', 'error', `Збірка: ${m.text}`, m.location ? { path: m.location.file, line: m.location.line } : { path: rel }))
         : [diag('G164', 'error', `Збірка: ${(err as Error).message}`, { path: rel })]
-      return { entry, rel, diagnostics: [...notes, ...diags] }
+      return fail([...notes, ...diags])
     }
     writeFileSync(outfile, result.outputFiles[0]!.contents)
 
@@ -331,29 +514,33 @@ async function buildEntry(root: string, entry: string, jsxSrc: string, timeoutMs
     if (child.error || at < 0) {
       const esc = (x: string) => new RegExp(x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')
       const detail = firstLines(child.stderr.replace(esc(tmp), '<build>').replace(esc(posix(root) + '/'), '')) || 'немає виводу'
-      return { entry, rel, diagnostics: [...notes, diag('G164', 'error', `Виконання ${rel}: ${child.error ?? 'немає результату'}.\n${detail}`, { path: rel, hint: 'збірка виконує модуль у Node; перевір імпорти й код верхнього рівня' })] }
+      return fail([...notes, diag('G164', 'error', `Виконання ${rel}: ${child.error ?? 'немає результату'}.\n${detail}`, { path: rel, hint: 'збірка виконує модуль у Node; перевір імпорти й код верхнього рівня' })])
     }
-    const part = JSON.parse(child.stdout.slice(at + SENTINEL.length).trim()) as Pick<CompiledPrompt, 'sections' | 'skill' | 'uses' | 'diagnostics'> & { id?: string }
-    const id = part.skill?.name ?? part.id ?? promptIdOf(entry)
-    const compiled: CompiledPrompt = {
-      version: 1,
-      compiler: COMPILER,
-      id,
-      sourceHash: computeSourceHash(sources),
-      sources,
-      sections: part.sections,
-      ...(part.skill ? { skill: part.skill } : {}),
-      ...(part.uses ? { uses: part.uses } : {}),
-      diagnostics: [],
-    }
-    const diagnostics = [...notes, ...part.diagnostics, ...validatePrompt(compiled, { validateExpr: validate })]
-    compiled.diagnostics = diagnostics
-    const size = Buffer.byteLength(JSON.stringify(compiled, null, 2))
-    if (size > MAX_COMPILED_BYTES) {
-      const d = diag('G162', 'error', `.compiled/${id}.json має ${(size / 1024 / 1024).toFixed(1)} МБ (ліміт 2 МБ).`, { path: rel, hint: 'винеси дані в <Include mode="lazy"> або провайдер' })
-      diagnostics.push(d)
-    }
-    return { entry, rel, compiled, diagnostics }
+    const raw = JSON.parse(child.stdout.slice(at + SENTINEL.length).trim()) as Part | { multi: Part[] }
+    const parts: Part[] = 'multi' in raw ? raw.multi : [raw]
+    if ('multi' in raw && !parts.length) return fail([...notes, diag('G001', 'warning', `Пакет ${job.package ?? rel} не експортує жодного <Prompt as="skill">.`, { path: rel })])
+    return parts.map((part, k): EntryBuild => {
+      const id = part.skill?.name ?? part.id ?? promptIdOf(entry)
+      const compiled: CompiledPrompt = {
+        version: 1,
+        compiler: COMPILER,
+        id,
+        sourceHash: computeSourceHash(sources),
+        sources,
+        sections: part.sections,
+        ...(part.skill ? { skill: part.skill } : {}),
+        ...(part.uses ? { uses: part.uses } : {}),
+        diagnostics: [],
+      }
+      const diagnostics = [...(k === 0 ? notes : []), ...part.diagnostics, ...validatePrompt(compiled, { validateExpr: validate, ...(env.checkCtx ? { checkCtx: env.checkCtx } : {}) })]
+      compiled.diagnostics = diagnostics
+      const size = Buffer.byteLength(JSON.stringify(compiled, null, 2))
+      if (size > MAX_COMPILED_BYTES) {
+        const d = diag('G162', 'error', `.compiled/${id}.json має ${(size / 1024 / 1024).toFixed(1)} МБ (ліміт 2 МБ).`, { path: rel, hint: 'винеси дані в <Include mode="lazy"> або провайдер' })
+        diagnostics.push(d)
+      }
+      return { entry, rel, compiled, diagnostics, ...(job.package ? { package: job.package } : {}) }
+    })
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
@@ -370,9 +557,82 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 }
 
+/** Raw `.claude/gate.json` (undefined when missing or not JSON). */
+export function readBuildConfig(root: string): BuildConfig | undefined {
+  try { return JSON.parse(readFileSync(join(resolve(root), '.claude', 'gate.json'), 'utf8').replace(/^\uFEFF/, '')) as BuildConfig } catch { return undefined }
+}
+
+// ───────────────────────── Prompt packages (SPEC «Спільні бібліотеки промптів») ─────────────────────────
+
+export interface PromptPackage { name: string; version?: string; dir: string; jobs: EntryJob[] }
+
 /**
- * Builds `*.prompt.tsx` entry points of `<root>/<dir>`. Prompts with error diagnostics are not
- * written (the previous `.compiled` stays, SPEC «Помилки збірки») but are returned with them.
+ * Resolves `prompt.packages` entries: npm names (looked up in `node_modules` from the root upwards) or
+ * repo-relative paths. A package lists its skill files in `package.json` `"context-gate": { "skills": [...] }`
+ * (each default-exports one `<Prompt as="skill">`); otherwise every `<Prompt as="skill">` exported by its
+ * entry module (`exports["."]`, `module`, `main`, `index.ts(x)`) is built.
+ */
+export function resolvePromptPackages(root: string, names: readonly string[]): { packages: PromptPackage[]; diagnostics: Diagnostic[] } {
+  const packages: PromptPackage[] = []
+  const diagnostics: Diagnostic[] = []
+  for (const name of names) {
+    let dir: string | undefined
+    if (name.startsWith('.') || name.startsWith('/')) dir = resolve(root, name)
+    else {
+      for (let d = resolve(root); ; d = dirname(d)) {
+        const c = join(d, 'node_modules', ...name.split('/'))
+        if (existsSync(join(c, 'package.json'))) { dir = c; break }
+        if (dirname(d) === d) break
+      }
+    }
+    let pkg: Record<string, unknown> | undefined
+    try { pkg = dir ? JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, unknown> : undefined } catch { pkg = undefined }
+    if (!dir || !pkg) { diagnostics.push(diag('G164', 'error', `Пакет промптів «${name}» не знайдено (prompt.packages).`, { path: '.claude/gate.json', hint: `npm i -D ${name}` })); continue }
+    const label = `${typeof pkg.name === 'string' ? pkg.name : name}${typeof pkg.version === 'string' ? `@${pkg.version}` : ''}`
+    const cg = (pkg['context-gate'] ?? pkg.contextGate) as { skills?: unknown } | undefined
+    const jobs: EntryJob[] = []
+    if (cg && Array.isArray(cg.skills)) {
+      for (const f of cg.skills) {
+        const abs = resolve(dir, String(f))
+        if (existsSync(abs)) jobs.push({ entry: abs, kind: 'default', package: label })
+        else diagnostics.push(diag('G164', 'error', `Пакет ${label}: файл skill «${String(f)}» не знайдено.`, { path: '.claude/gate.json' }))
+      }
+    } else {
+      const exp = pkg.exports
+      const dot = typeof exp === 'string' ? exp : exp && typeof exp === 'object' ? (exp as Record<string, unknown>)['.'] : undefined
+      const dotPath = typeof dot === 'string' ? dot : dot && typeof dot === 'object' ? ((dot as Record<string, unknown>).import ?? (dot as Record<string, unknown>).default) : undefined
+      const cands = [dotPath, pkg.module, pkg.main, 'index.tsx', 'index.ts', 'index.js'].filter((x): x is string => typeof x === 'string')
+      const entry = cands.map((c) => resolve(dir!, c)).find((c) => existsSync(c))
+      if (entry) jobs.push({ entry, kind: 'skills', package: label })
+      else diagnostics.push(diag('G164', 'error', `Пакет ${label}: немає вхідного модуля (exports, module, main або context-gate.skills).`, { path: '.claude/gate.json' }))
+    }
+    packages.push({ name: label, ...(typeof pkg.version === 'string' ? { version: pkg.version } : {}), dir, jobs })
+  }
+  return { packages, diagnostics }
+}
+
+// ───────────────────────── Static skill bodies (Р6 fallback) ─────────────────────────
+
+/** Renders a skill body with default args and the context of the repo (scripts from cache only). */
+export async function renderStaticSkill(root: string, cp: CompiledPrompt): Promise<{ text: string; args: Record<string, unknown> } | undefined> {
+  try {
+    const { buildContext } = await import('./context.ts')
+    const { renderPrompt } = await import('../../core/src/render.ts')
+    const args = defaultArgs(cp.skill!.args)
+    const ctx = await buildContext({ root, dryScripts: true, args: args as Record<string, never> })
+    ctx.scope.args = args as never
+    const cfg = ctx.repo.config
+    const r = await renderPrompt([...ctx.prompts.system, cp], ctx.scope, ctx.host, { tier: ctx.tier, only: cp.skill!.name, ...(cfg.prompt?.runCacheDefault ? { runCacheDefault: cfg.prompt.runCacheDefault } : {}) } as never)
+    return { text: r.text, args }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Builds `*.prompt.tsx` entry points of `<root>/<dir>` and the skills of `prompt.packages`. Prompts with
+ * error diagnostics are not written (the previous `.compiled` stays, SPEC «Помилки збірки») but are returned
+ * with them.
  */
 export async function buildPrompts(opts: BuildOptions): Promise<BuildResult> {
   const root = resolve(opts.root)
@@ -380,13 +640,24 @@ export async function buildPrompts(opts: BuildOptions): Promise<BuildResult> {
   const jsxSrc = opts.jsxSrc ? resolve(opts.jsxSrc) : defaultJsxSrc()
   const write = opts.write ?? true
   const validate = opts.validateExpr ?? defaultValidateExpr
+  const config = opts.config ?? readBuildConfig(root)
+  const checkCtx = opts.checkCtx === false ? undefined : opts.checkCtx ?? ctxCheckFor(root, config)
+  const env: EntryEnv = { root, jsxSrc, timeoutMs: opts.timeoutMs ?? 10_000, validate, ...(checkCtx ? { checkCtx } : {}), transform: config?.prompt?.transform }
   const entries = findEntries(root, dir).filter((e) => matchesOnly(opts.only, root, e))
-  const built = await Promise.all(entries.map((e) => buildEntry(root, e, jsxSrc, opts.timeoutMs ?? 10_000, validate)))
-
+  const jobs: EntryJob[] = entries.map((entry) => ({ entry, kind: 'default' }))
   const diagnostics: Diagnostic[] = []
+  const pkgNames = Array.isArray(config?.prompt?.packages) ? config!.prompt!.packages! : []
+  if (pkgNames.length && !opts.only?.length) {
+    const pk = resolvePromptPackages(root, pkgNames)
+    diagnostics.push(...pk.diagnostics)
+    for (const p of pk.packages) jobs.push(...p.jobs)
+  }
+  const built = (await Promise.all(jobs.map((j) => buildEntry(env, j)))).flat()
+
   const compiled: CompiledPrompt[] = []
   const written: string[] = []
   const ids = new Map<string, string>()
+  const packageOf = new Map<CompiledPrompt, string>()
   for (const b of built) {
     diagnostics.push(...b.diagnostics)
     if (!b.compiled) continue
@@ -396,7 +667,15 @@ export async function buildPrompts(opts: BuildOptions): Promise<BuildResult> {
       b.compiled.diagnostics.push(d)
       diagnostics.push(d)
     }
-    ids.set(b.compiled.id, b.rel)
+    ids.set(b.compiled.id, b.package ? `${b.package} (${b.rel})` : b.rel)
+    if (b.package) {
+      packageOf.set(b.compiled, b.package)
+      if (!b.compiled.skill) {
+        const d = diag('G001', 'warning', `${b.package}: ${b.rel} не є <Prompt as="skill">; з пакетів збираються лише skills.`, { path: b.rel })
+        diagnostics.push(d)
+        continue
+      }
+    }
     compiled.push(b.compiled)
   }
 
@@ -406,19 +685,30 @@ export async function buildPrompts(opts: BuildOptions): Promise<BuildResult> {
     const entryRels = new Set(findEntries(root, dir).map((e) => posix(relative(root, e))))
     const lock: PromptLock = { compiler: COMPILER, prompts: {} }
     // Keep entries of prompts not rebuilt now (failed or filtered by `only`) whose entry still exists.
-    for (const [id, p] of Object.entries(prevLock?.prompts ?? {})) if (!p.entry || entryRels.has(p.entry)) lock.prompts[id] = p
+    for (const [id, p] of Object.entries(prevLock?.prompts ?? {})) if (!p.entry || entryRels.has(p.entry) || (p.package && opts.only?.length)) lock.prompts[id] = p
+    const skillBody = config?.prompt?.skillBody ?? 'live'
+    const skillsToWrite: CompiledPrompt[] = []
     for (const cp of compiled) {
       if (cp.diagnostics.some((d) => d.severity === 'error')) continue
       const out = join(promptDir, '.compiled', `${cp.id}.json`)
       writeJson(out, cp)
       written.push(posix(relative(root, out)))
-      lock.prompts[cp.id] = { entry: cp.sources[0]?.path, sourceHash: cp.sourceHash, sources: cp.sources }
-      if (cp.skill) {
-        const md = join(root, '.claude', 'skills', cp.skill.name, 'SKILL.md')
-        mkdirSync(dirname(md), { recursive: true })
-        writeFileSync(md, renderSkillMd(cp))
-        written.push(posix(relative(root, md)))
+      const pkg = packageOf.get(cp)
+      lock.prompts[cp.id] = { entry: cp.sources[0]?.path, sourceHash: cp.sourceHash, sources: cp.sources, ...(pkg ? { package: pkg } : {}) }
+      if (cp.skill) skillsToWrite.push(cp)
+    }
+    for (const cp of skillsToWrite) {
+      const pkg = packageOf.get(cp)
+      const md = join(root, '.claude', 'skills', cp.skill!.name, 'SKILL.md')
+      const mdo: SkillMdOptions = { body: skillBody, ...(pkg ? { source: `npm:${pkg}` } : {}) }
+      if (skillBody !== 'live') {
+        const st = await renderStaticSkill(root, cp)
+        if (st) { mdo.staticText = st.text; mdo.staticArgs = st.args }
+        else diagnostics.push(diag('G001', 'warning', `Skill "${cp.skill!.name}": статичне тіло не відрендерено, SKILL.md лишився live.`, { path: cp.sources[0]?.path ?? '' }))
       }
+      mkdirSync(dirname(md), { recursive: true })
+      writeFileSync(md, renderSkillMd(cp, mdo))
+      written.push(posix(relative(root, md)))
     }
     lock.prompts = Object.fromEntries(Object.entries(lock.prompts).sort(([a], [b]) => a.localeCompare(b)))
     const lp = lockPath(root, dir)
@@ -513,6 +803,31 @@ export function jsonSchemaToTs(schema: unknown, indent = ''): string {
 
 const union = (xs: string[]) => (xs.length ? xs.map((x) => JSON.stringify(x)).join(' | ') : 'string')
 
+const typesDirOf = (root: string, config: Partial<GateConfig>) => join(resolve(root), config.prompt?.dir ?? DEFAULT_DIR, '.types')
+
+/**
+ * TS type of a provider `schema` (Р4): an inline JSON Schema, a repo-relative `.schema.json` (read and
+ * converted), or a `.d.ts` / `.ts` file whose type is re-exported (`types/arch.d.ts#ArchResult`; without
+ * `#Name` — the default export, else the root exported declaration found by the LSP reader).
+ */
+export function providerSchemaTs(root: string, typesDir: string, schema: unknown): string {
+  if (schema && typeof schema === 'object') return jsonSchemaToTs(schema, '    ')
+  if (typeof schema !== 'string') return 'unknown'
+  const { path, type } = splitSchemaRef(schema)
+  const abs = resolve(root, path)
+  if (!existsSync(abs)) return 'unknown'
+  if (isDtsSchema(schema)) {
+    const d = readDts(readFileSync(abs, 'utf8'), type)
+    const name = d.isDefault ? 'default' : d.pick ?? type
+    if (!name) return 'unknown'
+    let spec = posix(relative(typesDir, abs)).replace(/\.d\.([cm]?)ts$/, '.$1js').replace(/\.ts$/, '.js')
+    if (!spec.startsWith('.')) spec = './' + spec
+    return `import(${JSON.stringify(spec)})${name === 'default' ? '.default' : `.${name}`}`
+  }
+  const json = resolveSchemaRef(schema, (p) => { try { return readFileSync(resolve(root, p), 'utf8') } catch { return undefined } })
+  return json && typeof json === 'object' ? jsonSchemaToTs(json, '    ') : 'unknown'
+}
+
 export interface CtxTypesOptions {
   root: string
   config: GateConfig
@@ -542,7 +857,7 @@ export function generateCtxTypes(opts: CtxTypesOptions): string {
   for (const [name, p] of Object.entries(config.providers ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
     if (BUILTIN_PROVIDERS.has(name)) continue
     const key = TS_IDENT.test(name) ? name : JSON.stringify(name)
-    const schema = p.schema && typeof p.schema === 'object' ? jsonSchemaToTs(p.schema, '    ') : 'unknown'
+    const schema = providerSchemaTs(opts.root, typesDirOf(opts.root, config), p.schema)
     const fns = Array.isArray(p.functions) ? p.functions : p.functions ? Object.keys(p.functions) : []
     if (fns.length && schema === 'unknown') {
       lines.push(`    ${key}: {`)
@@ -557,7 +872,7 @@ export function generateCtxTypes(opts: CtxTypesOptions): string {
   if (items.length) lines.push(`export type ItemId = ${union([...new Set(items)].sort())}`)
   const text = lines.join('\n') + '\n'
   if (opts.write ?? true) {
-    const typesDir = join(resolve(opts.root), config.prompt?.dir ?? DEFAULT_DIR, '.types')
+    const typesDir = typesDirOf(opts.root, config)
     mkdirSync(typesDir, { recursive: true })
     writeFileSync(join(typesDir, 'ctx.d.ts'), text)
     writeFileSync(join(typesDir, 'assets.d.ts'), [

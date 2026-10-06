@@ -1,6 +1,15 @@
 {
-  "$comment": "Repos for bench/run.ts. dir is relative to this file's repo root. profile/model choose the gate-on decision; commands may override the CLI argv.",
+  "$comment": "Repos for bench/run.ts and `context-gate bench`. dir is relative to the context-gate repo root. profile/model choose the gate-on decision; commands may override the CLI argv.",
   "repos": [
-    { "name": "basic", "dir": "examples/basic", "profile": "frontend", "model": "claude-sonnet-4-6" }
+    { "name": "basic", "dir": "examples/basic", "profile": "frontend", "model": "claude-sonnet-4-6" },
+    { "name": "reference", "dir": "examples/reference", "profile": "frontend", "model": "claude-sonnet-4-6" },
+    { "name": "reference-backend-haiku", "dir": "examples/reference", "profile": "backend", "model": "claude-haiku-4-5" },
+    { "name": "web-spa", "dir": "bench/repos/web-spa", "profile": "ui", "model": "claude-sonnet-4-6" },
+    { "name": "api-service", "dir": "bench/repos/api-service", "profile": "api", "model": "claude-haiku-4-5" },
+    { "name": "py-data", "dir": "bench/repos/py-data", "profile": "etl", "model": "claude-sonnet-4-6" },
+    { "name": "monorepo", "dir": "bench/repos/monorepo", "profile": "ui", "model": "claude-opus-4-1" },
+    { "name": "docs-site", "dir": "bench/repos/docs-site", "profile": "writing", "model": "claude-haiku-4-5" },
+    { "name": "rules-only", "dir": "bench/repos/rules-only" },
+    { "name": "skills-heavy", "dir": "bench/repos/skills-heavy", "profile": "web", "model": "claude-sonnet-4-6" }
   ]
 }

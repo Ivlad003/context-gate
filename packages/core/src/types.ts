@@ -58,6 +58,8 @@ export interface MdcRule {
   body: string
   /** Paths from `@file` references in the body (expanded to one line each). */
   fileRefs: string[]
+  /** Item source that produced the rule (`cursor-mdc` when absent; `markdown-dir`, `provider:<name>`). */
+  source?: string
 }
 
 // ───────────────────────── Config: .claude/gate.json ─────────────────────────
@@ -85,6 +87,8 @@ export interface TierConfig {
   groups?: string[]
   skills?: string[] // legacy
   preload?: string[]
+  /** Model attributes for tier inference when `models` has no tier for the model (G-01). */
+  thresholds?: TierThresholds
 }
 
 export interface BudgetPct { softContextPct?: number; hardContextPct?: number }
@@ -108,6 +112,32 @@ export interface ProviderConfig {
   schema?: unknown
   exposes?: string[]
 }
+
+/** `models` value: a tier name, or attributes. With `tier` the entry maps directly; without it the tier is
+ * inferred from `tiers[*].thresholds` (SPEC "Єдина модель": «tier виводиться з порогів»). `match` (a glob)
+ * replaces the key as the pattern, so the key can be a label. */
+export interface ModelSpec {
+  tier?: Tier
+  match?: string
+  /** Context window in tokens. */
+  contextWindow?: number
+  /** Input price in USD per 1k tokens. */
+  costPer1k?: number
+}
+
+/** Model attributes a tier requires (all declared bounds must hold). */
+export interface TierThresholds {
+  minContextWindow?: number
+  maxContextWindow?: number
+  minCostPer1k?: number
+  maxCostPer1k?: number
+}
+
+/** External classify / brief provider (SPEC "Провайдери — Сигнали профілю"): `builtin` (the model API),
+ * `jev` (the engine's label classifier, `$.model.classify`), or a CLI that reads JSON on stdin.
+ * classify: stdin `{ text, profiles: [{ name, groups }], paths, model }` → stdout `{ "profile", "confidence" }`.
+ * brief: stdin `{ text, tier, maxChars, paths, model }` → stdout the brief (plain text, or JSON `{ "text" }`). */
+export type ModelProviderRef = 'builtin' | 'jev' | { kind: 'cli'; command: string[]; timeout?: string }
 
 export interface ExecutorConfig {
   command: string[] // with `{code}` placeholder
@@ -151,23 +181,35 @@ export interface GateConfig {
   skillGroups?: Record<string, string[]>
   mcpGroups?: Record<string, string[]>
   tiers: Record<Tier, TierConfig>
-  /** glob on model id → tier */
-  models: Record<string, Tier>
+  /** glob on model id → tier, or attributes (`{ contextWindow, costPer1k, tier?, match? }`, see ModelSpec). */
+  models: Record<string, Tier | ModelSpec>
   profiles: Record<string, ProfileConfig>
-  classify?: { mode: 'shadow' | 'auto'; model?: string; minConfidence?: number; recheckOn?: string[]; provider?: string }
+  classify?: { mode: 'shadow' | 'auto'; model?: string; minConfidence?: number; recheckOn?: string[]; provider?: ModelProviderRef }
   budgets?: { default?: BudgetPct; tiers?: Record<Tier, BudgetPct> }
   onExceed?: { softContextPct?: OnExceedAction; hardContextPct?: OnExceedAction }
   escalation?: { order: Tier[]; after: { verifyFailed?: number; stallTurns?: number } }
-  brief?: { enabled: boolean; model?: string; maxChars?: number; tiers?: Tier[] }
+  brief?: { enabled: boolean; model?: string; maxChars?: number; tiers?: Tier[]; provider?: ModelProviderRef }
   providers?: Record<string, ProviderConfig>
   executors?: Record<string, ExecutorConfig>
   ruleSources?: ItemSourceConfig[] // legacy
   itemSources?: ItemSourceConfig[]
   gates?: GateCheckConfig[]
   cursorRules?: { enabled?: boolean; nested?: boolean; maxCharsPerInjection?: number; strictWrite?: boolean }
-  prompt?: { dir?: string; runCacheDefault?: string; build?: 'auto' | 'never'; commitCompiled?: boolean; persist?: boolean }
+  prompt?: {
+    dir?: string; runCacheDefault?: string; build?: 'auto' | 'never'; commitCompiled?: boolean; persist?: boolean
+    /** Prompt library packages whose exported skills `context-gate build` builds (G-19). */
+    packages?: string[]
+    /** `level2`: native TS expressions in runtime props of TSX prompts (Р1, G-24). */
+    transform?: 'level1' | 'level2'
+    /** SKILL.md body: `live` render line (default), pre-rendered `static` body, or `both` (Р6, G-26). */
+    skillBody?: 'live' | 'static' | 'both'
+  }
   health?: Partial<Record<Code, number>>
   debug?: boolean
+  /** `.claude/gate.debug.log` writer (only with `debug: true` or CLI `--debug`); see core `debugLogPath`. */
+  debugLog?: { path?: string; maxBytes?: number }
+  /** A false `@assert`: skip the section (default) or fail the render. */
+  assertFail?: 'skip' | 'fail'
   log?: { file?: boolean }
   env?: string[] // whitelist of env vars visible to the DSL (masked in debug)
   /** Binaries repo executors/providers may start: narrows the user whitelist, never widens it (Р2). */

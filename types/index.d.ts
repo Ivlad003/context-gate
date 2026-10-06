@@ -103,6 +103,26 @@ export type ContextGateConfigStatus = {
   diagnostics: number
 }
 
+/** The section the `gate-section` pane shows (`/gate render prompt://<id>`), rendered in a command or a button. */
+export type ContextGateSectionView = {
+  id: string
+  tier: string
+  scope: string
+  text: string
+  chars: number
+  tokens: number
+  included: boolean
+  reason?: string
+  status: string
+  /** `G*`/`H*` lines of the render. */
+  diagnostics: string[]
+  at: number
+  /** Browser editor URL once `/gate edit` (or the pane button) started it. */
+  editorUrl?: string
+  /** Last editor start error. */
+  editorError?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'context-gate': {
@@ -127,6 +147,8 @@ declare module 'claude-code' {
       ctxPercent: number | null
       brief: ContextGateBrief | null
       config: ContextGateConfigStatus
+      /** The `gate-section` pane's section (null until `/gate render`). */
+      sectionView: ContextGateSectionView | null
     }
   }
 }

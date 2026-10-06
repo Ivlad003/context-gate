@@ -1,0 +1,4 @@
+---
+globs: pipelines/**/*.py
+---
+Кожен крок пайплайна — чиста функція DataFrame → DataFrame; I/O лише на краях (`load`, `save`).

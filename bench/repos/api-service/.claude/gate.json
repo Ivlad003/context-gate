@@ -1,0 +1,17 @@
+{
+  "groups": {
+    "core": ["skill:tdd", "skill:diagnosing-bugs", "skill:git-conventions"],
+    "api": ["skill:fastify", "skill:api-design", "skill:openapi", "skill:security-audit"],
+    "db": ["skill:knex-*", "skill:postgres-*"],
+    "ops": ["skill:docker"]
+  },
+  "tiers": { "premium": { "groups": ["core"] }, "standard": { "groups": ["core"] }, "quick": { "groups": ["core"] } },
+  "profiles": {
+    "api": { "groups": ["api"], "when": { "paths": ["src/routes/**", "src/services/**"] } },
+    "db": { "groups": ["db"], "when": { "paths": ["migrations/**"] } },
+    "ops": { "groups": ["ops"] }
+  },
+  "classify": { "mode": "shadow" },
+  "providers": { "git": { "kind": "module", "builtin": true }, "pkg": { "kind": "file", "path": "package.json", "pick": ["scripts"] } },
+  "gates": [ { "name": "tests", "on": "commit", "run": ["npm", "test"], "pass": "exitCode == 0" } ]
+}

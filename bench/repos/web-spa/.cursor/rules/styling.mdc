@@ -1,0 +1,4 @@
+---
+description: Стилі й теми Tailwind
+---
+Лише утиліти Tailwind; темні теми через `dark:`; кастомні кольори — у tailwind.config.

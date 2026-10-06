@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+HTTP-сервіс на Fastify + Postgres (knex). Помилки — `{ code, message }`, логи — pino, без console.log.

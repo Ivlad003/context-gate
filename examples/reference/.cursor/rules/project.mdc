@@ -1,0 +1,6 @@
+---
+description: Загальні правила монорепозиторію
+alwaysApply: true
+---
+Монорепозиторій на npm workspaces: `apps/web` (React + Tailwind), `apps/api` (NestJS + Prisma + Postgres).
+Тести поряд із кодом (`*.test.ts`, `*.test.tsx`), запуск: `npm test`. Не додавай залежностей без потреби.

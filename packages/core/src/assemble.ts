@@ -11,6 +11,11 @@ import { dataEnvelope } from './render.ts'
 
 export interface MarkdownFile { path: string; text: string }
 
+export interface AssembleOptions {
+  /** Builtin sections (`plan-then-act` below premium, see `planThenAct`); on unless `false`. */
+  builtins?: boolean
+}
+
 export interface PromptSet {
   /** System-prompt prompts (compiled TSX without `skill`, plus Markdown sections wrapped as CompiledPrompt). */
   system: CompiledPrompt[]
@@ -27,7 +32,7 @@ function wrapSection(section: SectionNode, uses: Record<string, string>, path: s
  * Compiled prompts + Markdown prompt files → what to render for `tier`. Markdown `<id>.<tier>.md` variants
  * replace their canonical section for that tier. Compiled prompts come first, then Markdown in path order.
  */
-export function assemblePrompts(compiled: readonly CompiledPrompt[], markdown: readonly MarkdownFile[], tier: Tier, tierNames?: Tier[]): PromptSet {
+export function assemblePrompts(compiled: readonly CompiledPrompt[], markdown: readonly MarkdownFile[], tier: Tier, tierNames?: Tier[], opts: AssembleOptions = {}): PromptSet {
   const diagnostics: Diagnostic[] = []
   const system: CompiledPrompt[] = []
   const skills: Record<string, CompiledPrompt> = {}
@@ -61,7 +66,32 @@ export function assemblePrompts(compiled: readonly CompiledPrompt[], markdown: r
     }
     system.push(wrapSection(resolveTierVariant(base.section, variants, tier), uses, f.path))
   }
+  const builtin = opts.builtins !== false ? planThenAct(system, tier) : undefined
+  if (builtin) system.push(builtin)
   return { system, skills, diagnostics }
+}
+
+// ───────────────────────── builtin sections ─────────────────────────
+
+export const PLAN_THEN_ACT_ID = 'plan-then-act'
+
+export const PLAN_THEN_ACT_TEXT = [
+  'Працюй за схемою «план → правка → перевірка»:',
+  '1. План: перед зміною коду коротко назви файли, які зміниш, що саме зміниш і як перевіриш результат.',
+  '2. Правка: змінюй лише те, що є в плані; якщо план довелося змінити, скажи про це.',
+  '3. Перевірка: запусти тести, typecheck або лінтер для змінених файлів; якщо перевірити неможливо, поясни чому.',
+].join('\n')
+
+/**
+ * SPEC «Контракти виходу і гейти»: for a tier below `premium` the builtin `plan-then-act` section turns on,
+ * unless the repo defines its own section with that id (an empty one switches it off). Only next to the repo's
+ * own prompts: a repo without prompts gets no system-prompt text from us.
+ */
+export function planThenAct(system: readonly CompiledPrompt[], tier: Tier): CompiledPrompt | undefined {
+  if (!tier || tier === 'premium' || !system.some((cp) => cp.sections.length)) return undefined
+  if (system.some((cp) => cp.id === PLAN_THEN_ACT_ID || cp.sections.some((s) => s.id === PLAN_THEN_ACT_ID))) return undefined
+  const section: SectionNode = { id: PLAN_THEN_ACT_ID, scope: 'static', children: [{ t: 'text', value: PLAN_THEN_ACT_TEXT }], source: { path: 'builtin:plan-then-act' } }
+  return { version: 1, compiler: 'builtin', id: PLAN_THEN_ACT_ID, sourceHash: '', sources: [], sections: [section], diagnostics: [] }
 }
 
 // ───────────────────────── scope ─────────────────────────

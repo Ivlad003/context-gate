@@ -1,0 +1,7 @@
+{
+  "$schema": "../../../schema/context-gate.schema.json",
+  "gates": [
+    { "name": "typecheck", "on": "turn", "run": ["tsc", "--noEmit", "--pretty", "false"],
+      "pass": "exitCode == 0", "onlyNew": true, "baseline": ".claude/gate.baseline.json" }
+  ]
+}

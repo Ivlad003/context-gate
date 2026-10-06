@@ -13,7 +13,7 @@ node --experimental-strip-types bench/run.ts --repos path/to/other-repos.json
 ## repos.json
 
 `repos.json` is the single list of bench repos. `node dist/cli.js bench` (no dirs) reads it too, with each repo's
-`profile` / `model` / `tier` unless the flags override them; the subdirectories of `bench/` are not repos.
+`profile` / `model` / `tier` unless the flags override them. The same `dir` may appear twice with a different profile or model.
 
 ```json
 { "repos": [ { "name": "basic", "dir": "examples/basic", "profile": "frontend", "model": "claude-sonnet-4-6" } ] }
@@ -27,6 +27,31 @@ CLI flags differ, `commands` overrides the argv passed to `node dist/cli.js`:
 | `health` | `health --json [--profile p] [--model m]` | `sections[].tokens` summed (system prompt per session), `metrics[name~unverified].value` |
 | `tokensOff` | `pipe "collect \| tokens"` | `included.tokens` of the TokenSummary (every item on) |
 | `tokensOn` | `pipe "collect \| decide --profile p --model m \| tokens"` | `included.tokens` after the gate |
+
+## Repos
+
+Besides `examples/basic` and `examples/reference`, `repos.json` lists the small synthetic repos in `bench/repos/`. Each one
+has a `.claude/gate.json`, a few `.cursor/rules/*.mdc` rules, `.claude/skills/*/SKILL.md` skills and a small prompt:
+
+| repo | what it models | prompt | bench profile / model |
+| --- | --- | --- | --- |
+| `web-spa` | frontend-only React SPA | TSX | `ui` / sonnet |
+| `api-service` | Fastify + Postgres API, `workflow.quick.md` tier variant | Markdown | `api` / haiku |
+| `py-data` | Python data pipelines and notebooks | Markdown | `etl` / sonnet |
+| `monorepo` | pnpm workspaces with nested `packages/*/.cursor/rules` | TSX | `ui` / opus |
+| `docs-site` | documentation site | Markdown | `writing` / haiku |
+| `rules-only` | Rust crate with `.cursor/rules` only, no prompt DSL, no skills | — | none |
+| `skills-heavy` | 30 skills in 6 groups; a profile turns on one group | TSX | `web` / sonnet |
+
+The repos are fixtures: no dependencies, nothing to install. Build their TSX prompts first. `.compiled/` is gitignored,
+and a repo without it reports 0 prompt tokens:
+
+```bash
+for d in examples/reference bench/repos/*/; do node dist/cli.js build --root "$d"; done
+```
+
+Skills in `~/.claude/skills` count towards every repo's items (`listSkills` reads the user dir too). For numbers that
+do not depend on the machine, run with an empty home: `HOME=$(mktemp -d) node --experimental-strip-types bench/run.ts`.
 
 ## Columns
 

@@ -62,6 +62,28 @@
             "items": {
               "type": "string"
             }
+          },
+          "thresholds": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "minContextWindow": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "maxContextWindow": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minCostPer1k": {
+                "type": "number",
+                "minimum": 0
+              },
+              "maxCostPer1k": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
           }
         }
       }
@@ -69,10 +91,37 @@
     "models": {
       "type": "object",
       "additionalProperties": {
-        "type": "string",
-        "description": "Tier name (key of `tiers`)."
+        "anyOf": [
+          {
+            "type": "string",
+            "description": "Tier name (key of `tiers`)."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Model attributes: with `tier` a direct mapping; without it the tier is inferred from `tiers[*].thresholds`.",
+            "properties": {
+              "tier": {
+                "type": "string",
+                "description": "Tier name (key of `tiers`)."
+              },
+              "match": {
+                "type": "string",
+                "description": "Glob on the model id (the key is then a label)."
+              },
+              "contextWindow": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "costPer1k": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        ]
       },
-      "description": "Model id glob → tier."
+      "description": "Model id glob → tier, or model attributes (`contextWindow`, `costPer1k`)."
     },
     "profiles": {
       "type": "object",
@@ -159,7 +208,39 @@
           }
         },
         "provider": {
-          "type": "string"
+          "anyOf": [
+            {
+              "enum": [
+                "builtin",
+                "jev"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "command"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "cli"
+                  ]
+                },
+                "command": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "timeout": {
+                  "type": "string",
+                  "format": "duration"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -378,6 +459,41 @@
             "type": "string",
             "description": "Tier name (key of `tiers`)."
           }
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "enum": [
+                "builtin",
+                "jev"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "command"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "cli"
+                  ]
+                },
+                "command": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "timeout": {
+                  "type": "string",
+                  "format": "duration"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -718,6 +834,28 @@
         },
         "persist": {
           "type": "boolean"
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Prompt library packages whose exported skills `build` builds."
+        },
+        "transform": {
+          "enum": [
+            "level1",
+            "level2"
+          ],
+          "description": "TSX level 2: native TS expressions in runtime props (Р1)."
+        },
+        "skillBody": {
+          "enum": [
+            "live",
+            "static",
+            "both"
+          ],
+          "description": "SKILL.md body: live render line, pre-rendered static body, or both (Р6)."
         }
       }
     },
@@ -730,6 +868,27 @@
     },
     "debug": {
       "type": "boolean"
+    },
+    "debugLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "Debug log file (written only with `debug: true` or CLI `--debug`)."
+    },
+    "assertFail": {
+      "enum": [
+        "skip",
+        "fail"
+      ],
+      "description": "A false `@assert`: skip the section (default) or fail the render."
     },
     "log": {
       "type": "object",
@@ -744,7 +903,8 @@
       "type": "array",
       "items": {
         "type": "string"
-      }
+      },
+      "description": "Env vars visible to the DSL as `env.*` (masked in debug output)."
     },
     "allowBinaries": {
       "type": "array",

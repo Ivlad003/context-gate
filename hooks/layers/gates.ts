@@ -7,8 +7,11 @@
 
 import type { GateCheckConfig, Scope_, Value } from '../../packages/core/src/types.ts'
 import { evalSource, newBudget, parseTemplate, renderTemplate, truthy } from '../../packages/core/src/expr.ts'
+import type { RenderHostExt } from '../../packages/core/src/render.ts'
+import type { GateStat } from '../../packages/core/src/health.ts'
 
-import { type Io, type FileCall, type Runtime, type ToolResultLike, debug, join } from '../ctx.ts'
+import { type Io, type FileCall, type Runtime, type ToolResultLike, debug, join, now } from '../ctx.ts'
+import { providerData } from './host.ts'
 import { ensureSession } from './config.ts'
 import { journal, flushJournal } from './journal.ts'
 import { trustState } from './trust.ts'
@@ -58,24 +61,116 @@ function violationsOf(result: Value | undefined, stdout: string): string[] {
 
 export interface GateOutcome { pass: boolean; message?: string; skipped?: string; exitCode?: number }
 
-/** Run one command gate (trusted repos only). */
+// ───────────────────────── gate statistics (health H011) ─────────────────────────
+
+/** Per-session counters by gate name. Kept beside the Runtime (not in it) so `ctx.ts` stays untouched. */
+const STATS = new WeakMap<Runtime, { gates: Map<string, GateStat>; lastBlocked?: { name: string; at: number } }>()
+
+function statsOf(rt: Runtime): { gates: Map<string, GateStat>; lastBlocked?: { name: string; at: number } } {
+  let s = STATS.get(rt)
+  if (!s) { s = { gates: new Map() }; STATS.set(rt, s) }
+  return s
+}
+
+function recordGate(rt: Runtime, name: string, blocked: boolean, ms: number): void {
+  const s = statsOf(rt)
+  const g = s.gates.get(name) ?? { attempts: 0, blocks: 0, ms: 0, overrides: 0 }
+  g.attempts++
+  g.ms = (g.ms ?? 0) + ms
+  if (blocked) { g.blocks++; s.lastBlocked = { name, at: now() } }
+  s.gates.set(name, g)
+}
+
+/** Gate counters of this session for `computeHealth(…, { gates })` (H011). */
+export function gateStats(rt: Runtime): Record<string, GateStat> {
+  return Object.fromEntries([...statsOf(rt).gates].map(([k, v]) => [k, { ...v }]))
+}
+
+/** Reset on `/clear` and a fresh session. */
+export function resetGateStats(rt: Runtime): void { STATS.delete(rt) }
+
+/** SPEC «Гейти … false positives за ручними «все одно»»: a prompt that insists after a block. */
+const OVERRIDE_RE = /(все\s*одно|всеодно|anyway|ignore (?:the )?gate|пропусти гейт|без гейт)/i
+const OVERRIDE_WINDOW_MS = 10 * 60_000
+
+/** A manual «все одно» right after a block counts as an override (a likely false positive) of that gate. */
+export function noteGateOverride(rt: Runtime, text: string | undefined): string | undefined {
+  const s = statsOf(rt)
+  if (!text || !s.lastBlocked || now() - s.lastBlocked.at > OVERRIDE_WINDOW_MS || !OVERRIDE_RE.test(text)) return undefined
+  const g = s.gates.get(s.lastBlocked.name)
+  if (g) g.overrides = (g.overrides ?? 0) + 1
+  const name = s.lastBlocked.name
+  s.lastBlocked = undefined
+  return name
+}
+
+// ───────────────────────── provider data for gates (gates[].provider) ─────────────────────────
+
+/** Data of `gates[].provider` (SPEC «Гейти … кожна — команда або провайдер плюс умова проходження»). */
+async function gateProvider(io: Io, rt: Runtime, name: string, trusted: boolean): Promise<Value | undefined> {
+  if (!rt.cfg.providers?.[name]) return undefined
+  const host: RenderHostExt = {
+    trusted,
+    now: () => now(),
+    async readFile(path) {
+      if (/^\//.test(path) || path.split(/[\\/]/).includes('..')) return undefined
+      const t = await io.fs.read(join(rt.root, path)).catch(() => undefined)
+      return typeof t === 'string' ? t : undefined
+    },
+    async mcp(req) {
+      if (!trusted) throw new Error('репозиторій не довірений')
+      const r = await io.mcp.call(req.server, req.tool, req.args)
+      if (r.isError) throw new Error(`MCP ${req.server}.${req.tool} повернув помилку`)
+      if (r.structuredContent !== undefined) return r.structuredContent as Value
+      const text = r.content.map((b) => ('text' in b && typeof b.text === 'string' ? b.text : '')).join('\n')
+      try { return JSON.parse(text) as Value } catch { return text }
+    },
+  }
+  try {
+    const data = await providerData(io, rt, host, name)
+    return data[name]
+  } catch (err) {
+    debug(io, `gate provider ${name}: ${String((err as Error)?.message ?? err)}`)
+    return undefined
+  }
+}
+
+const isUnverified = (v: Value | undefined): boolean => v === undefined || v === null || (typeof v === 'object' && !Array.isArray(v) && (v as Record<string, Value>).unverified === true)
+
+/** Run one command gate (trusted repos only), or a provider gate (`provider` without `run`). */
 export async function runCommandGate(io: Io, rt: Runtime, g: GateCheckConfig, vars: { file?: string }): Promise<GateOutcome> {
-  if (!g.run?.length) return { pass: true, skipped: 'немає run' }
+  if (!g.run?.length && !g.provider) return { pass: true, skipped: 'немає run' }
   const trust = await trustState(io, rt)
-  if (trust !== 'trusted') {
+  const trusted = trust === 'trusted'
+  if (g.run?.length && !trusted) {
     debug(io, `gate ${g.name} skipped: repository not trusted`)
     return { pass: true, skipped: 'репозиторій не довірений' }
   }
-  const argv = expandArgv(g.run, { file: vars.file, changed: [...rt.changedPaths] })
+  const prov = g.provider ? await gateProvider(io, rt, g.provider, trusted) : undefined
   let r: { exitCode: number; stdout: string; stderr: string }
-  try {
-    r = await io.process.run(argv, { cwd: rt.root, timeoutMs: GATE_TIMEOUT_MS })
-  } catch (err) {
-    r = { exitCode: -1, stdout: '', stderr: String((err as Error)?.message ?? err) }
-  }
   let result: Value = null
-  try { result = JSON.parse(r.stdout) as Value } catch { /* not JSON */ }
+  if (g.run?.length) {
+    const argv = expandArgv(g.run, { file: vars.file, changed: [...rt.changedPaths] })
+    try {
+      r = await io.process.run(argv, { cwd: rt.root, timeoutMs: GATE_TIMEOUT_MS })
+    } catch (err) {
+      r = { exitCode: -1, stdout: '', stderr: String((err as Error)?.message ?? err) }
+    }
+    try { result = JSON.parse(r.stdout) as Value } catch { /* not JSON */ }
+  } else {
+    // Provider-only gate: `result` is the provider's data; unavailable data never blocks (unverified).
+    if (isUnverified(prov)) {
+      debug(io, `gate ${g.name} skipped: provider ${g.provider} unavailable`)
+      return { pass: true, skipped: `провайдер ${g.provider} недоступний` }
+    }
+    result = prov ?? null
+    r = { exitCode: 0, stdout: typeof prov === 'string' ? prov : JSON.stringify(prov), stderr: '' }
+  }
   const scope: Scope_ = { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, result }
+  if (g.provider) {
+    scope.provider = prov ?? null
+    if (!(g.provider in scope)) scope[g.provider] = prov ?? null
+  }
   let pass: boolean
   try {
     pass = truthy(evalSource(g.pass ?? 'exitCode == 0', scope, newBudget()))
@@ -122,7 +217,9 @@ async function failed(io: Io, rt: Runtime, g: GateCheckConfig, out: GateOutcome,
 async function runGates(io: Io, rt: Runtime, on: GateCheckConfig['on'], tier: string, vars: { file?: string }): Promise<string | undefined> {
   for (const g of gatesFor(rt, on, tier)) {
     if (g.builtin) continue
+    const t0 = now()
     const out = await runCommandGate(io, rt, g, vars)
+    if (!out.skipped) recordGate(rt, g.name, !out.pass, now() - t0)
     if (!out.pass) {
       await failed(io, rt, g, out, tier)
       return out.message
@@ -137,9 +234,10 @@ export async function gatesBeforeFile(io: Io, rt: Runtime, c: FileCall): Promise
   const tier = await tierOf(io, c.agentId)
   const reads = rt.readFiles.get(c.agent)
   const rbw = gatesFor(rt, 'write', tier).find((g) => g.builtin && g.name === 'read-before-write')
-  if (rbw && !reads?.has(c.rel)) {
-    const exists = c.tool === 'Write' ? await io.fs.exists(c.file).catch(() => false) : true
-    if (exists) {
+  if (rbw) {
+    const blocked = !reads?.has(c.rel) && (c.tool === 'Write' ? await io.fs.exists(c.file).catch(() => false) : true)
+    recordGate(rt, rbw.name, blocked, 0)
+    if (blocked) {
       await failed(io, rt, rbw, { pass: false }, tier)
       return { deny: `Гейт read-before-write: спочатку прочитай ${c.rel} інструментом Read, потім змінюй файл.` }
     }
@@ -167,8 +265,10 @@ export function gatesMentioned(rt: Runtime, rels: string[]): void {
   for (const r of rels) reads.add(r)
 }
 
-/** `prompt` gates: a failure becomes context of the prompt. */
-export async function promptGates(io: Io, rt: Runtime): Promise<string | undefined> {
+/** `prompt` gates: a failure becomes context of the prompt. `text` (the prompt) feeds the «все одно» override counter. */
+export async function promptGates(io: Io, rt: Runtime, text?: string): Promise<string | undefined> {
+  const overridden = noteGateOverride(rt, text)
+  if (overridden) await journal(io, rt, { kind: 'debug', trigger: 'gate-override', data: { gate: overridden } })
   if (!rt.config) return undefined
   return runGates(io, rt, 'prompt', await tierOf(io, undefined), {})
 }

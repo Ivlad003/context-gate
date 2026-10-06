@@ -1,0 +1,8 @@
+{
+  "$comment": "Fixtures for the reference repo: three MCP servers the gate filters by profile. Placeholder packages; tests never start them.",
+  "mcpServers": {
+    "figma": { "command": "npx", "args": ["-y", "@example/figma-mcp"] },
+    "playwright": { "command": "npx", "args": ["-y", "@example/playwright-mcp"] },
+    "postgres": { "command": "npx", "args": ["-y", "@example/postgres-mcp", "postgresql://localhost:5432/acme_dev"] }
+  }
+}

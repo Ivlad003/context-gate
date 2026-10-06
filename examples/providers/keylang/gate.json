@@ -1,0 +1,52 @@
+{
+  "$schema": "../../../schema/context-gate.schema.json",
+  "providers": {
+    "arch": {
+      "kind": "cli",
+      "command": ["keylang", "parse", "--json"],
+      "functions": { "code": ["keylang", "explain", "{id}", "--json"] },
+      "cache": "5m",
+      "onError": "unverified",
+      "exposes": ["symbols"],
+      "schema": {
+        "type": "object",
+        "required": ["deny"],
+        "properties": {
+          "deny": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["from", "to"],
+              "properties": { "from": { "type": "string" }, "to": { "type": "string" }, "reason": { "type": "string" } }
+            }
+          },
+          "violations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["code", "explain"],
+              "properties": {
+                "code": { "type": "string" },
+                "explain": { "type": "string" },
+                "file": { "type": "string" },
+                "line": { "type": "integer" }
+              }
+            }
+          },
+          "symbols": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "itemSources": [
+    { "kind": "cursor-mdc", "dir": ".cursor/rules" },
+    { "kind": "provider", "name": "arch", "field": "deny", "as": "always",
+      "template": "{{ item.from }} не імпортує {{ item.to }}" }
+  ],
+  "gates": [
+    { "name": "architecture", "on": "commit", "provider": "arch",
+      "run": ["keylang", "check", "--changed", "--json"],
+      "pass": "len(result.violations) == 0",
+      "message": "{{ result.violations[0].code }}: {{ result.violations[0].explain }}" }
+  ]
+}

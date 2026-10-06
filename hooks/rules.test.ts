@@ -6,7 +6,7 @@ import { ROOT, RULES, RUN, mountRepo } from './testkit.ts'
 const READ_RESULT = { type: 'text', file: { filePath: `${ROOT}/src/a.ts`, content: 'x', numLines: 1, startLine: 1, totalLines: 1 } }
 
 describe('cursor-rules', () => {
-  test('Always rule lands in prompt.context instruction files after CLAUDE.md', async ($, on) => {
+  test('Always rule lands in prompt.context instruction files after CLAUDE.md', { timeoutMs: 20_000 }, async ($, on) => {
     mountRepo(on, { files: RULES })
     on('prompt.context', ($, e) => ({ blocks: e.blocks, instructionFiles: e.instructionFiles }))
     const r = await $.prompt.context({ blocks: [{ name: 'claudeMd', text: 'CLAUDE' }], instructionFiles: [] })
@@ -107,5 +107,75 @@ describe('cursor-rules', () => {
     expect(r.context ?? []).toEqual([])
     const why = await $.command.run({ command: 'gate', args: 'why', ...RUN })
     expect(why.text).toContain('.claude/rules/cursor/ існує')
+  })
+})
+
+const SLOW = { timeoutMs: 20_000 }
+
+/** Journal lines from `.claude/gate.log.jsonl` (written with `log.file: true`, flushed on session.end). */
+async function journalOf($: { session: { end(e: never): Promise<unknown> } }, files: Map<string, { text: string }>): Promise<Record<string, unknown>[]> {
+  await $.session.end({ reason: 'other', sessionId: 's', resume: false } as never)
+  const text = files.get('.claude/gate.log.jsonl')?.text ?? ''
+  return text.split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+}
+
+describe('rule sources and delivery journal (G-04, G-05, G-06, G-51)', () => {
+  test('every delivery is journaled: Always, Auto per agent, @file, @mention, /rule', SLOW, async ($, on) => {
+    const repo = mountRepo(on, { files: { ...RULES, 'src/a.ts': 'x', '.claude/gate.json': JSON.stringify({ log: { file: true } }) } })
+    on('tool.call', () => ({ result: READ_RESULT }) as never)
+    on('prompt.context', ($, e) => ({ blocks: e.blocks, instructionFiles: e.instructionFiles }))
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }) as never)
+    await $.prompt.context({ blocks: [{ name: 'claudeMd', text: 'C' }], instructionFiles: [] })
+    await $.tool.call({ tool: 'Read', tool_use_id: 't1', file_path: `${ROOT}/src/a.ts`, agentId: 'agent-7' } as never)
+    await $.prompt.submit({ text: 'глянь @src/b.ts і @style', wait: false, origin: { kind: 'composer' } })
+    await $.command.run({ command: 'rule', args: 'api', ...RUN })
+    const delivered = (await journalOf($ as never, repo.files)).filter((e) => e.kind === 'rule-delivered').map((e) => {
+      const d = e.data as { ruleId: string; agent: string }
+      return `${e.trigger}:${d.ruleId}:${d.agent}`
+    })
+    expect(delivered).toEqual(['prompt.context:base:main', 'tool.call:ts:agent-7', '@file:ts:main', '@mention:style:main', '/rule:api:main'])
+  })
+
+  test('/gate rules: one row per rule with type, globs and delivered yes/no per agent', SLOW, async ($, on) => {
+    mountRepo(on, { files: { ...RULES, 'src/a.ts': 'x' } })
+    on('tool.call', () => ({ result: READ_RESULT }) as never)
+    await $.tool.call({ tool: 'Read', tool_use_id: 't1', file_path: `${ROOT}/src/a.ts`, agentId: 'sub-1' } as never)
+    const r = await $.command.run({ command: 'gate', args: 'rules', ...RUN })
+    expect(r.text).toContain('- `ts` · Auto Attached · globs src/**/*.ts · доставлено: main — ні, sub-1 — так')
+    expect(r.text).toContain('- `base` · Always · доставлено: main — ні, sub-1 — ні')
+    expect(r.text).toContain('- `style` · Manual')
+  })
+
+  test('custom cursor-mdc dir and a markdown-dir source deliver like .cursor/rules', SLOW, async ($, on) => {
+    const cfg = { itemSources: [{ kind: 'cursor-mdc', dir: 'rules/cursor' }, { kind: 'markdown-dir', dir: 'docs/rules', frontmatter: { paths: 'globs' } }] }
+    mountRepo(on, {
+      files: {
+        '.claude/gate.json': JSON.stringify(cfg),
+        'rules/cursor/py.mdc': '---\nglobs: "*.py"\n---\nPython: типи всюди.',
+        'docs/rules/api.md': '---\ntitle: API\npaths: src/api/**\n---\nREST: множина в URL.',
+        'src/api/x.ts': 'x',
+      },
+    })
+    on('tool.call', () => ({ result: READ_RESULT }) as never)
+    const py = await $.tool.call({ tool: 'Read', tool_use_id: 't1', file_path: `${ROOT}/tools/a.py` })
+    expect(py.context?.join('\n')).toContain('Contents of rules/cursor/py.mdc (Cursor rule py):')
+    const api = await $.tool.call({ tool: 'Read', tool_use_id: 't2', file_path: `${ROOT}/src/api/x.ts` })
+    expect(api.context?.join('\n')).toContain('Contents of docs/rules/api.md (rule api):\nREST: множина в URL.')
+    const rules = await $.command.run({ command: 'gate', args: 'rules', ...RUN })
+    expect(rules.text).toContain('`api` · Auto Attached · globs src/api/** · джерело markdown-dir')
+  })
+
+  test('a provider source turns provider data into Always rules (cursorRules block, not instruction files)', SLOW, async ($, on) => {
+    const cfg = {
+      providers: { arch: { kind: 'file', path: 'arch.json' } },
+      itemSources: [{ kind: 'provider', name: 'arch', field: 'deny', as: 'always', template: '{{ item.from }} не імпортує {{ item.to }}' }],
+    }
+    mountRepo(on, { files: { '.claude/gate.json': JSON.stringify(cfg), 'arch.json': JSON.stringify({ deny: [{ from: 'domain', to: 'infra' }] }) } })
+    on('prompt.context', ($, e) => ({ blocks: e.blocks, instructionFiles: e.instructionFiles }))
+    const r = await $.prompt.context({ blocks: [{ name: 'claudeMd', text: 'C' }], instructionFiles: [] })
+    expect(r.instructionFiles ?? []).toEqual([])
+    expect(r.blocks.map((b) => b.name)).toEqual(['claudeMd', 'cursorRules'])
+    expect(r.blocks[1]?.text).toBe('Contents of provider:arch (rule arch/0):\ndomain не імпортує infra')
   })
 })

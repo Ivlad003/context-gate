@@ -1,4 +1,5 @@
-// UI: the AbovePrompt band, the pinned health status, and the `/gate why` pane (SPEC "Інтерфейс користувача").
+// UI: the AbovePrompt band, the pinned health status, and the panes (SPEC "Інтерфейс користувача"):
+// `gate-why` (/gate why), `gate-health` (/gate health) and `gate-section` (/gate render prompt://<id>).
 // Render hooks only read state (reading subscribes); every write happens in handlers or other events.
 
 
@@ -6,13 +7,25 @@ import type { Gate } from '../../packages/core/src/types.ts'
 import { statusLine as gateStatusLine } from '../../packages/core/src/decide.ts'
 import { budgetFor } from '../../packages/core/src/config.ts'
 import { formatWhy } from '../../packages/core/src/journal.ts'
-import type { DecisionLogEntry } from '../../packages/core/src/types.ts'
-import type { ContextGateDecision, ContextGateLogEntry, ContextGateRenderHealth } from '../../types'
+import { formatHealth } from '../../packages/core/src/health.ts'
+import type { DecisionLogEntry, HealthReport } from '../../packages/core/src/types.ts'
+import type { ContextGateDecision, ContextGateLogEntry, ContextGateRenderHealth, ContextGateSectionView } from '../../types'
 import { json } from '../state.ts'
 import type { Io, Runtime } from '../ctx.ts'
 
 export const WHY_PANE = 'gate-why'
+export const HEALTH_PANE = 'gate-health'
+export const SECTION_PANE = 'gate-section'
 const DASH = '—'
+
+/** The status marker of a failed prompt build (SPEC "Помилки збірки"). */
+export const BUILD_MARK = 'prompt ⚠ build'
+
+/** `rt.buildError` (set by layer 3 on H013/G*, cleared by a good build). */
+export function buildErrorOf(rt: Runtime): { code: string; message: string } | undefined {
+  const e = (rt as { buildError?: { code: string; message: string } }).buildError
+  return e && typeof e === 'object' ? e : undefined
+}
 
 /** `gate — · tier — · ctx —%` with whatever the state holds (no decision yet). */
 export function bandLine(v: { profile: string | null | undefined; proposed?: string | null; tier: string | null | undefined; ctx: number | null | undefined }): string {
@@ -29,9 +42,10 @@ export function gateLine(gate: ContextGateDecision | null, tier: string | null, 
 
 const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
-/** `prompt 8.1k (static 76%) · ◌ N` from the stored render health. */
-export function healthLine(h: ContextGateRenderHealth | null): string | undefined {
-  if (!h) return undefined
+/** `prompt 8.1k (static 76%) · ◌ N` from the stored render health; `prompt ⚠ build` after a failed build. */
+export function healthLine(h: ContextGateRenderHealth | null, buildError?: { code: string } | null): string | undefined {
+  if (!h) return buildError ? BUILD_MARK : undefined
+  if (buildError) return `${BUILD_MARK} · ◌ ${h.unverified}`
   const secs = Object.values(h.sections)
   const tokens = secs.reduce((a, s) => a + s.tokens, 0)
   const stat = secs.filter((s) => s.scope === 'static').reduce((a, s) => a + s.tokens, 0)
@@ -39,10 +53,18 @@ export function healthLine(h: ContextGateRenderHealth | null): string | undefine
   return `prompt ${fmtK(tokens)} (static ${pct}%) · ◌ ${h.unverified}`
 }
 
-/** Pinned status line: health in interactive sessions; the whole line headless (no AbovePrompt). */
+const drawnMark = new WeakMap<Runtime, boolean>()
+
+/** Pinned status line: health in interactive sessions; the whole line headless (no AbovePrompt).
+ * A change of the build marker also redraws the band (it reads `rt`, which no atom subscribes to). */
 export async function refreshStatus(io: Io, rt: Runtime): Promise<void> {
   try {
-    const health = healthLine(await io.read('health'))
+    const err = buildErrorOf(rt)
+    if ((drawnMark.get(rt) ?? false) !== !!err) {
+      drawnMark.set(rt, !!err)
+      try { io.ui.invalidate('ui.render') } catch { /* no surface */ }
+    }
+    const health = healthLine(await io.read('health'), err)
     if (rt.surface === null) {
       const line = gateLine(await io.read('gate'), await io.read('tier'), await io.read('ctxPercent'))
       io.ui.status(health ? `${line} · ${health}` : line)
@@ -68,10 +90,12 @@ export async function resetAuto(io: Io, recompute: (trigger: string) => Promise<
 
 type Els = { Box: (p: Record<string, unknown>) => unknown; Text: (p: Record<string, unknown>) => unknown; Markdown: (p: { text: string }) => unknown; Button: (p: { key: string; label: string; variant?: 'primary'; onPress: () => void }) => unknown }
 
-/** The band's one line: highlighted once the soft context threshold is crossed. */
+/** The band's one line: highlighted once the soft context threshold is crossed or a prompt build failed. */
 export function bandProps(rt: Runtime, gate: ContextGateDecision | null, tier: string | null, ctx: number | null): { text: string; hot: boolean } {
   const soft = rt.cfg ? budgetFor(rt.cfg, gate?.tier ?? tier ?? 'standard').softContextPct : 70
-  return { text: gateLine(gate, tier, ctx), hot: ctx !== null && ctx >= soft }
+  const err = buildErrorOf(rt)
+  const line = gateLine(gate, tier, ctx)
+  return { text: err ? `${line} · ${BUILD_MARK}` : line, hot: (ctx !== null && ctx >= soft) || !!err }
 }
 
 /** `/gate why` pane: disabled layers, the last decisions, prompt sections, and the two buttons. */
@@ -91,5 +115,35 @@ export function whyPane(els: Els, v: {
   if (v.gate?.shadow && v.gate.proposed) buttons.push(els.Button({ key: 'apply', label: 'Застосувати запропонований профіль', variant: 'primary', onPress: v.onApply }))
   buttons.push(els.Button({ key: 'auto', label: 'Скинути до auto', onPress: v.onAuto }))
   parts.push(els.Box({ flexDirection: 'row', gap: 2, children: buttons }))
+  return els.Box({ flexDirection: 'column', gap: 1, children: parts })
+}
+
+/** `/gate health` pane: the full health table with the «що зробити» column, plus a failed build. */
+export function healthPane(els: Els, v: { report: HealthReport | undefined; buildError: { code: string; message: string } | undefined; onRerender: () => void }): unknown {
+  const parts: unknown[] = []
+  if (v.buildError) parts.push(els.Text({ color: 'warning', children: `${BUILD_MARK}: ${v.buildError.code} ${v.buildError.message}` }))
+  parts.push(els.Markdown({ text: v.report ? formatHealth(v.report) : 'Рендера промпту ще не було в цій сесії (секцій DSL немає або prompt.compose ще не спрацював).' }))
+  parts.push(els.Box({ flexDirection: 'row', gap: 2, children: [els.Button({ key: 'rerender', label: 'Перерендерити', onPress: v.onRerender })] }))
+  return els.Box({ flexDirection: 'column', gap: 1, children: parts })
+}
+
+/** The section pane's header line: `prompt://id · scope · tier · N ток. · стан`. */
+export function sectionHeader(s: ContextGateSectionView): string {
+  return `prompt://${s.id} · ${s.scope} · tier ${s.tier} · ${s.tokens} ток. (${s.chars} симв.) · ${s.included ? s.status : `пропущена${s.reason ? `: ${s.reason}` : ''}`}`
+}
+
+/** `/gate render prompt://<id>` pane: the section's render, tokens, and «відкрити в редакторі» / «перерендерити». */
+export function sectionPane(els: Els, v: { view: ContextGateSectionView | null; onEdit: () => void; onRerender: () => void }): unknown {
+  if (!v.view) return els.Text({ dimColor: true, children: 'Секцію не вибрано: /gate render prompt://<id>' })
+  const s = v.view
+  const parts: unknown[] = [els.Text({ bold: true, children: sectionHeader(s) })]
+  if (s.diagnostics.length) parts.push(els.Text({ color: 'warning', children: s.diagnostics.join('\n') }))
+  parts.push(els.Markdown({ text: s.text || '_(порожньо)_' }))
+  if (s.editorUrl) parts.push(els.Text({ children: `Редактор: ${s.editorUrl}` }))
+  if (s.editorError) parts.push(els.Text({ color: 'warning', children: s.editorError }))
+  parts.push(els.Box({ flexDirection: 'row', gap: 2, children: [
+    els.Button({ key: 'edit', label: 'Відкрити в редакторі', variant: 'primary', onPress: v.onEdit }),
+    els.Button({ key: 'rerender', label: 'Перерендерити', onPress: v.onRerender }),
+  ] }))
   return els.Box({ flexDirection: 'column', gap: 1, children: parts })
 }

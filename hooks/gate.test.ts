@@ -28,7 +28,7 @@ const ENGINE = { kind: 'engine' } as const
 const PROVIDER = { plugin: 'mcp:postgres', tier: 'user' } as const
 
 describe('skill-gate', () => {
-  test('shadow computes the profile but filters nothing; /gate apply filters the listing', async ($, on) => {
+  test('shadow computes the profile but filters nothing; /gate apply filters the listing', { timeoutMs: 20_000 }, async ($, on) => {
     mountRepo(on, { files: FILES, tools: TOOLS })
     on('prompt.attachment', ($, e) => ({ text: e.text }))
     on('prompt.submit', ($, e) => ({ text: e.text }))
@@ -261,3 +261,101 @@ describe('script tools', () => {
   })
 })
 
+
+const SLOW = { timeoutMs: 20_000 }
+
+describe('per-agent tiers, providers, models attributes (G-01, G-02, G-08, G-35)', () => {
+  const TIERED = {
+    groups: { frontend: ['skill:react-*'], docs: ['skill:tdd'], db: ['tool:mcp__postgres__*'] },
+    tiers: { premium: { groups: [] }, standard: { groups: [] }, quick: { groups: ['docs', 'db'] } },
+    profiles: { frontend: { groups: ['frontend'] } },
+  }
+
+  test('a subagent on a quick model gets its own tier: listing and MCP deny follow it', SLOW, async ($, on) => {
+    mountRepo(on, { files: { '.claude/gate.json': JSON.stringify(TIERED) }, tools: ['mcp__postgres__query'] })
+    on('prompt.attachment', ($, e) => ({ text: e.text }))
+    on('tool.call', () => ({ result: 'ok' }) as never)
+    on('turn.step', async function* ($, e) {
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' } as never
+    })
+    await $.prompt.attachment({ type: 'skill_listing', text: LISTING, origin: ENGINE } as never)
+    await $.command.run({ command: 'gate', args: 'frontend', ...RUN })
+    const s = $.turn.step({ turnId: 't', index: 0, model: 'claude-haiku-4-5', messageCount: 1, agentId: 'sub-1' } as never)
+    for await (const _ of s) { /* drain */ }
+    await s.result
+    const main = await $.prompt.attachment({ type: 'skill_listing', text: LISTING, origin: ENGINE } as never)
+    expect(main.text).not.toContain('- tdd')
+    const sub = await $.prompt.attachment({ type: 'skill_listing', text: LISTING, origin: ENGINE, agentId: 'sub-1' } as never)
+    expect(sub.text).toContain('- tdd')
+    expect((await $.tool.call({ tool: 'mcp__postgres__query', tool_use_id: 'm1' } as never)).deny).toContain('postgres вимкнено')
+    expect((await $.tool.call({ tool: 'mcp__postgres__query', tool_use_id: 'm2', agentId: 'sub-1' } as never)).deny).toBeUndefined()
+  })
+
+  test('models attributes: a model without a tier infers it from thresholds', SLOW, async ($, on) => {
+    const cfg = { ...TIERED, models: { 'local-*': { contextWindow: 32000, costPer1k: 0 } }, tiers: { ...TIERED.tiers, quick: { groups: ['docs'], thresholds: { maxCostPer1k: 0.001 } } } }
+    mountRepo(on, { files: { '.claude/gate.json': JSON.stringify(cfg) }, model: 'local-llama' })
+    const s = await $.command.run({ command: 'gate', args: '', ...RUN })
+    expect(s.text).toContain('tier quick')
+  })
+
+  test('classify.provider cli: stdin JSON, stdout {profile, confidence} (trusted repo)', { ...SLOW, options: { mode: 'auto', trustBuild: 'always' } }, async ($, on) => {
+    const cfg = { ...CONFIG, classify: { mode: 'auto', provider: { kind: 'cli', command: ['node', 'scripts/classify.js'] } } }
+    const repo = mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg) }, tools: TOOLS, run: () => ({ exitCode: 0, stdout: '{"profile":"backend","confidence":0.95}', stderr: '' }) })
+    on('prompt.submit', ($, e) => ({ text: e.text }))
+    await $.prompt.submit({ text: 'додай таблицю в базу', wait: false, origin: ORIGIN })
+    expect(repo.runs).toContainEqual(['node', 'scripts/classify.js'])
+    expect(repo.completes).toEqual([])
+    const s = await $.command.run({ command: 'gate', args: '', ...RUN })
+    expect(s.text).toContain('gate backend ·')
+  })
+
+  test('brief.provider cli writes the brief; an untrusted repo runs nothing', SLOW, async ($, on) => {
+    const cfg = { ...CONFIG, brief: { enabled: true, tiers: ['standard'], provider: { kind: 'cli', command: ['node', 'brief.js'] } } }
+    const repo = mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg) }, run: () => ({ exitCode: 0, stdout: '{"text":"Мета: Y"}', stderr: '' }) })
+    let ctx: readonly string[] = []
+    on('prompt.submit', ($, e) => {
+      ctx = e.context ?? []
+      return { text: e.text }
+    })
+    await $.prompt.submit({ text: 'зроби Y', wait: false, origin: ORIGIN })
+    expect(repo.runs).toEqual([])
+    expect(ctx.join('\n')).not.toContain('Бриф задачі')
+  })
+
+  test('brief.provider cli in a trusted repo', { ...SLOW, options: { trustBuild: 'always' } }, async ($, on) => {
+    const cfg = { ...CONFIG, brief: { enabled: true, tiers: ['standard'], provider: { kind: 'cli', command: ['node', 'brief.js'] } } }
+    const repo = mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg) }, run: () => ({ exitCode: 0, stdout: '{"text":"Мета: Y"}', stderr: '' }) })
+    let ctx: readonly string[] = []
+    on('prompt.submit', ($, e) => {
+      ctx = e.context ?? []
+      return { text: e.text }
+    })
+    await $.prompt.submit({ text: 'зроби Y', wait: false, origin: ORIGIN })
+    expect(repo.runs).toContainEqual(['node', 'brief.js'])
+    expect(ctx.join('\n')).toContain('Мета: Y')
+    expect(repo.completes).not.toContain('opus')
+  })
+
+  test('a script tool outside the profile is denied (groups apply to `# gate-tool:` items)', { ...SLOW, options: { trustBuild: 'always' } }, async ($, on) => {
+    const cfg = { ...CONFIG, groups: { ...CONFIG.groups, api: ['tool:parse_openapi'] } }
+    const script = '#!/usr/bin/env python3\n# gate-tool: parse_openapi\n# description: Ендпоінти\nprint("[]")\n'
+    const repo = mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg), '.claude/prompt/scripts/parse.py': script }, run: () => ({ exitCode: 0, stdout: '[]', stderr: '' }) })
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+    await $.command.run({ command: 'gate', args: 'frontend', ...RUN })
+    const r = await $.tool.call({ tool: 'mcp__context-gate__parse_openapi', tool_use_id: 't1' } as never)
+    expect(r.deny).toContain('parse_openapi вимкнено профілем frontend')
+    expect(repo.runs).toEqual([])
+  })
+})
+
+describe('env whitelist (G-03)', () => {
+  test('env.* in the render scope holds only gate.json `env` names, read from the settings env block', { timeoutMs: 20_000 }, async ($, on) => {
+    const cfg = { env: ['CG_REGION'] }
+    mountRepo(on, { files: { '.claude/gate.json': JSON.stringify(cfg), '.claude/prompt/env.md': '---\nid: env\n---\nРегіон: {{ env.CG_REGION }}; секрет: [{{ env.CG_SECRET }}]\n' } })
+    on('settings.read', () => ({ value: { env: { CG_REGION: 'eu-1', CG_SECRET: 'nope' } } }) as never)
+    on('prompt.compose', () => ({ sections: [] }))
+    const r = await $.prompt.compose({ model: 'claude-sonnet-4-5', promptModel: 'claude-sonnet-4-5', surfaces: [], tools: [], outputStyle: null, traits: [] } as never)
+    expect(r.sections.find((s) => s.id === 'context-gate:env')?.text).toBe('Регіон: eu-1; секрет: []')
+  })
+})

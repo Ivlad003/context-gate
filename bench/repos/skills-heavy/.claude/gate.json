@@ -1,0 +1,24 @@
+{
+  "groups": {
+    "core":   ["skill:tdd", "skill:diagnosing-bugs", "skill:git-conventions", "skill:code-review", "skill:writing-for-agents"],
+    "web":    ["skill:react-components", "skill:react-hooks", "skill:react-forms", "skill:tailwind", "skill:storybook", "skill:a11y"],
+    "api":    ["skill:nestjs", "skill:graphql", "skill:rest-design", "skill:auth-jwt", "skill:rate-limiting"],
+    "data":   ["skill:prisma", "skill:postgres-queries", "skill:redis-cache", "skill:kafka-events", "skill:etl-jobs"],
+    "mobile": ["skill:react-native", "skill:expo", "skill:ios-release", "skill:android-release"],
+    "ops":    ["skill:docker", "skill:kubernetes", "skill:terraform", "skill:github-actions", "skill:observability"]
+  },
+  "tiers": {
+    "premium":  { "groups": ["core"] },
+    "standard": { "groups": ["core"] },
+    "quick":    { "groups": ["core"], "preload": ["tdd"] }
+  },
+  "models": { "claude-opus-*": "premium", "claude-sonnet-*": "standard", "claude-haiku-*": "quick" },
+  "profiles": {
+    "web":    { "groups": ["web"], "when": { "paths": ["web/**"] } },
+    "api":    { "groups": ["api", "data"], "when": { "paths": ["api/**"] } },
+    "mobile": { "groups": ["mobile"], "when": { "paths": ["mobile/**"] } },
+    "ops":    { "groups": ["ops"], "when": { "paths": ["infra/**", ".github/**"] } }
+  },
+  "classify": { "mode": "shadow" },
+  "providers": { "git": { "kind": "module", "builtin": true } }
+}

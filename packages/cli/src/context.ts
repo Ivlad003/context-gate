@@ -3,13 +3,13 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, join, relative, resolve } from 'node:path'
-import * as esbuild from 'esbuild'
+import { loadEsbuild } from './esbuild-load.ts'
 import type { CompiledPrompt, Diagnostic, Gate, GateConfig, Item, MdcRule, ProviderConfig, Signals, Tier, Value } from '../../core/src/types.ts'
 import type { ProviderCallRequest } from '../../core/src/render.ts'
-import { loadConfig, tierForModel } from '../../core/src/config.ts'
+import { filterEnv, loadConfig, tierForModel } from '../../core/src/config.ts'
 import { decideGate } from '../../core/src/decide.ts'
 import { evalSource, newBudget } from '../../core/src/expr.ts'
-import { parseMdc, ruleIdFromPath, ruleToItem } from '../../core/src/mdc.ts'
+import { cursorRuleDirs, markdownRuleId, parseMarkdownRule, parseMdc, providerRules, ruleIdFromPath, ruleSourcesOf, ruleToItem } from '../../core/src/mdc.ts'
 import { compileGlob, detectWindows } from '../../core/src/glob.ts'
 import { exampleValue, selectExamples } from '../../core/src/examples.ts'
 import { makeItem, normalizeItems } from '../../core/src/items.ts'
@@ -51,14 +51,45 @@ export function loadRepo(root: string): Repo {
 // ───────────────────────── cursor rules ─────────────────────────
 
 export function findMdcFiles(root: string, config: GateConfig): string[] {
-  const dirs = new Set<string>(['.cursor/rules'])
-  for (const s of [...(config.itemSources ?? []), ...(config.ruleSources ?? [])]) if (s.kind === 'cursor-mdc' && s.dir) dirs.add(s.dir.replace(/\/+$/, ''))
+  const { dirs, nested } = cursorRuleDirs(config)
   const out = new Set<string>()
   for (const d of dirs) for (const f of walkFiles(root, { under: d })) if (f.endsWith('.mdc')) out.add(f)
-  if (config.cursorRules?.nested || [...(config.itemSources ?? []), ...(config.ruleSources ?? [])].some((s) => s.kind === 'cursor-mdc' && s.nested)) {
+  if (nested) {
     for (const f of walkFiles(root)) if (/(^|\/)\.cursor\/rules\/.+\.mdc$/.test(f)) out.add(f)
   }
   return [...out].sort()
+}
+
+/** `markdown-dir` sources (G-51): every `.md` under `dir`, through core `parseMarkdownRule`. */
+export function loadMarkdownRules(root: string, config: GateConfig): { rules: MdcRule[]; diagnostics: Diagnostic[] } {
+  const rules: MdcRule[] = []
+  const diagnostics: Diagnostic[] = []
+  for (const src of ruleSourcesOf(config)) {
+    if (src.kind !== 'markdown-dir' || !src.dir) continue
+    const dir = src.dir.replace(/^\.\//, '').replace(/\/+$/, '')
+    for (const path of walkFiles(root, { under: dir }).filter((f) => /\.(md|markdown)$/i.test(f) && !/(^|\/)readme\.md$/i.test(f)).sort()) {
+      const text = readText(join(root, path))
+      if (text === undefined) continue
+      const r = parseMarkdownRule(text, { path, id: markdownRuleId(path, dir), ...(src.frontmatter ? { frontmatter: src.frontmatter } : {}), ...(src.as ? { as: src.as } : {}) })
+      rules.push(r.rule)
+      diagnostics.push(...r.diagnostics)
+    }
+  }
+  return { rules, diagnostics }
+}
+
+/** `provider` rule sources (G-51): values come from the providers (trusted CLI / file / module). */
+export async function loadProviderRules(config: GateConfig, value: (name: string) => Promise<Value>): Promise<{ rules: MdcRule[]; diagnostics: Diagnostic[] }> {
+  const rules: MdcRule[] = []
+  const diagnostics: Diagnostic[] = []
+  if (config.cursorRules?.enabled === false) return { rules, diagnostics }
+  for (const src of ruleSourcesOf(config)) {
+    if (src.kind !== 'provider' || !src.name) continue
+    const r = providerRules(await value(src.name), src)
+    rules.push(...r.rules)
+    diagnostics.push(...r.diagnostics)
+  }
+  return { rules, diagnostics }
 }
 
 export function loadRules(root: string, config: GateConfig): { rules: MdcRule[]; diagnostics: Diagnostic[] } {
@@ -73,6 +104,9 @@ export function loadRules(root: string, config: GateConfig): { rules: MdcRule[];
     rules.push(r.rule)
     diagnostics.push(...r.diagnostics)
   }
+  const md = loadMarkdownRules(root, config)
+  rules.push(...md.rules)
+  diagnostics.push(...md.diagnostics)
   return { rules, diagnostics }
 }
 
@@ -395,7 +429,7 @@ export class Providers {
       out = join(this.o.repo.cacheDir, 'modules', `${name}-${hash}.mjs`)
       if (!existsSync(out)) {
         try {
-          await esbuild.build({ entryPoints: [src], bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile: out, logLevel: 'silent', packages: 'external', loader: { '.md': 'text', '.txt': 'text' } })
+          await (await loadEsbuild(this.o.repo.root)).build({ entryPoints: [src], bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile: out, logLevel: 'silent', packages: 'external', loader: { '.md': 'text', '.txt': 'text' } })
         } catch (e) {
           this.fail(name, p, `збірка модуля ${p.path}: ${String((e as Error).message).split('\n')[0]}`)
           out = undefined
@@ -587,17 +621,23 @@ export async function buildContext(o: ContextOptions): Promise<RenderContext> {
   const { rules, diagnostics: ruleDiags } = loadRules(root, repo.config)
   diagnostics.push(...ruleDiags)
   const git = live ? await gitInfo(root) : undefined
+  const trust = trustState(root, repo.config, { flag: o.trustRepo, ...(typeof git?.remote === 'string' ? { remote: git.remote } : {}) })
+  const host = new NodeHost({ root, config: repo.config, trusted: trust.trusted, dryScripts: o.dryScripts, cacheDir: repo.cacheDir, ...(repo.narrowBinaries ? { narrowBinaries: repo.narrowBinaries } : {}) })
+  const providers = new Providers({ repo, host, rules, liveGit: live })
+  host.provider = (req) => providers.call(req)
+  host.callables = providers.callables()
+  // `provider` rule sources (G-51) need provider values, so they join the rules before items and the gate.
+  if (live) {
+    const pr = await loadProviderRules(repo.config, (name) => providers.value(name))
+    rules.push(...pr.rules)
+    diagnostics.push(...pr.diagnostics)
+  }
+  host.rules = rules.map((r) => ({ id: r.id, path: r.path, body: r.body, ...(r.description ? { description: r.description } : {}) }))
   const items = collectItems(repo, rules)
   const gate = decide(repo.config, items, { ...flags, paths: o.paths ?? (live ? ((git?.changed as string[] | undefined) ?? []) : []), branch: o.branch ?? (typeof git?.branch === 'string' ? git.branch : undefined) }, {})
   const tier = gate.tier
   const prompts = loadPrompts(repo, tier)
   diagnostics.push(...prompts.diagnostics)
-  const trust = trustState(root, repo.config, { flag: o.trustRepo, ...(typeof git?.remote === 'string' ? { remote: git.remote } : {}) })
-  const host = new NodeHost({ root, config: repo.config, trusted: trust.trusted, dryScripts: o.dryScripts, cacheDir: repo.cacheDir, ...(repo.narrowBinaries ? { narrowBinaries: repo.narrowBinaries } : {}) })
-  host.rules = rules.map((r) => ({ id: r.id, path: r.path, body: r.body, ...(r.description ? { description: r.description } : {}) }))
-  const providers = new Providers({ repo, host, rules, liveGit: live })
-  host.provider = (req) => providers.call(req)
-  host.callables = providers.callables()
   let scope: Record<string, Value>
   if (snapshot?.scope) {
     scope = { ...snapshot.scope }
@@ -615,7 +655,7 @@ export async function buildContext(o: ContextOptions): Promise<RenderContext> {
       ...(snapshot?.ctxPercent !== undefined ? { ctxPercent: snapshot.ctxPercent } : {}),
       data: dataScope(loadData(repo)),
       args: o.args ?? snapshot?.args ?? {},
-      providers: providerValues,
+      providers: { ...providerValues, env: filterEnv(process.env, repo.config.env) },
     })
     if (fixture) {
       const { gate: _g, ...rest } = fixture

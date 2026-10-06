@@ -1,0 +1,14 @@
+{
+  "groups": {
+    "core": ["skill:tdd", "skill:git-conventions", "skill:pytest"],
+    "etl": ["skill:polars", "skill:duckdb", "skill:data-validation"],
+    "explore": ["skill:jupyter", "skill:plotting", "skill:duckdb"]
+  },
+  "tiers": { "premium": { "groups": ["core"] }, "standard": { "groups": ["core"] }, "quick": { "groups": ["core"] } },
+  "profiles": {
+    "etl": { "groups": ["etl"], "when": { "paths": ["pipelines/**"] } },
+    "explore": { "groups": ["explore"], "when": { "paths": ["notebooks/**"] } }
+  },
+  "classify": { "mode": "shadow" },
+  "providers": { "git": { "kind": "module", "builtin": true } }
+}

@@ -3,8 +3,9 @@
 
 import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Value } from '../../core/src/types.ts'
-import { parseMarkdownPrompt, tierVariantOf } from '../../core/src/mddsl.ts'
+import type { CompiledPrompt, Value } from '../../core/src/types.ts'
+import { hasTierNodes, parseMarkdownPrompt, printMarkdownNodes, tierVariantOf } from '../../core/src/mddsl.ts'
+import { findEntries } from './build.ts'
 import { buildContext, loadRepo, type ContextOptions } from './context.ts'
 import { posix, readText, runProcess, sha256, writeJson, writeText } from './util.ts'
 
@@ -107,7 +108,17 @@ function fmValue(text: string, key: string): string | undefined {
   return m ? new RegExp(`^${key}:\\s*(.+)$`, 'm').exec(m[1]!)?.[1]?.trim().replace(/^["']|["']$/g, '') : undefined
 }
 
-export interface ExpandPlanItem { id: string; tier: string; source: string; sourceHash: string; out: string; skip?: string; instruction: string }
+export interface ExpandPlanItem {
+  id: string
+  tier: string
+  source: string
+  sourceHash: string
+  out: string
+  skip?: string
+  instruction: string
+  /** TSX section (from `.compiled`): the proposal is applied as `<Tier is="…">` in `source` at `line`. */
+  tsx?: { line?: number }
+}
 
 export function planExpand(root: string, promptDir: string, tiers: string[], only?: string[]): ExpandPlanItem[] {
   const dir = join(root, promptDir)
@@ -138,19 +149,59 @@ export function planExpand(root: string, promptDir: string, tiers: string[], onl
   return plan
 }
 
+const TSX_NOTE = 'Секція з TSX: варіант застосовується як <Tier is="…"> у файлі-джерелі (Markdown-форма нижче — та сама AST).'
+
+/**
+ * TSX sections (SPEC «Шар 3а», G-67): the compiled section is printed in the Markdown form (same AST) and
+ * offered to the model as canonical text; the proposal is applied as a `<Tier is="quick">` block in the
+ * `.prompt.tsx` file. Sections with `<Tier>` already, or ids covered by a Markdown section, are skipped.
+ */
+export function planExpandTsx(root: string, promptDir: string, tiers: string[], only?: string[], skipIds: ReadonlySet<string> = new Set()): { plan: ExpandPlanItem[]; unbuilt: string[] } {
+  const compiledDir = join(root, promptDir, '.compiled')
+  const prompts: CompiledPrompt[] = []
+  if (existsSync(compiledDir)) {
+    for (const f of readdirSync(compiledDir).filter((x) => x.endsWith('.json')).sort()) {
+      try { prompts.push(JSON.parse(readText(join(compiledDir, f)) ?? '') as CompiledPrompt) } catch { /* unreadable: skipped */ }
+    }
+  }
+  const builtEntries = new Set(prompts.map((cp) => cp.sources?.[0]?.path))
+  const unbuilt = findEntries(root, promptDir).map((e) => posix(e.slice(root.length + 1))).filter((e) => !builtEntries.has(e))
+  const plan: ExpandPlanItem[] = []
+  for (const cp of prompts) {
+    if (cp.skill) continue
+    for (const sec of cp.sections ?? []) {
+      if (skipIds.has(sec.id) || (only?.length && !only.includes(sec.id))) continue
+      const text = printMarkdownNodes(sec.children)
+      const sourceHash = sha256(text).slice(0, 16)
+      const source = sec.source?.path ?? cp.sources?.[0]?.path ?? `${promptDir}/${cp.id}.prompt.tsx`
+      for (const tier of tiers) {
+        const out = posix(join(promptDir, 'proposals', `${sec.id}.${tier}.md`))
+        let skip: string | undefined
+        if (sec.tier?.length || hasTierNodes(sec.children)) skip = 'секція вже має <Tier>-варіанти'
+        else if (fmValue(readText(join(root, out)) ?? '', 'source-hash') === sourceHash) skip = 'пропозиція актуальна (source-hash не змінився)'
+        plan.push({ id: sec.id, tier, source, sourceHash, out, tsx: sec.source?.line ? { line: sec.source.line } : {}, instruction: `${expandInstruction(sec.id, tier, text)}\n${TSX_NOTE}`, ...(skip ? { skip } : {}) })
+      }
+    }
+  }
+  return { plan, unbuilt }
+}
+
 export async function expandCommand(root: string, o: { model?: string; dryRun?: boolean; only?: string[]; tiers?: string[]; force?: boolean }): Promise<{ code: number; out: string }> {
   const repo = loadRepo(root)
   const tiers = o.tiers?.length ? o.tiers : ['quick', 'standard'].filter((t) => !repo.config.tiers || t in repo.config.tiers)
-  const plan = planExpand(root, repo.promptDir, tiers, o.only)
-  if (!plan.length) return { code: 0, out: `Канонічних Markdown-секцій у ${repo.promptDir} немає.\n` }
+  const mdPlan = planExpand(root, repo.promptDir, tiers, o.only)
+  const tsx = planExpandTsx(root, repo.promptDir, tiers, o.only, new Set(mdPlan.map((p) => p.id)))
+  const plan = [...mdPlan, ...tsx.plan]
+  const unbuiltNote = tsx.unbuilt.length ? `Не зібрано: ${tsx.unbuilt.join(', ')} — запусти context-gate build, щоб expand побачив TSX-секції.\n` : ''
+  if (!plan.length) return { code: 0, out: `Канонічних секцій (Markdown або зібраних TSX) у ${repo.promptDir} немає.\n${unbuiltNote}` }
   const model = o.model ?? 'opus'
   const lines: string[] = []
   if (o.dryRun) {
     for (const p of plan) {
       if (p.skip && !o.force) { lines.push(`# ${p.id}.${p.tier}: пропущено — ${p.skip}`, ''); continue }
-      lines.push(`# ${p.id}.${p.tier} → ${p.out} (claude -p --model ${model})`, '', p.instruction, '')
+      lines.push(`# ${p.id}.${p.tier} → ${p.out} (claude -p --model ${model})${p.tsx ? ` [TSX ${p.source}${p.tsx.line ? `:${p.tsx.line}` : ''}]` : ''}`, '', p.instruction, '')
     }
-    return { code: 0, out: lines.join('\n') }
+    return { code: 0, out: lines.join('\n') + unbuiltNote }
   }
   const bin = process.env.CONTEXT_GATE_CLAUDE || 'claude'
   let code = 0
@@ -163,10 +214,10 @@ export async function expandCommand(root: string, o: { model?: string; dryRun?: 
       if (r.exitCode === -1 && /ENOENT/.test(r.stderr)) break
       continue
     }
-    const fm = ['---', `id: ${p.id}`, `generated-by: context-gate expand (${model})`, `generated-at: ${new Date().toISOString()}`, `source-hash: ${p.sourceHash}`, `source: ${p.source}`, '---', '']
+    const fm = ['---', `id: ${p.id}`, `generated-by: context-gate expand (${model})`, `generated-at: ${new Date().toISOString()}`, `source-hash: ${p.sourceHash}`, `source: ${p.source}${p.tsx?.line ? `:${p.tsx.line}` : ''}`, ...(p.tsx ? [`apply: "<Tier is=\\"${p.tier}\\"> у ${p.source}"`] : []), '---', '']
     writeText(join(root, p.out), fm.join('\n') + r.stdout.trim() + '\n')
-    lines.push(`записано ${p.out}`)
+    lines.push(`записано ${p.out}${p.tsx ? ` (TSX: встав як <Tier is="${p.tier}">…</Tier> у ${p.source}${p.tsx.line ? `:${p.tsx.line}` : ''}, а канонічний текст — у <Tier is={[…інші tiers]}>)` : ''}`)
   }
   if (lines.some((l) => l.startsWith('записано'))) lines.push('', `Переглянь diff і перенеси потрібні варіанти з proposals/ у ${repo.promptDir}/.`)
-  return { code, out: lines.join('\n') + '\n' }
+  return { code, out: lines.join('\n') + '\n' + unbuiltNote }
 }

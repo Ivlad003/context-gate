@@ -1,9 +1,10 @@
 // Cursor `.mdc` rules (SPEC "Шар 1 — cursor-rules"): a linear frontmatter parser without a YAML library,
 // type classification, transpilation to SKILL.md / .claude/rules, injection framing and packing.
 
-import type { Diagnostic, Item, MdcRule, RuleType } from './types.ts'
+import type { Diagnostic, GateConfig, Item, ItemSourceConfig, MdcRule, RuleType, Value } from './types.ts'
 import { diag } from './codes.ts'
 import { matchAny, splitTopLevel } from './glob.ts'
+import { evalSource, newBudget, toText } from './expr.ts'
 
 export interface ParseMdcOptions {
   /** Repo-relative POSIX path of the `.mdc` file. */
@@ -233,7 +234,7 @@ export function ruleToItem(rule: MdcRule): Item {
     body: rule.body,
     attach: { when },
     cost: { chars: rule.body.length },
-    provenance: { source: 'cursor-mdc', path: rule.path },
+    provenance: { source: rule.source ?? 'cursor-mdc', path: rule.path },
     ruleType: rule.type,
   }
   if (rule.description) item.description = rule.description
@@ -269,9 +270,11 @@ export function transpileRuleToClaudeRule(rule: MdcRule): string | undefined {
   return `${fm.join('\n')}\n${note}\n${neg}\n${rule.body}\n`
 }
 
-/** Injection frame used after a tool result: `Contents of <path> (Cursor rule <id>):`. */
-export function frameRule(rule: Pick<MdcRule, 'id' | 'path' | 'body'>, path?: string): string {
-  return `Contents of ${path ?? rule.path} (Cursor rule ${rule.id}):\n${rule.body}`
+/** Injection frame used after a tool result: `Contents of <path> (Cursor rule <id>):`
+ * (`(rule <id>)` for rules from other sources: markdown-dir, provider). */
+export function frameRule(rule: Pick<MdcRule, 'id' | 'path' | 'body'> & { source?: string }, path?: string): string {
+  const label = !rule.source || rule.source === 'cursor-mdc' ? 'Cursor rule' : 'rule'
+  return `Contents of ${path ?? rule.path} (${label} ${rule.id}):\n${rule.body}`
 }
 
 export function pointerLine(path: string): string {
@@ -279,7 +282,7 @@ export function pointerLine(path: string): string {
 }
 
 /** Pack framed rules into `maxChars`; rules that don't fit become one pointer line each. Order is kept. */
-export function packInjections(rules: readonly Pick<MdcRule, 'id' | 'path' | 'body'>[], maxChars: number): { text: string; included: string[]; deferred: string[] } {
+export function packInjections(rules: readonly (Pick<MdcRule, 'id' | 'path' | 'body'> & { source?: string })[], maxChars: number): { text: string; included: string[]; deferred: string[] } {
   const parts: string[] = []
   const included: string[] = []
   const deferred: string[] = []
@@ -305,4 +308,143 @@ export function isPartialRead(toolInput: unknown): boolean {
   if (!toolInput || typeof toolInput !== 'object') return false
   const t = toolInput as Record<string, unknown>
   return [t.offset, t.limit, t.pages].some((v) => v !== undefined && v !== null && v !== '')
+}
+
+// ───────────────────────── Other rule sources (G-51) ─────────────────────────
+// SPEC "Провайдери — Джерела правил", "Єдина модель — Джерела": `markdown-dir` and `provider` sources yield the
+// same MdcRule shape as `.mdc` files, so delivery, dedup and statuses are shared by every source.
+
+/** Rule sources from `itemSources` (and legacy `ruleSources`): cursor-mdc, markdown-dir, provider (`as` ≠ datum). */
+export function ruleSourcesOf(cfg: Pick<GateConfig, 'itemSources' | 'ruleSources'>): ItemSourceConfig[] {
+  const out: ItemSourceConfig[] = []
+  for (const s of [...(cfg.itemSources ?? []), ...(cfg.ruleSources ?? [])]) {
+    if (s.kind === 'cursor-mdc' || s.kind === 'markdown-dir') out.push(s)
+    else if (s.kind === 'provider' && s.name && s.as !== 'datum' && s.as !== 'skill' && s.as !== 'tool' && s.as !== 'agent' && s.as !== 'section') out.push(s)
+  }
+  return out
+}
+
+/** `.cursor/rules` dirs to scan: the default plus every `cursor-mdc` source `dir`. `nested` is true when the
+ * config or any cursor-mdc source asks for nested `.cursor/rules` discovery. */
+export function cursorRuleDirs(cfg: Pick<GateConfig, 'itemSources' | 'ruleSources' | 'cursorRules'>): { dirs: string[]; nested: boolean } {
+  const dirs = ['.cursor/rules']
+  let nested = !!cfg.cursorRules?.nested
+  for (const s of ruleSourcesOf(cfg)) {
+    if (s.kind !== 'cursor-mdc') continue
+    const d = (s.dir ?? '.cursor/rules').replace(/^\.\//, '').replace(/\/+$/, '')
+    if (d && !dirs.includes(d)) dirs.push(d)
+    if (s.nested) nested = true
+  }
+  return { dirs, nested }
+}
+
+/** Markdown-dir rule id: path under the source dir without the extension (`docs/rules/api/x.md` → `api/x`). */
+export function markdownRuleId(path: string, dir: string): string {
+  const d = dir.replace(/^\.\//, '').replace(/\/+$/, '')
+  const p = path.replace(/\\/g, '/').replace(/^\.\//, '')
+  const rel = d && p.startsWith(d + '/') ? p.slice(d.length + 1) : p.split('/').pop() ?? p
+  return rel.replace(/\.(md|mdc|markdown)$/i, '')
+}
+
+/** A Markdown rule file (`markdown-dir`). `frontmatter` maps file keys to rule fields (`{ paths: "globs" }`:
+ * Claude `.claude/rules` style). Unknown frontmatter keys are ignored (no G011: docs carry titles, tags…).
+ * `as: "always"` makes every file an Always rule; otherwise the type follows Cursor's classification. */
+export function parseMarkdownRule(text: string, opts: { path: string; id: string; frontmatter?: Record<string, string>; as?: string }): { rule: MdcRule; diagnostics: Diagnostic[] } {
+  const map = opts.frontmatter ?? {}
+  let src = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+  const lines = src.split('\n')
+  if (lines[0]?.trim() === '---') {
+    const end = lines.findIndex((l, i) => i > 0 && l.trim() === '---')
+    if (end > 0) {
+      let keep = true
+      const fm: string[] = []
+      for (const line of lines.slice(1, end)) {
+        const kv = /^([A-Za-z_][\w-]*)(\s*:.*)$/.exec(line)
+        if (kv) {
+          const key = map[kv[1]] ?? kv[1]
+          keep = KNOWN_KEYS.has(key)
+          if (keep) fm.push(key + kv[2])
+          continue
+        }
+        if (keep) fm.push(line)
+      }
+      src = ['---', ...fm, '---', ...lines.slice(end + 1)].join('\n')
+    }
+  }
+  const r = parseMdc(src, { path: opts.path, id: opts.id })
+  const rule: MdcRule = { ...r.rule, source: 'markdown-dir' }
+  if (opts.as === 'always') { rule.alwaysApply = true; rule.type = 'always' }
+  return { rule, diagnostics: r.diagnostics.filter((d) => d.code !== 'G011') }
+}
+
+function getPath(v: Value | undefined, path: string | undefined): Value | undefined {
+  if (!path) return v
+  let cur: Value | undefined = v
+  for (const k of path.split('.')) {
+    if (cur === null || cur === undefined) return undefined
+    if (Array.isArray(cur) && /^\d+$/.test(k)) cur = cur[Number(k)]
+    else if (typeof cur === 'object' && !Array.isArray(cur)) cur = (cur as Record<string, Value>)[k]
+    else return undefined
+  }
+  return cur
+}
+
+function globsOf(v: Value | undefined): string[] {
+  if (typeof v === 'string') return parseGlobList(v)
+  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
+  return []
+}
+
+/** `{{ item.from }} не імпортує {{ item.to }}`: each `{{ expr }}` is a core expression over `{ item, index }`. */
+export function renderItemTemplate(template: string, item: Value, index: number): string {
+  return template.replace(/\{\{([\s\S]*?)\}\}/g, (_m, expr: string) => {
+    try { return toText(evalSource(expr.trim(), { item, index }, newBudget(1000))) } catch { return '' }
+  })
+}
+
+/** Rules from a provider value (`provider` source): `field` (or `pick`) selects a list (an object's values,
+ * a single value), each element becomes one rule. Body: `template`, else the element's `body`/`text`/
+ * `message`/`description`, else the element as text. Id: `<provider>/<element id|name|index>`. `as: "always"`
+ * → Always; otherwise (`as: "rule"`) an element with `globs`/`paths` is Auto Attached and one without is Always
+ * (provider rules have no file to fall back on, so they are never Manual or Agent Requested). */
+export function providerRules(value: Value | undefined, src: ItemSourceConfig): { rules: MdcRule[]; diagnostics: Diagnostic[] } {
+  const name = src.name ?? 'provider'
+  const diagnostics: Diagnostic[] = []
+  if (value === null || value === undefined) return { rules: [], diagnostics }
+  if (typeof value === 'object' && !Array.isArray(value) && (value as Record<string, Value>).unverified === true) {
+    diagnostics.push(diag('G203', `Провайдер ${name}: правила не отримано (unverified)`))
+    return { rules: [], diagnostics }
+  }
+  const picked = getPath(value, src.field ?? src.pick)
+  if (picked === undefined || picked === null) {
+    diagnostics.push(diag('G313', `itemSources provider ${name}: поле ${src.field ?? src.pick} відсутнє в даних провайдера`))
+    return { rules: [], diagnostics }
+  }
+  const list: Value[] = Array.isArray(picked) ? picked : typeof picked === 'object' ? Object.entries(picked).map(([k, v]): Value => (v && typeof v === 'object' && !Array.isArray(v) ? { id: k, ...(v as Record<string, Value>) } : { id: k, text: v ?? null })) : [picked]
+  const rules: MdcRule[] = []
+  const used = new Set<string>()
+  list.forEach((el, i) => {
+    const obj = el && typeof el === 'object' && !Array.isArray(el) ? (el as Record<string, Value>) : undefined
+    const body = src.template ? renderItemTemplate(src.template, el, i)
+      : obj ? toText(obj.body ?? obj.text ?? obj.message ?? obj.description ?? null) || JSON.stringify(el)
+      : toText(el)
+    if (!body.trim()) return
+    const key = obj && (typeof obj.id === 'string' || typeof obj.id === 'number') ? String(obj.id) : obj && typeof obj.name === 'string' ? obj.name : String(i)
+    let id = `${name}/${key.replace(/[^\w.@-]+/g, '-')}`
+    for (let n = 2; used.has(id); n++) id = `${name}/${key}-${n}`
+    used.add(id)
+    const all = globsOf(obj?.globs ?? obj?.paths)
+    const globs = all.filter((g) => !g.startsWith('!'))
+    const negGlobs = all.filter((g) => g.startsWith('!')).map((g) => g.slice(1))
+    const auto = src.as !== 'always' && globs.length > 0
+    const rule: MdcRule = { id, path: `provider:${name}`, type: auto ? 'auto' : 'always', globs: auto ? globs : [], negGlobs: auto ? negGlobs : [], alwaysApply: !auto, body: body.trim(), fileRefs: [], source: `provider:${name}` }
+    if (obj && typeof obj.description === 'string' && src.template) rule.description = obj.description
+    rules.push(rule)
+  })
+  return { rules, diagnostics }
+}
+
+/** A rule that lives in a repo file (instruction-file delivery is possible), as opposed to provider data. */
+export function isFileRule(rule: Pick<MdcRule, 'source'>): boolean {
+  return !rule.source?.startsWith('provider:')
 }
