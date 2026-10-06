@@ -93,6 +93,7 @@ function port($: EngineInterface): Io {
       write: (path, text) => $.fs.write(path, text),
     },
     session: {
+      id: () => $.session.id(),
       root: () => $.session.root(),
       model: () => $.session.model(),
       repo: () => $.session.repo(),

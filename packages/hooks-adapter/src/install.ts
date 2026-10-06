@@ -2,12 +2,12 @@
 // into `.claude/settings.local.json`. Pure; main.ts does the file I/O and the backup.
 
 import type { Gate, GateConfig, Item, Signals } from '../../core/src/types.ts'
-import { decideGate } from '../../core/src/decide.ts'
+import { decideGate, skillOverridesFor, type SkillOverride } from '../../core/src/decide.ts'
 
 /** Substring that marks our hook commands, so a re-install replaces them instead of adding duplicates. */
 export const HOOK_MARKER = 'hooks-adapter.js'
 
-export type SkillOverride = 'on' | 'name-only' | 'user-invocable-only' | 'off'
+export { skillOverridesFor, type SkillOverride }
 
 export interface CommandHook { type: 'command'; command: string; timeout?: number }
 export interface HookMatcher { matcher?: string; hooks: CommandHook[] }
@@ -37,15 +37,6 @@ export function hookEntries(command: string, timeout = 10): HooksBlock {
     PostToolUse: [{ matcher: 'Read|Edit|Write|NotebookEdit', hooks: h() }],
     PreToolUse: [{ matcher: 'mcp__.*|Edit|Write|NotebookEdit', hooks: h() }],
   }
-}
-
-/** Gate → `skillOverrides`: `nameOnly` → `name-only`; `off` → `user-invocable-only` (the user keeps `/name`) or `off` with `hard`.
- * Skills that are on get no key (absent = on). */
-export function skillOverridesFor(gate: Gate, opts: { hard?: boolean } = {}): Record<string, SkillOverride> {
-  const out: Record<string, SkillOverride> = {}
-  for (const n of gate.skills.nameOnly) out[n] = 'name-only'
-  for (const n of gate.skills.off) out[n] = opts.hard ? 'off' : 'user-invocable-only'
-  return out
 }
 
 export interface InstallOptions {

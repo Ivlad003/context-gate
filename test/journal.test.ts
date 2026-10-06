@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { pushLog, formatWhy, toJsonl, fromJsonl, parseWhere, filterWhere, journalResolve } from '../packages/core/src/journal.ts'
+import { pushLog, formatWhy, toJsonl, fromJsonl, parseWhere, filterWhere, journalResolve, findSnapshot, pruneSnapshots, snapshotData, snapshotEntry, SNAPSHOT_TEXT_MAX } from '../packages/core/src/journal.ts'
 import { collectFromRules, collectFromSkillListing, decideStage, normalize, tokens, whereFilter, itemsToJsonl } from '../packages/core/src/pipeline.ts'
 import { parseMdc } from '../packages/core/src/mdc.ts'
 import { mergeDefaults } from '../packages/core/src/config.ts'
@@ -91,4 +91,25 @@ test('pipeline stages', () => {
   const w2 = whereFilter(decided, 'kind=rule when=always')
   assert.deepEqual('items' in w2 && w2.items.map((i) => i.id), ['rule:sec'])
   assert.equal(itemsToJsonl(decided).trim().split('\n').length, 4)
+})
+
+test('snapshot contract: snapshotEntry → JSONL → findSnapshot (+ skill-render args); truncation; pruning', () => {
+  const big = 'x'.repeat(SNAPSHOT_TEXT_MAX + 50)
+  const d = snapshotData({ sessionId: 's1', model: 'claude-haiku-4-5', ctxPercent: 42, tier: 'quick', profile: 'frontend', scope: { gate: { tier: 'quick' }, args: { secret: 1 } }, text: big })
+  assert.equal(d.text!.length, SNAPSHOT_TEXT_MAX)
+  assert.deepEqual(d.scope, { gate: { tier: 'quick' } }, 'args are not part of a system snapshot')
+  assert.equal(snapshotData({ sessionId: 's', model: '', ctxPercent: 0, tier: 't', profile: null, scope: { blob: 'y'.repeat(50_000) } }).scope, undefined, 'oversized scope dropped')
+  const lines = [
+    toJsonl({ kind: 'decision', ts: 1, turn: 1, trigger: 'tier', tier: 'standard', profile: 'old', enabled: [], disabled: [], reason: [], data: { sessionId: 's0' } }),
+    toJsonl(snapshotEntry({ ...d, text: 'hello' }, { ts: 2, turn: 1 })),
+    toJsonl({ kind: 'skill-render', ts: 3, turn: 1, trigger: 'skill', tier: 'quick', enabled: [], disabled: [], reason: [], data: { sessionId: 's1', model: 'm', ctxPercent: 42, skill: 'pr-review', args: { base: 'main' } } }),
+  ].join('')
+  const items = fromJsonl(lines).items
+  const snap = findSnapshot(items, 'latest')
+  assert.deepEqual(snap, { ts: 2, sessionId: 's1', profile: 'frontend', tier: 'quick', model: 'claude-haiku-4-5', ctxPercent: 42, scope: { gate: { tier: 'quick' } }, text: 'hello', args: { base: 'main' }, skill: 'pr-review' })
+  assert.equal(findSnapshot(items, 's0')?.profile, 'old', 'falls back to the decision of that session')
+  assert.equal(findSnapshot(items, 'nope'), undefined)
+  const many = Array.from({ length: 5 }, (_, i) => toJsonl(snapshotEntry({ sessionId: 's', model: '', ctxPercent: i, tier: 't', profile: null }, { ts: i, turn: i }))).join('') + toJsonl({ kind: 'deny' })
+  const pruned = fromJsonl(pruneSnapshots(many, 2)).items as { kind: string; data?: { ctxPercent: number } }[]
+  assert.deepEqual(pruned.map((e) => e.kind === 'snapshot' ? e.data!.ctxPercent : e.kind), [3, 4, 'deny'])
 })

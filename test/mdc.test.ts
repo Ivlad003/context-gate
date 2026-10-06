@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseMdc, parseGlobList, ruleToItem, transpileAgentRule, transpileRuleToClaudeRule, frameRule, packInjections, isPartialRead, ruleIdFromPath, expandFileRefs } from '../packages/core/src/mdc.ts'
+import { parseMdc, parseGlobList, ruleToItem, transpileAgentRule, transpileRuleToClaudeRule, frameRule, packInjections, isPartialRead, ruleIdFromPath, expandFileRefs, ruleMatches, autoRulesFor } from '../packages/core/src/mdc.ts'
 import type { MdcRule, RuleType } from '../packages/core/src/types.ts'
 
 const p = (text: string, dirPrefix?: string) => parseMdc(text, { path: '.cursor/rules/x.mdc', id: 'x', dirPrefix })
@@ -123,4 +123,31 @@ test('isPartialRead', () => {
   assert.equal(isPartialRead({ file_path: 'a', offset: 10 }), true)
   assert.equal(isPartialRead({ file_path: 'a', limit: 0 }), true)
   assert.equal(isPartialRead(null), false)
+})
+
+const ruleOf = (globs: string, dirPrefix?: string): MdcRule => parseMdc(`---\nglobs: ${globs}\nalwaysApply: false\n---\nbody`, { path: 'x.mdc', id: 'x', ...(dirPrefix ? { dirPrefix } : {}) }).rule
+
+for (const [name, globs, prefix, path, nocase, want] of [
+  ['slash-less glob matches basename at root', '*.ts', undefined, 'a.ts', false, true],
+  ['slash-less glob matches basename at depth', '*.ts', undefined, 'src/deep/a.ts', false, true],
+  ['slash-less glob: other extension', '*.ts', undefined, 'src/a.tsx', false, false],
+  ['path glob anchors at root', 'src/**/*.ts', undefined, 'lib/src/a.ts', false, false],
+  ['path glob', 'src/**/*.ts', undefined, 'src/x/a.ts', false, true],
+  ['negation excludes', '"src/**, !src/gen/**"', undefined, 'src/gen/a.ts', false, false],
+  ['negation leaves others', '"src/**, !src/gen/**"', undefined, 'src/a.ts', false, true],
+  ['negation of slash-less', '"*.ts, !*.d.ts"', undefined, 'types/x.d.ts', false, false],
+  ['nested prefix: slash-less under the dir', '*.ts', 'packages/api/', 'packages/api/src/a.ts', false, true],
+  ['nested prefix: outside the dir', '*.ts', 'packages/api/', 'packages/web/a.ts', false, false],
+  ['nested prefix: path glob', 'src/*.ts', 'packages/api/', 'packages/api/src/a.ts', false, true],
+  ['case-sensitive by default', '*.TS', undefined, 'a.ts', false, false],
+  ['nocase (Windows)', '*.TS', undefined, 'src/a.ts', true, true],
+  ['leading ./ and backslashes tolerated', 'src/**/*.ts', undefined, '.\\src\\a.ts', false, true],
+] as const) {
+  test(`ruleMatches: ${name}`, () => assert.equal(ruleMatches(ruleOf(globs, prefix), path, { nocase }), want))
+}
+
+test('autoRulesFor: only Auto Attached rules', () => {
+  const auto = ruleOf('*.ts')
+  const always = parseMdc('---\nglobs: *.ts\nalwaysApply: true\n---\nb', { path: 'y.mdc', id: 'y' }).rule
+  assert.deepEqual(autoRulesFor([auto, always], 'src/a.ts').map((r) => r.id), ['x'])
 })

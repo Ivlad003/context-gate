@@ -6,8 +6,8 @@
 
 
 import type { MdcRule } from '../../packages/core/src/types.ts'
-import { matchAny, normalizePath } from '../../packages/core/src/glob.ts'
-import { frameRule, packInjections, parseMdc, ruleIdFromPath } from '../../packages/core/src/mdc.ts'
+import { normalizePath } from '../../packages/core/src/glob.ts'
+import { frameRule, packInjections, parseMdc, ruleIdFromPath, ruleMatches } from '../../packages/core/src/mdc.ts'
 import { isApplied } from '../state.ts'
 import type { ContextGateDecision } from '../../types'
 import { type Io, type FileCall, type Runtime, type ToolResultLike, debug, join, now } from '../ctx.ts'
@@ -117,8 +117,8 @@ async function autoHits(io: Io, rt: Runtime, rels: string[], agent: string): Pro
   if (!rules.length) return []
   const seen = new Set(await io.read('seen'))
   const gate = await readGate(io)
-  const opts = { nocase: rt.windows, matchBase: true }
-  return rules.filter((r) => r.type === 'auto' && !seen.has(`${agent}:${r.id}`) && ruleOn(gate, r.id) && rels.some((p) => matchAny(p, r.globs, r.negGlobs, opts)))
+  const opts = { nocase: rt.windows }
+  return rules.filter((r) => r.type === 'auto' && !seen.has(`${agent}:${r.id}`) && ruleOn(gate, r.id) && rels.some((p) => ruleMatches(r, p, opts)))
 }
 
 async function markSeen(io: Io, keys: string[]): Promise<void> {

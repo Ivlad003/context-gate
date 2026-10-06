@@ -18,6 +18,8 @@ export interface DecideOptions {
   evalExpr?: (expr: string, data: Record<string, unknown>) => boolean
   /** Number of consecutive turns needed for a `when` profile switch (default 2). */
   hysteresisTurns?: number
+  /** Forced tier (CLI `--tier`, tests): overrides the tier derived from `signals.model`. */
+  tier?: Tier
   now?: number
 }
 
@@ -75,6 +77,12 @@ function resolveGroupRef(cfg: GateConfig, name: string): string[] {
   return [name]
 }
 
+/**
+ * The decision only: which items a profile/tier turns on, off or name-only. Applying it is the adapter's
+ * call. In shadow mode (`classify.mode: "shadow"` or `/gate shadow`, no manual signal) the adapters (mod,
+ * hooks adapter) log the decision and filter nothing (SPEC scenario 1: `skills 30/30`); they mark that with
+ * `gate.shadow = true`, which `statusLine` renders as `gate (profile?)`. decideGate never sets `shadow`.
+ */
 export function decideGate(config: GateConfig, signals: Signals, state: GateState, items: readonly Item[], opts: DecideOptions = {}): DecideResult {
   const cfg = hasLegacy(config) ? normalizeConfig(config).config : config
   const reason: string[] = []
@@ -83,10 +91,10 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
   const needTurns = opts.hysteresisTurns ?? 2
 
   // ── tier ──
-  const t = tierForModel(cfg, signals.model)
+  const t = opts.tier ? { tier: opts.tier, reason: `tier ${opts.tier} задано явно`, fallback: false } : tierForModel(cfg, signals.model)
   const tier: Tier = t.tier
   reason.push((signals.agentId ? `субагент ${signals.agentId}: ` : '') + t.reason)
-  if (signals.model && !cfg.tiers?.[tier]) reason.push(`tier ${tier} не оголошено в tiers`)
+  if ((signals.model || opts.tier) && !cfg.tiers?.[tier]) reason.push(`tier ${tier} не оголошено в tiers`)
 
   // ── manual off ──
   if (signals.manual?.off) {
@@ -312,13 +320,38 @@ export function skillOffText(name: string, gate: Gate, config: GateConfig): stri
   return `Skill ${name} вимкнено ${profileLabel(gate)}. Увімкни: ${g ? `/gate +${g}` : '/gate off'}`
 }
 
-/** One-line status: `gate frontend · tier standard · skills 5/23 · mcp 2/6 · rules 3`; shadow → `gate (frontend?)`. */
+/** One-line status: `gate frontend · tier standard · skills 5/23 · mcp 2/6 · rules 3`.
+ * Shadow (`gate.shadow`, set by the adapter): nothing is filtered, so the counts are all/all
+ * (`gate (frontend?) · tier standard · skills 30/30 · …`) and the proposal is shown with `?`. */
 export function statusLine(gate: Gate, extra: { ctxPct?: number } = {}): string {
   const s = gate.skills
   const skillsTotal = s.on.length + s.nameOnly.length + s.off.length + s.preload.length
   const mcpTotal = gate.mcp.on.length + gate.mcp.off.length
-  const prof = gate.off ? 'off' : gate.profile ?? (gate.proposed ? `(${gate.proposed.profile}?)` : '—')
-  const parts = [`gate ${prof}`, `tier ${gate.tier}`, `skills ${s.on.length + s.preload.length}/${skillsTotal}`, `mcp ${gate.mcp.on.length}/${mcpTotal}`, `rules ${gate.rules.on.length}`]
+  const rulesTotal = gate.rules.on.length + gate.rules.off.length
+  const proposal = gate.proposed?.profile ?? (gate.shadow ? gate.profile : undefined)
+  const prof = gate.off ? 'off' : gate.shadow ? (proposal ? `(${proposal}?)` : '—') : gate.profile ?? (gate.proposed ? `(${gate.proposed.profile}?)` : '—')
+  const skillsOn = gate.shadow || gate.off ? skillsTotal : s.on.length + s.preload.length
+  const mcpOn = gate.shadow || gate.off ? mcpTotal : gate.mcp.on.length
+  const rulesOn = gate.shadow || gate.off ? rulesTotal : gate.rules.on.length
+  const parts = [`gate ${prof}`, `tier ${gate.tier}`, `skills ${skillsOn}/${skillsTotal}`, `mcp ${mcpOn}/${mcpTotal}`, `rules ${rulesOn}`]
   if (extra.ctxPct !== undefined) parts.push(`ctx ${Math.round(extra.ctxPct)}%`)
   return parts.join(' · ')
+}
+
+// ───────────────────────── static adapters ─────────────────────────
+
+/** Claude Code `settings.skillOverrides` values (checked against the settings schema). */
+export type SkillOverride = 'on' | 'name-only' | 'user-invocable-only' | 'off'
+
+/**
+ * Gate → `settings.skillOverrides` for the static adapters (hooks adapter `install`, CLI `sync`, shiftwork):
+ * `nameOnly` → `name-only`; `off` → `user-invocable-only` (the user keeps `/name`), or `off` with `hard`.
+ * Skills that are on or preloaded get no key (absent = on).
+ */
+export function skillOverridesFor(gate: Pick<Gate, 'skills'>, opts: { hard?: boolean } = {}): Record<string, SkillOverride> {
+  const out: Record<string, SkillOverride> = {}
+  const name = (n: string) => n.replace(/^skill:/, '')
+  for (const n of gate.skills.nameOnly) out[name(n)] = 'name-only'
+  for (const n of gate.skills.off) out[name(n)] = opts.hard ? 'off' : 'user-invocable-only'
+  return out
 }

@@ -14,12 +14,12 @@ test('cliArgv and buildRunArgs', () => {
   assert.deepEqual(buildRunArgs({ section: 'w', tier: 'quick', profile: 'backend', ctxFrom: 'session:latest' }, { dryScripts: false }), ['run', '--only', 'w', '--json', '--tier', 'quick', '--profile', 'backend', '--ctx-from', 'session:latest'])
 })
 
-test('parseRunOutput tolerates log lines, nested result and errors', () => {
-  const v = parseRunOutput('building…\n{"sections":[{"id":"a","text":"hi","tokens":1}],"text":"hi","trace":[{"section":"a","kind":"if","detail":"x"}],"diagnostics":[],"ms":3}')
+test('parseRunOutput reads the RunJson shape (log lines before it tolerated); other shapes are errors', () => {
+  const v = parseRunOutput('building…\n{"sections":[{"id":"a","text":"hi","tokens":1}],"text":"hi","trace":[{"section":"a","kind":"if","detail":"x"}],"diagnostics":[],"ms":3,"scope":{}}')
   assert.equal(v.text, 'hi')
   assert.equal(v.trace.length, 1)
   assert.equal(v.ms, 3)
-  assert.equal(parseRunOutput('{"result":{"sections":[{"id":"a","text":"t"}]}}').text, 't')
+  assert.match(parseRunOutput('{"result":{"sections":[{"id":"a","text":"t"}]}}').error!, /run --json/)
   assert.match(parseRunOutput('', 'boom', 2).error!, /boom/)
   assert.match(parseRunOutput('{oops').error!, /JSON/)
 })
@@ -27,7 +27,7 @@ test('parseRunOutput tolerates log lines, nested result and errors', () => {
 test('runCli runs a real process and parses its JSON', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cg-vsc-'))
   const cli = join(dir, 'fake-cli.mjs')
-  writeFileSync(cli, 'console.log(JSON.stringify({ text: process.argv.slice(2).join(" "), sections: [], trace: [], diagnostics: [] }))\n')
+  writeFileSync(cli, 'console.log(JSON.stringify({ text: process.argv.slice(2).join(" "), sections: [], trace: [], diagnostics: [], ms: 0, scope: {} }))\n')
   const v = await runCli(['node', cli, ...buildRunArgs({ section: 's' }, { dryScripts: true })], dir)
   assert.equal(v.text, 'run --only s --json --dry-scripts')
   const bad = await runCli(['node', join(dir, 'missing.mjs')], dir)

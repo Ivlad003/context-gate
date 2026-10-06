@@ -31,6 +31,7 @@ export async function loadGateConfig(io: Io, rt: Runtime): Promise<void> {
   }
   rt.itemsDirty = true
   rt.promptsDirty = true
+  rt.whitelist = undefined
   await writeConfigStatus(io, rt)
 }
 

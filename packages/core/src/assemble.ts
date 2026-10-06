@@ -1,13 +1,13 @@
 // Prompt assembly shared by `context-gate run` and the mod's `prompt.compose` / `skill.prompt`, so both
-// render the same prompts with the same scope. Pure: no Node imports (the mod imports this file).
-// Candidate for packages/core.
+// render the same prompts with the same scope: Markdown tier variants, the skill split, the render scope
+// (`gate`, `git`, `cursor`, `session`, `ctx`, `budgets`, `args`, `data`, providers) and the usage text.
 
-import type { CompiledPrompt, Diagnostic, Gate, GateConfig, MdcRule, SectionNode, Tier, Value } from '../../core/src/types.ts'
-import { parseMarkdownPrompt, resolveTierVariant, tierVariantOf } from '../../core/src/mddsl.ts'
-import { budgetFor } from '../../core/src/config.ts'
-import { matchAny } from '../../core/src/glob.ts'
-import { parseArgs, usageLine } from '../../core/src/argparse.ts'
-import { dataEnvelope } from '../../core/src/render.ts'
+import type { CompiledPrompt, Diagnostic, Gate, GateConfig, MdcRule, SectionNode, Tier, Value } from './types.ts'
+import { parseMarkdownPrompt, resolveTierVariant, tierVariantOf } from './mddsl.ts'
+import { budgetFor } from './config.ts'
+import { autoRulesFor, type RuleMatchOptions } from './mdc.ts'
+import { parseArgs, usageLine } from './argparse.ts'
+import { dataEnvelope } from './render.ts'
 
 export interface MarkdownFile { path: string; text: string }
 
@@ -76,8 +76,14 @@ export function cursorScope(rules: readonly MdcRule[]): Value {
   return { always: by('always'), auto: by('auto'), agent: by('agent'), manual: by('manual') }
 }
 
-export function cursorMatch(rules: readonly MdcRule[], path: string): Value {
-  return rules.filter((r) => r.type === 'auto' && matchAny(path, r.globs, r.negGlobs)).map(ruleRef)
+/** `cursor.match(path)`: Auto Attached rules whose globs match `path` (Cursor semantics, `ruleMatches`). */
+export function cursorMatch(rules: readonly MdcRule[], path: string, opts: RuleMatchOptions = {}): Value {
+  return autoRulesFor(rules, path, opts).map(ruleRef)
+}
+
+/** A neutral gate (nothing decided yet): every list empty, trigger `default`. */
+export function defaultGate(tier: Tier): Gate {
+  return { profile: undefined, tier, trigger: 'default', off: false, skills: { on: [], nameOnly: [], off: [], preload: [] }, mcp: { on: [], off: [] }, agents: { on: [], off: [] }, rules: { on: [], off: [] }, items: {}, groups: [], reason: [] }
 }
 
 export function gateScope(gate: Gate): Value {
@@ -87,7 +93,10 @@ export function gateScope(gate: Gate): Value {
     groups: gate.groups,
     off: gate.off,
     trigger: gate.trigger,
+    shadow: !!gate.shadow,
     skills: { on: gate.skills.on, nameOnly: gate.skills.nameOnly, off: gate.skills.off, preload: gate.skills.preload },
+    mcp: { on: gate.mcp.on, off: gate.mcp.off },
+    agents: { on: gate.agents.on, off: gate.agents.off },
     ...(gate.proposed ? { proposed: { profile: gate.proposed.profile, confidence: gate.proposed.confidence } } : {}),
   }
 }
@@ -109,30 +118,36 @@ export interface ScopeParts {
   gate: Gate
   git?: Value
   rules?: readonly MdcRule[]
-  session?: { id?: string; model?: string; cwd?: string; root?: string; turn?: number; agentId?: string }
+  session?: { id?: string; model?: string; cwd?: string; root?: string; turn?: number; agentId?: string; interactive?: boolean }
   ctxPercent?: number
   ctxTokens?: number
   ctxLimit?: number
   data?: Value
   args?: Record<string, Value>
+  /** Budget keys whose threshold fired this conversation, and the budget-owned sections they turn on (mod). */
+  budgetsFired?: string[]
+  budgetsActive?: string[]
   /** Non-builtin provider values by name (`pkg`, `arch`, …). */
   providers?: Record<string, Value>
 }
+
+const DEFAULT_GIT: Record<string, Value> = { branch: '', head: '', dirty: false, ahead: 0, behind: 0, changed: [] }
 
 /** The render scope: gate, git, cursor, session, ctx, budgets, args, data, then providers (never overriding builtins). */
 export function buildScope(p: ScopeParts): Record<string, Value> {
   const b = budgetFor(p.config, p.gate.tier)
   const scope: Record<string, Value> = {
     gate: gateScope(p.gate),
-    git: p.git ?? { branch: '', head: '', dirty: false, ahead: 0, behind: 0, changed: [] },
+    git: p.git && typeof p.git === 'object' && !Array.isArray(p.git) ? { ...DEFAULT_GIT, ...p.git } : { ...DEFAULT_GIT },
     fs: {},
     cursor: cursorScope(p.rules ?? []),
     session: {
       id: p.session?.id ?? '', model: p.session?.model ?? '', cwd: p.session?.cwd ?? '', root: p.session?.root ?? '', turn: p.session?.turn ?? 0,
       ...(p.session?.agentId ? { agentId: p.session.agentId } : {}),
+      ...(p.session?.interactive !== undefined ? { interactive: p.session.interactive, print: !p.session.interactive } : {}),
     },
     ctx: { percent: p.ctxPercent ?? 0, tokens: p.ctxTokens ?? 0, limit: p.ctxLimit ?? 200_000 },
-    budgets: { soft: b.softContextPct, hard: b.hardContextPct },
+    budgets: { soft: b.softContextPct, hard: b.hardContextPct, fired: p.budgetsFired ?? [], active: p.budgetsActive ?? [] },
     args: p.args ?? {},
     data: p.data ?? {},
   }

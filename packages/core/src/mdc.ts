@@ -3,7 +3,7 @@
 
 import type { Diagnostic, Item, MdcRule, RuleType } from './types.ts'
 import { diag } from './codes.ts'
-import { splitTopLevel } from './glob.ts'
+import { matchAny, splitTopLevel } from './glob.ts'
 
 export interface ParseMdcOptions {
   /** Repo-relative POSIX path of the `.mdc` file. */
@@ -199,6 +199,27 @@ export function ruleIdFromPath(path: string): { id: string; dirPrefix: string } 
   const m = /^(.*?)\.cursor\/rules\/(.+?)\.mdc$/.exec(p)
   if (!m) return { id: p.replace(/\.mdc$/, '').split('/').pop() ?? p, dirPrefix: '' }
   return { id: m[2], dirPrefix: m[1] }
+}
+
+// ───────────────────────── Matching ─────────────────────────
+
+export interface RuleMatchOptions {
+  /** Case-insensitive match (Windows repos). */
+  nocase?: boolean
+}
+
+/** Cursor glob semantics for one rule, shared by the mod, the hooks adapter and the CLI:
+ * a slash-less glob (`*.ts`) matches the basename at any depth, `!`-globs exclude, nested rule
+ * dirs are already prefixed by `parseMdc` (`packages/api/**\/*.ts`). `path` is repo-relative POSIX
+ * (a leading `./` and backslashes are tolerated). Rule type is not checked; see `autoRulesFor`. */
+export function ruleMatches(rule: Pick<MdcRule, 'globs' | 'negGlobs'>, path: string, opts: RuleMatchOptions = {}): boolean {
+  const p = path.replace(/\\/g, '/').replace(/^\.\//, '')
+  return matchAny(p, rule.globs, rule.negGlobs, { nocase: !!opts.nocase, matchBase: true })
+}
+
+/** Auto Attached rules whose globs match `path` (Cursor attaches only these by path). */
+export function autoRulesFor<T extends Pick<MdcRule, 'type' | 'globs' | 'negGlobs'>>(rules: readonly T[], path: string, opts: RuleMatchOptions = {}): T[] {
+  return rules.filter((r) => r.type === 'auto' && ruleMatches(r, path, opts))
 }
 
 // ───────────────────────── To Item / transpile ─────────────────────────

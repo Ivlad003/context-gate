@@ -1,6 +1,6 @@
 // Decision journal (SPEC "Журнал рішень", "/gate why"): ring buffer, Markdown table, JSONL, `where` filter.
 
-import type { DecisionLogEntry } from './types.ts'
+import type { DecisionLogEntry, Value } from './types.ts'
 
 export const LOG_MAX = 200
 
@@ -66,6 +66,100 @@ export function fromJsonl<T = unknown>(text: string): { items: T[]; bad: number 
     try { items.push(JSON.parse(line) as T) } catch { bad++ }
   }
   return { items, bad }
+}
+
+// ───────────────────────── session snapshots ─────────────────────────
+// Contract between the mod (writer, `.claude/gate.log.jsonl` with `log.file: true`) and the CLI
+// (`run --ctx-from session:<id|latest>`, `run --diff session:…`). Entries:
+//   { kind: 'snapshot', trigger: 'compose', tier, profile?, data: SnapshotData }       on each prompt.compose
+//   { kind: 'skill-render', trigger: 'skill', tier, data: { sessionId, model, ctxPercent, skill, args, … } }
+// `scope` is the render scope (our data, never the user's prompt); `text` is the rendered system-prompt text
+// (ours). Both are truncated; a scope over the cap is dropped (the CLI then renders against the live context).
+
+export const SNAPSHOT_TEXT_MAX = 20_000
+export const SNAPSHOT_SCOPE_MAX = 40_000
+/** Snapshot lines kept in the JSONL file (older ones are pruned on write). */
+export const SNAPSHOT_KEEP = 20
+
+export interface SnapshotData {
+  sessionId: string
+  model: string
+  ctxPercent: number
+  tier: string
+  profile: string | null
+  scope?: Record<string, Value>
+  text?: string
+}
+
+export interface Snapshot { ts?: number; sessionId?: string; profile?: string; tier?: string; model?: string; ctxPercent?: number; scope?: Record<string, Value>; text?: string; args?: Record<string, Value>; skill?: string }
+
+/** `data` of a `snapshot` entry: text cut to SNAPSHOT_TEXT_MAX, scope dropped beyond SNAPSHOT_SCOPE_MAX JSON chars. */
+export function snapshotData(d: SnapshotData): SnapshotData {
+  const out: SnapshotData = { sessionId: d.sessionId, model: d.model, ctxPercent: d.ctxPercent, tier: d.tier, profile: d.profile }
+  if (d.scope) {
+    const { args: _args, ...scope } = d.scope
+    if (JSON.stringify(scope).length <= SNAPSHOT_SCOPE_MAX) out.scope = scope
+  }
+  if (d.text !== undefined) out.text = d.text.length > SNAPSHOT_TEXT_MAX ? d.text.slice(0, SNAPSHOT_TEXT_MAX) : d.text
+  return out
+}
+
+/** A full `snapshot` log entry. */
+export function snapshotEntry(d: SnapshotData, at: { ts: number; turn: number }): DecisionLogEntry {
+  const data = snapshotData(d)
+  return { ts: at.ts, turn: at.turn, trigger: 'compose', ...(d.profile ? { profile: d.profile } : {}), tier: d.tier, enabled: [], disabled: [], reason: [], kind: 'snapshot', data: data as unknown as Record<string, unknown> }
+}
+
+/** Keep the last `keep` snapshot lines of a JSONL text (other lines untouched). */
+export function pruneSnapshots(text: string, keep = SNAPSHOT_KEEP): string {
+  const lines = text.split('\n')
+  const idx: number[] = []
+  lines.forEach((l, i) => { if (l.includes('"kind":"snapshot"')) idx.push(i) })
+  if (idx.length <= keep) return text
+  const drop = new Set(idx.slice(0, idx.length - keep))
+  return lines.filter((_, i) => !drop.has(i)).join('\n')
+}
+
+/**
+ * Latest (`which = 'latest'`) or session-`which` snapshot from journal entries: the scope and text come from
+ * the last `snapshot` (falling back to the last `decision` for profile/tier), skill `args` from the last
+ * `skill-render` of the same session.
+ */
+export function findSnapshot(entries: readonly unknown[], which: string): Snapshot | undefined {
+  const want = which === 'latest' ? undefined : which
+  const rec = (e: unknown): Record<string, unknown> | undefined => (e && typeof e === 'object' && !Array.isArray(e) ? e as Record<string, unknown> : undefined)
+  const dataOf = (e: Record<string, unknown>): Record<string, unknown> => rec(e.data) ?? {}
+  const ofId = (e: Record<string, unknown>): string | undefined => {
+    const d = dataOf(e)
+    const v = d.sessionId ?? e.sessionId ?? rec(d.session)?.id
+    return typeof v === 'string' ? v : undefined
+  }
+  const all = entries.map(rec).filter((e): e is Record<string, unknown> => !!e && (!want || ofId(e) === want))
+  const last = (kind: string, sid?: string) => [...all].reverse().find((e) => String(e.kind ?? 'decision') === kind && (!sid || ofId(e) === sid))
+  const e = last('snapshot') ?? last('decision')
+  if (!e) return undefined
+  const sid = ofId(e)
+  const skill = last('skill-render', sid)
+  const d = dataOf(e)
+  const sd = skill ? dataOf(skill) : {}
+  const num = (v: unknown) => (typeof v === 'number' ? v : undefined)
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined)
+  const scope = rec(d.scope) as Record<string, Value> | undefined
+  const args = rec(sd.args) as Record<string, Value> | undefined
+  const out: Snapshot = {}
+  if (num(e.ts) !== undefined) out.ts = num(e.ts)
+  if (sid) out.sessionId = sid
+  const profile = str(d.profile) ?? str(e.profile)
+  if (profile) out.profile = profile
+  const tier = str(d.tier) ?? str(e.tier)
+  if (tier) out.tier = tier
+  if (str(d.model)) out.model = str(d.model)
+  if (num(d.ctxPercent) !== undefined) out.ctxPercent = num(d.ctxPercent)
+  if (scope) out.scope = scope
+  if (typeof d.text === 'string') out.text = d.text
+  if (args) out.args = args
+  if (str(sd.skill)) out.skill = str(sd.skill)
+  return out
 }
 
 // ───────────────────────── where filter ─────────────────────────

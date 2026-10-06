@@ -208,7 +208,7 @@ const diagCases: [string, string, string[]][] = [
   ['stray @end', '@end', ['G003']],
   ['break outside loop', '@break', ['G005']],
   ['unknown directive stays text', '@Override\nx', ['G001']],
-  ['run without cache in static', '---\nscope: static\n---\n@run\nls\n@end', ['G201']],
+  ['run without cache in static', '---\nscope: static\n---\n@run\nls\n@end', ['G163']],
 ]
 for (const [name, text, want] of diagCases) {
   test(`diagnostics: ${name}`, () => assert.deepEqual(codes(text), want))

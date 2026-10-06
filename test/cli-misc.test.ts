@@ -4,12 +4,13 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseMarkdownPrompt } from '../packages/core/src/mddsl.ts'
 import { formatPrompt } from '../packages/cli/src/fmt.ts'
-import { parseToolHeader, scriptLang } from '../packages/cli/src/scripts.ts'
+import { scriptLang } from '../packages/cli/src/scripts.ts'
+import { parseToolHeader } from '../packages/core/src/toolheader.ts'
 import { inferSchema } from '../packages/cli/src/cmd-expand.ts'
 import { buildReport } from '../packages/cli/src/cmd-report.ts'
-import { pickExamples } from '../packages/cli/src/context.ts'
+import { selectExamples as pickExamples } from '../packages/core/src/examples.ts'
 import { parseArgv } from '../packages/cli/src/argv.ts'
-import { cli, copyFixture, sandbox } from './cli-helpers.ts'
+import { REPO, cli, copyFixture, sandbox } from './cli-helpers.ts'
 
 test('data set / get / list: stdin JSON → .claude/prompt/data/<key>.json, visible as data.* in render', async () => {
   const root = copyFixture()
@@ -224,4 +225,19 @@ test('fs.examples: n smallest files by size, then path', () => {
   const files = [{ path: 'src/b.service.ts', size: 10 }, { path: 'src/a.service.ts', size: 10 }, { path: 'src/c.service.ts', size: 5 }, { path: 'src/x.ts', size: 1 }]
   assert.deepEqual(pickExamples(files, 'src/**/*.service.ts', 2).map((f) => f.path), ['src/c.service.ts', 'src/a.service.ts'])
   assert.deepEqual(pickExamples(files, '*.service.ts', 0), [])
+})
+
+test('bench: bench/repos.json is the repo list (subdirs of bench/ are not repos); dirs override it', async () => {
+  sandbox()
+  const { benchTargets, readBenchRepos } = await import('../packages/cli/src/cmd-report.ts')
+  const listed = readBenchRepos(join(REPO, 'bench', 'repos.json'))
+  assert.deepEqual(listed.map((r) => r.dir), ['examples/basic'])
+  assert.deepEqual(benchTargets(REPO, []).map((t) => [t.name, t.dir, t.profile]), [['basic', join(REPO, 'examples/basic'), 'frontend']])
+  assert.deepEqual(benchTargets(REPO, ['examples/basic']).map((t) => t.dir), [join(REPO, 'examples/basic')])
+  const r = await cli(REPO, ['bench', '--json'])
+  assert.equal(r.code, 0, r.err)
+  const rows = JSON.parse(r.out)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].repo, 'basic')
+  assert.ok(rows[0].promptTokens > 0)
 })

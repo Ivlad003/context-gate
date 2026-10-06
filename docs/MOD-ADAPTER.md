@@ -83,7 +83,7 @@ if (setChanged(prev, gate)) { $.ui.invalidate('prompt.attachment'); $.ui.invalid
 
 - `signals: Signals` is built from `manual`, `recentPaths`, the branch, `model`, the classifier proposal and `data`.
 - **Branch:** `$.session.repo()` has no branch. Read `await $.fs.read(join(repo.root, '.git/HEAD'))` and take what follows `ref: refs/heads/`. A worktree's `.git` file holds a `gitdir:` line, so follow it once. Fall back to `$.process.run(['git','branch','--show-current'])`, which is a read-only host git and needs no trust.
-- In `mode === 'shadow'` (from `manual.mode ?? options.mode ?? config.classify.mode`), the classifier result only lands in `gate.proposed`. `decideGate` handles that, and the adapter just passes it in.
+- In `mode === 'shadow'` (from `manual.mode ?? options.mode ?? config.classify.mode`), the classifier result only lands in `gate.proposed`, and the adapter marks the stored decision `shadow: true` and filters nothing (see "Shadow mode" below). `decideGate` never applies anything itself.
 - With `config.log.file`, append the JSONL to `.claude/gate.log.jsonl`. There's no append API, so keep an in-module buffer and flush it with `$.fs.write` every N entries and on `session.end`.
 
 ### Layer 1: cursor-rules
@@ -251,6 +251,36 @@ The validator (2.1.29x) reads the hooks module statically, and three of its rule
 - **State refs are consts of the hooks file.** The 15 atoms live in `register.ts` (`readState` / `updateState` switch on the key); layers use `io.read('gate')` / `io.update('seen', fn)`. `state.ts` keeps `INITIAL` and the helpers. A `.catch` handler must be a top-level function of that file (`pass`).
 
 `hooks/tsconfig.json` sets `noUncheckedIndexedAccess: false`, because the core (`packages/core/src`) is compiled into the module and is not written for it. Tests live in `hooks/*.test.ts` with an in-memory repository in `hooks/testkit.ts`. `$.ui.ask` is not an op the test kit can answer, and a test's `session.append` hook does not see a plugin's `$.session.append`.
+
+## As built: what the mod shares with the CLI
+
+The mod and `context-gate` render the same prompts the same way because both call the same core functions:
+
+- **Assembly** (`packages/core/src/assemble.ts`): `assemblePrompts` (compiled prompts sorted by id, then Markdown in path order; `<id>.<tier>.md` variants replace their section for the tier; skill prompts apart), `buildScope` (the render scope: `gate`, `git`, `fs`, `cursor`, `session`, `ctx`, `budgets`, `args`, `data`, then providers, never overriding builtins), `skillArgs` / `usageText` for prompt skills. `hooks/layers/dsl.ts` keeps only the port work (listing `.claude/prompt`, reading files, the gate from state). `test/mod-parity.test.ts` renders one fixture through `composeSections` over a fake port and through `runCommand({ markers: false })` and compares the bytes.
+- **Callables**: `cursor.match(path)` (core `cursorMatch` → `ruleMatches`) and `fs.examples(glob, n)` (core `selectExamples` + `exampleValue`) on both hosts; `cursor.always | auto | agent | manual` are scope lists.
+- **Cursor glob matching**: core `mdc.ts ruleMatches(rule, path, { nocase })` / `autoRulesFor`: a slash-less glob matches the basename at any depth, `!` globs exclude, nested rule dirs are prefixed by `parseMdc`. The mod, the hooks adapter and the CLI use it, with `nocase` from `detectWindows`.
+- **Script tools**: core `toolheader.ts parseToolHeader` (`# gate-tool:`, `# input:` shorthand → JSON Schema).
+- **Binary whitelist**: core `binaryWhitelist(user, repo)`: `~/.claude/context-gate.json` `allowBinaries` (default `DEFAULT_BINARIES`) narrowed by gate.json `allowBinaries`.
+- **Diagnostic codes**: every code any package emits is in `packages/core/src/codes.ts` (`test/codes.test.ts` scans the sources).
+
+### Shadow mode
+
+`decideGate` only decides; applying is the adapter's call. With `classify.mode: "shadow"` (or `/gate shadow`) and no manual signal, `recompute` stores the decision with `gate.shadow = true`, drops `profile` and keeps the proposal in `gate.proposed`. Nothing is filtered: the skill listing, tool descriptions, MCP calls and agents pass through, and Always/Auto rules are delivered as without a gate. The band and `/gate` show `gate (frontend?) · … · skills 30/30 · mcp 6/6` (core `statusLine` counts everything as on in shadow), and `/gate` labels the off lists «пропозиція, не застосовано». `/gate apply` or a manual `/gate <profile>` applies. The hooks adapter does the same (`isApplied` false → deny decisions are only logged).
+
+### Journal snapshots (`log.file: true`)
+
+With `log.file`, each `prompt.compose` whose render changed appends one `snapshot` entry to `.claude/gate.log.jsonl`, and each prompt-skill render appends a `skill-render` entry. The contract lives in core `journal.ts`:
+
+```
+{ kind: 'snapshot', trigger: 'compose', tier, profile?, data: { sessionId, model, ctxPercent, tier, profile, scope?, text? } }
+{ kind: 'skill-render', trigger: 'skill', tier, data: { sessionId, model, ctxPercent, skill, args, ms, chars, status } }
+```
+
+`scope` is our render scope (no user prompt text; `args` stripped), dropped beyond 40 000 JSON chars; `text` is our rendered system-prompt text, cut at 20 000 chars. Snapshots go to the file only (never the 200-entry state ring), and the file keeps the last 20. The CLI reads them with core `findSnapshot`: `context-gate run --ctx-from session:latest|<id>` renders against the snapshot scope (and the last skill `args`), `run --diff session:…` diffs against its `text`.
+
+### Builds
+
+The mod runs `node <plugin>/dist/cli.js build --only <repo-relative .prompt.tsx>`; `--only` also takes a prompt id.
 
 ## Tests (`hooks/*.test.ts`, `npm run test:mod`)
 

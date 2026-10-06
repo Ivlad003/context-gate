@@ -170,6 +170,8 @@ export interface GateConfig {
   debug?: boolean
   log?: { file?: boolean }
   env?: string[] // whitelist of env vars visible to the DSL (masked in debug)
+  /** Binaries repo executors/providers may start: narrows the user whitelist, never widens it (Р2). */
+  allowBinaries?: string[]
 }
 
 // ───────────────────────── Signals → Decision (skill-gate) ─────────────────────────
@@ -206,6 +208,8 @@ export interface Gate {
   profile: string | undefined
   /** Shadow classifier proposal (shown as `(frontend?)`). */
   proposed?: { profile: string; confidence: number }
+  /** Set by the adapter, never by decideGate: the decision is logged but not applied (shadow mode). */
+  shadow?: boolean
   tier: Tier
   trigger: DecisionTrigger
   off: boolean
@@ -229,7 +233,7 @@ export interface DecisionLogEntry {
   enabled: string[]
   disabled: string[]
   reason: string[]
-  kind?: 'decision' | 'escalation-suggested' | 'gate-failed' | 'skill-render' | 'debug' | 'rule-delivered' | 'deny' | 'health'
+  kind?: 'decision' | 'escalation-suggested' | 'gate-failed' | 'skill-render' | 'snapshot' | 'debug' | 'rule-delivered' | 'deny' | 'health'
   data?: Record<string, unknown>
 }
 

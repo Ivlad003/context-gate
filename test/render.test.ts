@@ -93,7 +93,7 @@ test('ordering: static → profile → volatile, `after` inside scope', async ()
   const res = await renderPrompt([s('vol', 'volatile'), s('p1', 'profile'), s('st', 'static'), s('p2', 'profile'), s('p3', 'profile', 'p1'), s('x', 'static', 'p1')], {}, host, opts())
   assert.deepEqual(res.sections.map(x => x.id), ['st', 'x', 'p1', 'p3', 'p2', 'vol'])
   assert.equal(res.text, 'st\n\nx\n\np1\n\np3\n\np2\n\nvol')
-  assert.ok(res.diagnostics.some(d => d.code === 'G010'))
+  assert.ok(res.diagnostics.some(d => d.code === 'G020'))
   assert.deepEqual(orderSections([{ id: 'a', scope: 'profile', after: 'b' }, { id: 'b', scope: 'profile' }]).map(x => x.id), ['b', 'a'])
 })
 

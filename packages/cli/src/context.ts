@@ -10,14 +10,16 @@ import { loadConfig, tierForModel } from '../../core/src/config.ts'
 import { decideGate } from '../../core/src/decide.ts'
 import { evalSource, newBudget } from '../../core/src/expr.ts'
 import { parseMdc, ruleIdFromPath, ruleToItem } from '../../core/src/mdc.ts'
-import { compileGlob } from '../../core/src/glob.ts'
+import { compileGlob, detectWindows } from '../../core/src/glob.ts'
+import { exampleValue, selectExamples } from '../../core/src/examples.ts'
 import { makeItem, normalizeItems } from '../../core/src/items.ts'
 import { parseDuration } from '../../core/src/duration.ts'
-import { fromJsonl } from '../../core/src/journal.ts'
+import { findSnapshot, fromJsonl, type Snapshot } from '../../core/src/journal.ts'
 import { splitFrontmatter } from './build.ts'
-import { assemblePrompts, buildScope, cursorMatch, dataScope, type DataEntry, type MarkdownFile, type PromptSet } from './assemble.ts'
+import { assemblePrompts, buildScope, cursorMatch, dataScope, type DataEntry, type MarkdownFile, type PromptSet } from '../../core/src/assemble.ts'
 import { NodeHost, listSkills } from './host-node.ts'
-import { parseToolHeader, scriptFnName, scriptLang } from './scripts.ts'
+import { parseToolHeader } from '../../core/src/toolheader.ts'
+import { scriptFnName, scriptLang } from './scripts.ts'
 import { NODE_SHIM } from './shims.ts'
 import { repoCacheDir, trustState, type TrustState } from './settings.ts'
 import { posix, readJson, readText, runProcess, sha256, walkFiles, writeJson } from './util.ts'
@@ -41,12 +43,8 @@ export function loadRepo(root: string): Repo {
   const text = readText(join(root, '.claude', 'gate.json'))
   const { config, diagnostics } = loadConfig(text)
   const cfg = config ?? loadConfig(undefined).config!
-  let narrow: string[] | undefined
-  try {
-    const raw = text ? JSON.parse(text.replace(/^\uFEFF/, '')) as Record<string, unknown> : undefined
-    if (Array.isArray(raw?.allowBinaries)) narrow = raw.allowBinaries.filter((x): x is string => typeof x === 'string')
-  } catch { /* reported by loadConfig */ }
-  const diags = narrow ? diagnostics.filter((d) => !(d.code === 'G302' && d.message.startsWith('$.allowBinaries'))) : diagnostics
+  const narrow = config?.allowBinaries
+  const diags = diagnostics
   return { root, config: cfg, configDiagnostics: diags, hasConfig: text !== undefined, promptDir: cfg.prompt?.dir ?? '.claude/prompt', cacheDir: repoCacheDir(root), ...(narrow ? { narrowBinaries: narrow } : {}) }
 }
 
@@ -114,20 +112,10 @@ export async function gitLog(root: string, n: number): Promise<Value> {
 
 // ───────────────────────── fs ─────────────────────────
 
-/** `fs.examples(glob, n)`: the n smallest files matching glob (by size, then path), with bodies. */
-export function pickExamples(files: readonly { path: string; size: number }[], glob: string, n = 1): { path: string; size: number }[] {
-  const m = compileGlob(glob, { matchBase: true })
-  return files.filter((f) => m(f.path)).sort((a, b) => a.size - b.size || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).slice(0, Math.max(0, Math.floor(n)))
-}
-
-const MAX_EXAMPLE_CHARS = 8000
-
+/** `fs.examples(glob, n)`: core `selectExamples` over the repo listing, bodies via `exampleValue`. */
 export function fsExamples(root: string, glob: string, n = 1): Value {
   const files = walkFiles(root).map((path) => { try { return { path, size: statSync(join(root, path)).size } } catch { return { path, size: Infinity } } })
-  return pickExamples(files, glob, n).map((f) => {
-    const body = readText(join(root, f.path)) ?? ''
-    return { path: f.path, body: body.length > MAX_EXAMPLE_CHARS ? body.slice(0, MAX_EXAMPLE_CHARS) : body, chars: body.length }
-  })
+  return selectExamples(files, glob, n).map((f) => exampleValue(f, readText(join(root, f.path)) ?? ''))
 }
 
 // ───────────────────────── data store ─────────────────────────
@@ -267,18 +255,8 @@ export function collectItems(repo: Repo, rules?: MdcRule[]): Item[] {
 
 export interface GateFlags { tier?: string; profile?: string; model?: string; paths?: string[]; branch?: string }
 
-/** A model id that maps to `tier` through `config.models` (`claude-haiku-*` → `claude-haiku-x`). */
-export function modelForTier(config: GateConfig, tier: string): string | undefined {
-  for (const [glob, t] of Object.entries(config.models ?? {})) {
-    if (t !== tier) continue
-    const id = glob.replace(/\*+/g, 'x').replace(/\?/g, 'x')
-    if (tierForModel(config, id).tier === tier) return id
-  }
-  return undefined
-}
-
 export function decide(config: GateConfig, items: readonly Item[], flags: GateFlags, data: Record<string, unknown> = {}): Gate {
-  const model = flags.model ?? (flags.tier ? modelForTier(config, flags.tier) : undefined)
+  const model = flags.model
   const signals: Signals = {
     paths: flags.paths ?? [],
     ...(flags.branch ? { branch: flags.branch } : {}),
@@ -290,8 +268,7 @@ export function decide(config: GateConfig, items: readonly Item[], flags: GateFl
     const v = evalSource(expr, d as Record<string, Value>, newBudget())
     return !!v && v !== 0 && v !== ''
   }
-  const { gate } = decideGate(config, signals, { turn: 0 }, items, { evalExpr })
-  if (flags.tier && gate.tier !== flags.tier) { gate.tier = flags.tier; gate.reason.push(`--tier ${flags.tier}`) }
+  const { gate } = decideGate(config, signals, { turn: 0 }, items, { evalExpr, ...(flags.tier ? { tier: flags.tier } : {}) })
   return gate
 }
 
@@ -483,7 +460,7 @@ export class Providers {
     if (ns === 'fs' && fn === 'examples') return fsExamples(root, String(args[0] ?? '**/*'), typeof args[1] === 'number' ? args[1] : 1)
     if (ns === 'fs' && fn === 'glob') { const m = compileGlob(String(args[0] ?? ''), { matchBase: true }); return walkFiles(root).filter((f) => m(f)) }
     if (ns === 'fs' && fn === 'exists') { const p = this.o.host.abs(String(args[0] ?? '')); return !!p && existsSync(p) }
-    if (ns === 'cursor' && fn === 'match') return cursorMatch(this.o.rules, String(args[0] ?? ''))
+    if (ns === 'cursor' && fn === 'match') return cursorMatch(this.o.rules, String(args[0] ?? ''), { nocase: detectWindows(root) })
     if (ns === 'scripts') return this.script(fn, args, kwargs)
     const p = this.cfg[ns]
     if (!p) return null
@@ -533,41 +510,13 @@ async function shimAbs(host: NodeHost, file: string, calls: { fn: string; args: 
 
 // ───────────────────────── session snapshots ─────────────────────────
 
-export interface Snapshot { ts?: number; sessionId?: string; profile?: string; tier?: string; model?: string; ctxPercent?: number; scope?: Record<string, Value>; text?: string; args?: Record<string, Value>; skill?: string }
+export type { Snapshot }
 
-/**
- * Latest (or `<id>`) snapshot from `.claude/gate.log.jsonl`. Accepted entries: `kind: "snapshot"` and
- * `kind: "skill-render"` (data: { sessionId, model, ctxPercent, scope?, text?, args? }), then `decision`.
- */
+/** Latest (or `<id>`) snapshot from `.claude/gate.log.jsonl` (the mod writes it with `log.file: true`); core `findSnapshot`. */
 export function readSnapshot(root: string, which: string): Snapshot | undefined {
   const text = readText(join(root, '.claude', 'gate.log.jsonl'))
   if (!text) return undefined
-  const { items } = fromJsonl<Record<string, unknown>>(text)
-  const want = which === 'latest' ? undefined : which
-  const ofId = (e: Record<string, unknown>): string | undefined => {
-    const d = (e.data ?? {}) as Record<string, unknown>
-    return (d.sessionId ?? e.sessionId ?? (d.session as Record<string, unknown> | undefined)?.id) as string | undefined
-  }
-  const candidates = items.filter((e) => e && typeof e === 'object' && (!want || ofId(e) === want))
-  const pick = (kinds: string[]) => [...candidates].reverse().find((e) => kinds.includes(String(e.kind ?? 'decision')))
-  const e = pick(['snapshot', 'skill-render']) ?? pick(['decision'])
-  if (!e) return undefined
-  const d = (e.data ?? {}) as Record<string, unknown>
-  const scope = d.scope && typeof d.scope === 'object' ? d.scope as Record<string, Value> : undefined
-  const num = (v: unknown) => (typeof v === 'number' ? v : undefined)
-  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined)
-  return {
-    ...(num(e.ts) !== undefined ? { ts: num(e.ts) } : {}),
-    ...(ofId(e) ? { sessionId: ofId(e) } : {}),
-    ...(str(e.profile) ? { profile: str(e.profile) } : {}),
-    ...(str(e.tier) ? { tier: str(e.tier) } : {}),
-    ...(str(d.model) ? { model: str(d.model) } : {}),
-    ...(num(d.ctxPercent) !== undefined ? { ctxPercent: num(d.ctxPercent) } : {}),
-    ...(scope ? { scope } : {}),
-    ...(str(d.text) ? { text: str(d.text) } : {}),
-    ...(d.args && typeof d.args === 'object' ? { args: d.args as Record<string, Value> } : {}),
-    ...(str(d.skill) ? { skill: str(d.skill) } : {}),
-  }
+  return findSnapshot(fromJsonl<unknown>(text).items, which)
 }
 
 // ───────────────────────── the whole context ─────────────────────────

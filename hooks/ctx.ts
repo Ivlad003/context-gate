@@ -4,7 +4,7 @@
 
 import type { EngineInterface, PluginOptions } from 'claude-code'
 
-import type { CompiledPrompt, Diagnostic, GateConfig, Item, MdcRule, RenderResult, SectionNode, HealthReport } from '../packages/core/src/types.ts'
+import type { CompiledPrompt, Diagnostic, GateConfig, Item, MdcRule, RenderResult, HealthReport } from '../packages/core/src/types.ts'
 import { detectWindows } from '../packages/core/src/glob.ts'
 import type { State, StateKey } from './state.ts'
 
@@ -22,6 +22,7 @@ export interface Io {
     write(path: string, text: string): Promise<void>
   }
   session: {
+    id(): Promise<string>
     root(): Promise<string>
     model(): Promise<string>
     repo(): ReturnType<E['session']['repo']>
@@ -77,8 +78,8 @@ export interface PromptSet {
   key: string
   /** Compiled TSX prompts (`.compiled/*.json`), skill prompts included. */
   compiled: CompiledPrompt[]
-  /** Markdown sections (`<dir>/*.md`) and their tier variants. */
-  markdown: { base: SectionNode; variants: Record<string, SectionNode>; uses: Record<string, string> }[]
+  /** Markdown prompt files (`<dir>/*.md`, tier variants `<id>.<tier>.md` included), for core `assemblePrompts`. */
+  markdown: { path: string; text: string }[]
   /** Prompt sources whose `.compiled` is missing or older (repo-relative). */
   stale: string[]
   diagnostics: Diagnostic[]
@@ -90,7 +91,8 @@ export interface ScriptTool {
   name: string
   description: string
   path: string
-  input: Record<string, string>
+  /** JSON Schema from the `# input:` header (core `parseToolHeader`). */
+  inputSchema: Record<string, unknown>
   tiers?: string[]
 }
 
@@ -138,6 +140,8 @@ export interface Runtime {
   escalated: Set<string>
   journalBuffer: string[]
   journalText?: string
+  /** Hash of the last written journal snapshot (dedup). */
+  lastSnapshot?: string
   trustAsked: boolean
   recheckReason?: 'new' | 'compact' | 'auto'
   trustCache?: { key: string; hash: string; decision: 'unknown' | 'trusted' | 'denied' }

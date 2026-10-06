@@ -44,6 +44,7 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
   mock.store(on, opts.store ?? {})
   const isDir = (r: string): boolean => r === '' || [...repo.files.keys()].some((f) => f.startsWith(r + '/'))
   on('session.root', () => ({ value: ROOT }))
+  on('session.id', () => ({ value: 'test-session' }))
   on('session.cwd', () => ({ value: ROOT }))
   on('session.model', () => ({ value: opts.model ?? 'claude-sonnet-4-5' }))
   on('session.repo', () => ({ value: { root: ROOT, remote: null, internal: false, name: 'repo' } }))

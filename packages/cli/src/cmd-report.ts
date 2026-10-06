@@ -1,6 +1,5 @@
 // `context-gate report` (journal summary, SPEC сценарії 6, 8, 11) and `bench` (сценарій 12).
 
-import { existsSync, readdirSync, statSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import type { DecisionLogEntry } from '../../core/src/types.ts'
 import { fromJsonl } from '../../core/src/journal.ts'
@@ -8,7 +7,7 @@ import { tokens } from '../../core/src/pipeline.ts'
 import { buildContext, collectItems, decide, loadRepo, loadRules } from './context.ts'
 import { renderWith } from './cmd-run.ts'
 import { observeCounts, sinceMs } from './cmd-pipe.ts'
-import { readText } from './util.ts'
+import { readJson, readText } from './util.ts'
 
 export interface Report {
   since?: string
@@ -115,16 +114,42 @@ export async function benchRepo(dir: string, o: { profile?: string; tier?: strin
   }
 }
 
-export function benchDirs(root: string, given: string[]): string[] {
-  if (given.length) return given.map((g) => resolve(root, g))
-  const b = join(root, 'bench')
-  if (!existsSync(b)) return [root]
-  return readdirSync(b).filter((d) => { try { return statSync(join(b, d)).isDirectory() } catch { return false } }).sort().map((d) => join(b, d))
+/** One entry of `bench/repos.json`, the single list of bench repos (CLI `bench` and `bench/run.ts`). */
+export interface BenchRepo {
+  name: string
+  /** Relative to the repo root that holds `bench/repos.json`. */
+  dir: string
+  profile?: string
+  model?: string
+  tier?: string
+  /** argv overrides for `node dist/cli.js …` (bench/run.ts only). */
+  commands?: { health?: string[]; tokensOff?: string[]; tokensOn?: string[] }
+}
+
+export const BENCH_REPOS = join('bench', 'repos.json')
+
+/** `bench/repos.json` → repos; missing or invalid → []. */
+export function readBenchRepos(file: string): BenchRepo[] {
+  const v = readJson<{ repos?: unknown }>(file)
+  if (!v || !Array.isArray(v.repos)) return []
+  return v.repos.filter((r): r is BenchRepo => !!r && typeof r === 'object' && typeof (r as BenchRepo).dir === 'string').map((r) => ({ ...r, name: typeof r.name === 'string' ? r.name : basename(r.dir) }))
+}
+
+/** Repos to bench: the given dirs; else `bench/repos.json` under root; else root itself. */
+export function benchTargets(root: string, given: string[]): BenchRepo[] {
+  if (given.length) return given.map((g) => ({ name: basename(resolve(root, g)), dir: resolve(root, g) }))
+  const listed = readBenchRepos(join(root, BENCH_REPOS))
+  if (listed.length) return listed.map((r) => ({ ...r, dir: resolve(root, r.dir) }))
+  return [{ name: basename(root), dir: root }]
 }
 
 export async function benchCommand(root: string, dirs: string[], o: { before?: boolean; after?: boolean; json?: boolean; profile?: string; tier?: string; model?: string }): Promise<{ code: number; out: string }> {
   const rows: BenchRow[] = []
-  for (const d of benchDirs(root, dirs)) rows.push(await benchRepo(d, o))
+  for (const t of benchTargets(root, dirs)) {
+    const pick = (k: 'profile' | 'tier' | 'model') => o[k] ?? t[k]
+    const row = await benchRepo(t.dir, { ...(pick('profile') ? { profile: pick('profile') } : {}), ...(pick('tier') ? { tier: pick('tier') } : {}), ...(pick('model') ? { model: pick('model') } : {}) })
+    rows.push({ ...row, repo: t.name })
+  }
   if (o.json) return { code: 0, out: JSON.stringify(rows) + '\n' }
   const both = !o.before && !o.after
   const head = ['репозиторій', 'промпт, ток.', ...(o.before || both ? ['елементи до gate, ток.'] : []), ...(o.after || both ? ['елементи після gate, ток.'] : []), 'секцій', 'unverified', 'мс']

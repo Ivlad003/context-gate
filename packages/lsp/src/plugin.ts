@@ -6,7 +6,6 @@
 import type TS from 'typescript'
 import { spawnSync } from 'node:child_process'
 import { analyzeFile, completeAt, hoverAt, hoverMarkdown, numericCode, refactorsAt, sectionSymbols, type FileDiag } from './analyze.ts'
-import { LSP_CODES } from './exprcheck.ts'
 import { compiledDiagnosticsFor, findRoot, isPromptFile, loadModel } from './load.ts'
 import { codeInfo } from '../../core/src/codes.ts'
 import { cliArgv } from './runcli.ts'
@@ -190,8 +189,8 @@ export function init(mod: { typescript: TSModule }): TS.server.PluginModule {
   }
 }
 
-/** Title + hint of a code for UIs (compiler table first, then editor-only codes). */
+/** Title + hint of a code for UIs (core codes table). */
 export function describeCode(code: string): string {
-  const c = codeInfo(code) ?? LSP_CODES[code]
+  const c = codeInfo(code)
   return c ? `${code} — ${c.title}${c.hint ? `. ${c.hint}` : ''}` : code
 }

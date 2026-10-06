@@ -4,7 +4,7 @@
 // and writes `decision` / `escalation-suggested` / `gate-failed` events in the `.claude/gate.log.jsonl` format.
 
 import type { DecisionLogEntry, Gate, GateConfig, Item, Signals, Tier } from '../../core/src/types.ts'
-import { decideGate } from '../../core/src/decide.ts'
+import { decideGate, skillOverridesFor } from '../../core/src/decide.ts'
 import { tierForModel } from '../../core/src/config.ts'
 import { toJsonl } from '../../core/src/journal.ts'
 
@@ -124,9 +124,7 @@ export function planForTicket(config: GateConfig, input: TicketPlanInput, now = 
     const p = skillItems.get(name)?.provenance.path
     if (p) pluginDirSymlinks.push(/SKILL\.md$/i.test(p) ? dirOf(p) : p)
   }
-  const skillOverrides: TicketPlan['settings']['skillOverrides'] = {}
-  for (const name of gate.skills.nameOnly) skillOverrides[name] = 'name-only'
-  for (const name of gate.skills.off) skillOverrides[name] = 'off'
+  const skillOverrides = skillOverridesFor(gate, { hard: true }) as TicketPlan['settings']['skillOverrides']
 
   const env: Record<string, string> = {}
   if (gate.profile) env.CONTEXT_GATE_PROFILE = gate.profile

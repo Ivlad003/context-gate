@@ -4,8 +4,8 @@
 
 import type { DecisionLogEntry, Gate, GateConfig, GateState, Item, MdcRule, Signals } from '../../core/src/types.ts'
 import { decideGate, denyText, statusLine } from '../../core/src/decide.ts'
-import { isPartialRead, packInjections, ruleToItem } from '../../core/src/mdc.ts'
-import { matchAny, normalizePath } from '../../core/src/glob.ts'
+import { autoRulesFor as coreAutoRulesFor, isPartialRead, packInjections, ruleToItem } from '../../core/src/mdc.ts'
+import { normalizePath } from '../../core/src/glob.ts'
 import { makeItem } from '../../core/src/items.ts'
 import { extractMentions, extractPromptFlag } from '../../core/src/gatecmd.ts'
 import { tierForModel } from '../../core/src/config.ts'
@@ -224,7 +224,7 @@ function ruleAllowed(rule: MdcRule, gate: Gate | undefined, applied: boolean): b
 
 /** Cursor semantics: a glob without `/` (`*.ts`) matches the basename at any depth. */
 function autoRulesFor(ctx: HookContext, rel: string): MdcRule[] {
-  return ctx.rules.filter((r) => r.type === 'auto' && matchAny(rel, r.globs, r.negGlobs, { nocase: !!ctx.windows, matchBase: true }))
+  return coreAutoRulesFor(ctx.rules, rel, { nocase: !!ctx.windows })
 }
 
 function perInjection(cfg: GateConfig): number {

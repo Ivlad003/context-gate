@@ -11,7 +11,7 @@
 | `.claude/gate.json` | профілі, tiers, групи, провайдери (`schema` → типи полів, `functions` → функції) |
 | `.claude/gate.index.json` | профілі/tiers/секції/елементи, `vars`/`ctx` (значення-зразки), `data`, провайдери; усі поля необов'язкові |
 | `.claude/prompt/.types/ctx.d.ts` | запасне джерело unions `ProfileName`/`TierName` і ключів провайдерів |
-| `.claude/prompt/.trace/last.json` | значення для hover і REPL: `{ scope, trace?, sections? }` (або `{ result: { scope, trace } }`) — останній `run --json` / `prompt.compose` |
+| `.claude/prompt/.trace/last.json` | значення для hover і REPL: `RunJson` (`core/runjson.ts`: `{ sections, text, trace, diagnostics, ms, scope, health?, meta }`) — останній `context-gate run` |
 | `.claude/prompt/.compiled/*.json` | діагностики збірки (`G151`, `G160`, `G161`, `G164`, `G180` …) для файлів-джерел |
 
 Файли перечитуються за mtime, тож `context-gate build` / `run` у фоні одразу видно в редакторі.
@@ -117,9 +117,9 @@ NUL і symlink назовні дають `403`; службові `.compiled/.tra
 
 ## Обмеження
 
-- Формат `run --json` і `.trace/last.json` ще фіксується в CLI; клієнти читають його терпимо (`sections`, `text`, `trace`, `diagnostics`, `ms`, `scope`, або все це в `result`).
+- Формат `run --json` і `.trace/last.json` — `RunJson` з `core/runjson.ts`; клієнти читають його `parseRunJson`, інші форми (`{ result: … }`) — помилка.
 - Тип `Each`-елемента виводиться для простих `of` (шлях, `take/sort/where/grep/unique`, `map("поле")`); складніші — `any`.
 - Області видимості локальних імен — на весь файл, а не на піддерево.
-- Коди `G171`/`G172` поки лише в редакторі (`LSP_CODES`), не в `core/codes.ts` і `context-gate explain`.
+- Коди `G171`/`G172` — у спільній таблиці `core/codes.ts`, тож `context-gate explain G171` їх знає.
 - Позиції діагностик збірки з `.compiled` — з точністю до рядка секції.
 - VS Code: preview оновлюється на збереження, не на кожне натискання; refactor-команда tsserver «quick-варіант» виконується, лише якщо клієнт передає `commands` у `applyCodeActionCommand`, — тому в розширенні є власний code action.

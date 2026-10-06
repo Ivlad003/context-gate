@@ -7,4 +7,4 @@
 {"ts":3700,"turn":3,"trigger":"deny","tier":"quick","enabled":[],"disabled":[],"reason":[],"kind":"deny","data":{"tool":"mcp__figma__get"}}
 {"ts":4000,"turn":4,"trigger":"rule","tier":"quick","enabled":[],"disabled":[],"reason":[],"kind":"rule-delivered","data":{"id":"always"}}
 {"ts":5000,"turn":5,"trigger":"verify","tier":"quick","enabled":[],"disabled":[],"reason":[],"kind":"escalation-suggested","data":{"from":"quick","to":"standard"}}
-{"ts":6000,"turn":6,"trigger":"snapshot","profile":"frontend","tier":"quick","enabled":[],"disabled":[],"reason":[],"kind":"snapshot","data":{"sessionId":"s1","model":"claude-haiku-4","ctxPercent":42,"text":"Проєкт fixture-app."}}
+{"ts":6000,"turn":6,"trigger":"compose","profile":"frontend","tier":"quick","enabled":[],"disabled":[],"reason":[],"kind":"snapshot","data":{"sessionId":"s1","model":"claude-haiku-4","ctxPercent":42,"tier":"quick","profile":"frontend","text":"Проєкт fixture-app."}}

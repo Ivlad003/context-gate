@@ -57,6 +57,15 @@ const itemSource: S = {
   },
 }
 
+/** Binaries repo code may start when `~/.claude/context-gate.json` has no `allowBinaries` (mod and CLI). */
+export const DEFAULT_BINARIES: readonly string[] = ['bash', 'sh', 'node', 'python3', 'python', 'deno', 'git']
+
+/** Effective whitelist: the user's list (or DEFAULT_BINARIES) narrowed by gate.json `allowBinaries` (Р2: never widened). */
+export function binaryWhitelist(user: readonly string[] | undefined, repo: readonly string[] | undefined): string[] {
+  const base = user ?? DEFAULT_BINARIES
+  return repo ? base.filter((b) => repo.includes(b)) : [...base]
+}
+
 export const gateJsonSchema = {
   $schema: 'http://json-schema.org/draft-07/schema#',
   $id: 'https://context-gate.dev/context-gate.schema.json',
@@ -153,6 +162,7 @@ export const gateJsonSchema = {
     debug: bool,
     log: { type: 'object', additionalProperties: false, properties: { file: bool } },
     env: strArr,
+    allowBinaries: { ...strArr, description: 'Binaries repo executors/providers may start. Narrows the user whitelist (~/.claude/context-gate.json), never widens it (Р2).' },
   },
 } as const
 

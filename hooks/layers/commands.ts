@@ -6,14 +6,14 @@ import { formatWhy } from '../../packages/core/src/journal.ts'
 import type { DecisionLogEntry } from '../../packages/core/src/types.ts'
 import { formatHealth } from '../../packages/core/src/health.ts'
 import { renderPrompt } from '../../packages/core/src/render.ts'
-import { parseArgs } from '../../packages/core/src/argparse.ts'
+import { skillArgs } from '../../packages/core/src/assemble.ts'
 import type { ContextGateManual } from '../../types'
 import { json } from '../state.ts'
 import { type Io, type Runtime } from '../ctx.ts'
 import { ensureSession } from './config.ts'
 import { rulesReport } from './cursor-rules.ts'
 import { effectiveMode, recompute } from './skill-gate.ts'
-import { buildPrompts, buildScope, hostFor, loadPrompts } from './dsl.ts'
+import { buildPrompts, buildScope, hostFor, loadPrompts, renderOptions, sectionsFor } from './dsl.ts'
 import { revokeTrust } from './trust.ts'
 import { WHY_PANE, gateLine } from './ui.ts'
 
@@ -37,11 +37,13 @@ async function statusText(io: Io, rt: Runtime): Promise<string> {
   if (gate) {
     lines.push(`тригер: ${gate.trigger}${gate.proposed ? `; пропозиція: ${gate.proposed.profile} (${gate.proposed.confidence.toFixed(2)})` : ''}; групи: ${gate.groups.join(', ') || '—'}`)
     const list = (label: string, xs: string[]) => { if (xs.length) lines.push(`${label}: ${xs.slice(0, 30).join(', ')}${xs.length > 30 ? ` …(+${xs.length - 30})` : ''}`) }
+    // Shadow: nothing is filtered; the lists are what the proposal would do.
+    const would = gate.shadow ? ' (пропозиція, не застосовано)' : ''
     list('skills on', [...gate.skills.on, ...gate.skills.preload.map((s) => `${s} (preload)`)])
-    list('skills лише назва', gate.skills.nameOnly)
-    list('skills off', gate.skills.off)
-    list('mcp off', gate.mcp.off)
-    list('агенти off', gate.agents.off)
+    list(`skills лише назва${would}`, gate.skills.nameOnly)
+    list(`skills off${would}`, gate.skills.off)
+    list(`mcp off${would}`, gate.mcp.off)
+    list(`агенти off${would}`, gate.agents.off)
     if (gate.reason.length) lines.push(`чому: ${gate.reason.join('; ')}`)
   }
   if (manual.profile || manual.add.length || manual.remove.length || manual.off) {
@@ -123,13 +125,13 @@ export async function gateCommand(io: Io, rt: Runtime, args: string): Promise<{ 
         const set = await loadPrompts(io, rt)
         const host = await hostFor(io, rt)
         const { scope, tier } = await buildScope(io, rt, host, undefined)
-        const all = [...set.compiled.map((p) => { const { skill: _s, ...rest } = p; return rest }), ...(set.markdown.length ? [{ version: 1 as const, compiler: 'markdown', id: 'markdown', sourceHash: '', sources: [], sections: set.markdown.map((m) => m.base), diagnostics: [] }] : [])]
+        const assembled = sectionsFor(rt, set, tier)
         const skill = set.compiled.find((p) => p.skill?.name === cmd.id)
         if (skill?.skill) {
-          const parsed = parseArgs('', skill.skill.args, { name: `/${skill.skill.name}` })
-          if (!parsed.ok) return { text: parsed.error }
+          const parsed = skillArgs(skill, '')
+          if (!parsed.ok) return { text: parsed.text }
         }
-        const res = await renderPrompt(all, scope, host, { tier, only: cmd.id })
+        const res = await renderPrompt(skill ? [...assembled.system, skill] : assembled.system, scope, host, { ...renderOptions(rt, tier), only: cmd.id })
         const s = res.sections.find((x) => x.id === cmd.id)
         const diags = res.diagnostics.map((d) => `- ${d.code} ${d.severity}: ${d.message}`)
         return { text: [s ? `prompt://${cmd.id} (${s.scope}, ${s.tokens} ток., ${s.included ? 'увійшла' : `пропущена: ${s.reason ?? ''}`})\n\n${s.text}` : `Секцію ${cmd.id} не знайдено`, ...diags].join('\n') }

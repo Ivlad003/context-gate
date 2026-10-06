@@ -144,7 +144,7 @@ export function orderSections<T extends { id: string; scope: Scope; after?: stri
         followers.set(s.after, f)
       } else {
         if (s.after && diagnostics) {
-          diagnostics.push({ code: 'G010', severity: 'warning', message: `Секція «${s.id}»: after=«${s.after}» не знайдено у scope ${scope} — лишено на місці` })
+          diagnostics.push({ code: 'G020', severity: 'warning', message: `Секція «${s.id}»: after=«${s.after}» не знайдено у scope ${scope} — лишено на місці` })
         }
         roots.push(s)
       }
@@ -159,7 +159,7 @@ export function orderSections<T extends { id: string; scope: Scope; after?: stri
     roots.forEach(visit)
     for (const s of inScope) {
       if (!placed.has(s.id)) {
-        diagnostics?.push({ code: 'G010', severity: 'warning', message: `Секція «${s.id}»: цикл у after — лишено в порядку джерела` })
+        diagnostics?.push({ code: 'G021', severity: 'warning', message: `Секція «${s.id}»: цикл у after — лишено в порядку джерела` })
         visit(s)
       }
     }
@@ -623,7 +623,7 @@ class Interp {
     for (const name of this.vars) this.addTrace('let', `${name} = ${JSON.stringify(lookup(this.frame, name)).slice(0, 200)}`)
     if (this.needs.size) {
       this.status = this.status === 'fail' ? 'fail' : 'unverified'
-      this.diag('G202', 'warning', `Дані не готові після ${MAX_ROUNDS} проходів (needs=… без джерела?) — рендер з null`)
+      this.diag('G207', 'warning', `Дані не готові після ${MAX_ROUNDS} проходів (needs=… без джерела?) — рендер з null`)
     }
     let text = normalizeMarkdown(this.text)
     let truncated = false
@@ -858,7 +858,7 @@ class Interp {
       this.define(name, ready.value)
       this.readyNames.add(name)
       this.addTrace('run', `${n.lang} as=${name}: ${ready.source}${ready.bytes !== undefined ? `, ${ready.bytes} B` : ''}${ready.detail ? ` — ${ready.detail}` : ''}`, { source: ready.source, ...(ready.ms !== undefined ? { ms: ready.ms } : {}) })
-      if (ready.detail && ready.status !== 'ok') this.diag(ready.status === 'fail' ? 'G202' : 'G203', ready.status === 'fail' ? 'error' : 'warning', `@run ${n.lang} (${name}) не виконано: ${ready.detail.replace(/; stderr:.*$/s, '')}`)
+      if (ready.detail && ready.status !== 'ok') this.diag('G203', ready.status === 'fail' ? 'error' : 'warning', `@run ${n.lang} (${name}) не виконано: ${ready.detail.replace(/; stderr:.*$/s, '')}`)
       if (ready.stale) this.stale.add(`run:${name}`)
       if (n.store) this.storeValue(n.store, ready.value, ready, n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE)
       if (ready.error) return 'stop'

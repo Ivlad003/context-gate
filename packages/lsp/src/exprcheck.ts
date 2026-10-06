@@ -1,5 +1,6 @@
 // Expression-level analysis against the Ctx model: diagnostics, completions and hover for one
 // level-1 expression string (SPEC Р1). Pure; positions are offsets inside the expression source.
+import { codeInfo } from '../../core/src/codes.ts'
 
 import type { Code, Diagnostic, Scope_, Value } from '../../core/src/types.ts'
 import { BUILTINS, FILTERS, evalExpr, newBudget, parseExpr, toText, type ExprAst } from '../../core/src/expr.ts'
@@ -13,12 +14,6 @@ export interface ExprDiag {
   start: number
   end: number
   hint?: string
-}
-
-/** Editor-only codes (not part of the compiler's table yet). */
-export const LSP_CODES: Record<string, { title: string; hint?: string }> = {
-  G171: { title: 'Невідома змінна', hint: 'Корені контексту: gate, git, fs, cursor, session, ctx, budgets, args, data і провайдери з gate.json; локальні — з as=/name=.' },
-  G172: { title: 'Невідоме поле', hint: 'Перевір назву поля або `schema` провайдера.' },
 }
 
 /** Bound local names → shape (`as=`, `name=`, Each params, `i` of Repeat, `row` of Table, Use namespaces). */
@@ -87,7 +82,7 @@ function rootShape(c: Ctx, name: string, report: boolean): Shape {
   const r = c.model.roots[name]
   if (r) return r
   if (name === 'item' || name === 'i' || name === 'it' || name === 'row') return ANY
-  if (report) push(c, { code: 'G171', severity: 'warning', message: `Невідома змінна «${name}»`, hint: LSP_CODES.G171!.hint }, name)
+  if (report) push(c, { code: 'G171', severity: 'warning', message: `Невідома змінна «${name}»`, hint: codeInfo('G171')!.hint }, name)
   return ANY
 }
 
@@ -103,7 +98,7 @@ function step(c: Ctx, s: Shape, prop: string, path: string[]): Shape {
     return ANY
   }
   const known = membersOf(s).map(([k]) => k)
-  push(c, { code: 'G172', severity: 'warning', message: `Поле «${prop}» не існує в «${path.join('.')}»${known.length ? ` (є: ${known.slice(0, 10).join(', ')})` : ''}`, hint: LSP_CODES.G172!.hint }, [...path, prop].join('.'))
+  push(c, { code: 'G172', severity: 'warning', message: `Поле «${prop}» не існує в «${path.join('.')}»${known.length ? ` (є: ${known.slice(0, 10).join(', ')})` : ''}`, hint: codeInfo('G172')!.hint }, [...path, prop].join('.'))
   return ANY
 }
 

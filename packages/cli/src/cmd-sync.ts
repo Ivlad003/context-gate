@@ -6,6 +6,7 @@
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { skillNameForRule, transpileAgentRule, transpileRuleToClaudeRule } from '../../core/src/mdc.ts'
+import { skillOverridesFor } from '../../core/src/decide.ts'
 import { buildContext, type ContextOptions } from './context.ts'
 import { renderWith } from './cmd-run.ts'
 import { posix, readJson, readText, walkFiles, writeJson, writeText } from './util.ts'
@@ -23,7 +24,7 @@ function writeIfChanged(root: string, rel: string, text: string, res: SyncResult
   res.written.push(rel)
 }
 
-export async function syncCommand(o: ContextOptions & { noPrompt?: boolean; noRules?: boolean; noOverrides?: boolean }): Promise<SyncResult> {
+export async function syncCommand(o: ContextOptions & { noPrompt?: boolean; noRules?: boolean; noOverrides?: boolean; hard?: boolean }): Promise<SyncResult> {
   const ctx = await buildContext({ ...o, dryScripts: o.dryScripts })
   const root = ctx.repo.root
   const res: SyncResult = { written: [], removed: [], unchanged: 0, overrides: {} }
@@ -62,9 +63,7 @@ export async function syncCommand(o: ContextOptions & { noPrompt?: boolean; noRu
   // ── skillOverrides for the chosen profile / tier ──
   if (!o.noOverrides) {
     const gate = ctx.gate
-    const overrides: Record<string, string> = {}
-    for (const id of gate.skills.off) overrides[id.replace(/^skill:/, '')] = 'off'
-    for (const id of gate.skills.nameOnly) overrides[id.replace(/^skill:/, '')] = 'name-only'
+    const overrides: Record<string, string> = skillOverridesFor(gate, { hard: !!o.hard })
     res.overrides = overrides
     const settingsRel = '.claude/settings.local.json'
     const statePath = join(ctx.repo.cacheDir, 'sync-state.json')

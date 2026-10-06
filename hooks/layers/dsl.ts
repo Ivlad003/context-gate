@@ -6,18 +6,20 @@
 // Prompt skills render at invocation (skill.prompt, or as tools for `invoke.model: 'tool'`).
 
 
-import type { CompiledPrompt, Diagnostic, MdcRule, RenderedSection, Scope_, SectionNode, Value } from '../../packages/core/src/types.ts'
+import type { CompiledPrompt, Diagnostic, Gate, RenderedSection, Scope_, SectionNode, Value } from '../../packages/core/src/types.ts'
 import { renderPrompt, materializeData } from '../../packages/core/src/render.ts'
-import type { RenderHostExt, RenderResultExt } from '../../packages/core/src/render.ts'
-import { parseMarkdownPrompt, resolveTierVariant, tierVariantOf } from '../../packages/core/src/mddsl.ts'
-import { argsToJsonSchema, parseArgs } from '../../packages/core/src/argparse.ts'
-import { budgetFor, tierForModel } from '../../packages/core/src/config.ts'
+import type { RenderHostExt, RenderOptionsExt, RenderResultExt } from '../../packages/core/src/render.ts'
+import { argsToJsonSchema } from '../../packages/core/src/argparse.ts'
+import { tierForModel } from '../../packages/core/src/config.ts'
+import { assemblePrompts, buildScope as coreBuildScope, defaultGate, skillArgs, type MarkdownFile, type PromptSet as AssembledSet } from '../../packages/core/src/assemble.ts'
+import { parseToolHeader } from '../../packages/core/src/toolheader.ts'
 import { computeHealth } from '../../packages/core/src/health.ts'
 import { isApplied, json } from '../state.ts'
 import { type Io, OWN_TOOL_PREFIX, type PromptSet, type Runtime, type ScriptTool, debug, hash, insideRoot, join, now, stableJson } from '../ctx.ts'
 import { ensureSession } from './config.ts'
 import { ensureRules } from './cursor-rules.ts'
-import { journal } from './journal.ts'
+import { journal, pushFileEntry } from './journal.ts'
+import { snapshotData, snapshotEntry } from '../../packages/core/src/journal.ts'
 import { allowedBinary, makeRenderHost, providerData, runArgv } from './host.ts'
 import { ensureTrust, needsTrust, repoKey, trustState } from './trust.ts'
 import { budgetSections } from './budgets.ts'
@@ -64,28 +66,15 @@ export async function loadPrompts(io: Io, rt: Runtime, opts: { force?: boolean }
       diagnostics.push({ code: 'G001', severity: 'warning', message: `${dir}/.compiled/${e.name}: ${String((err as Error).message)}`, path: `${dir}/.compiled/${e.name}` })
     }
   }
-  // Markdown: base files first, then tier variants inheriting the base's meta.
-  const tiers = Object.keys(rt.cfg.tiers ?? {})
-  const mdFiles = entries.filter((e) => e.kind === 'file' && e.name.endsWith('.md') && !/^readme\.md$/i.test(e.name)).map((e) => e.name).sort()
-  const bases = new Map<string, { base: SectionNode; variants: Record<string, SectionNode>; uses: Record<string, string> }>()
-  const variantFiles: { name: string; id: string; tier: string }[] = []
-  for (const name of mdFiles) {
-    const v = tierVariantOf(name, tiers)
-    if (v) { variantFiles.push({ name, ...v }); continue }
-    const t = await io.fs.read(`${absDir}/${name}`).catch(() => undefined)
-    if (typeof t !== 'string') continue
-    const r = parseMarkdownPrompt(t, { path: `${dir}/${name}` })
-    diagnostics.push(...r.diagnostics)
-    bases.set(name.replace(/\.md$/, ''), { base: r.section, variants: {}, uses: r.uses })
+  // Markdown sources as files; tier variants and parsing are core `assemblePrompts` (same as the CLI).
+  const markdown: MarkdownFile[] = []
+  for (const e of entries) {
+    if (e.kind !== 'file' || !e.name.endsWith('.md') || /^readme\.md$/i.test(e.name)) continue
+    const t = await io.fs.read(`${absDir}/${e.name}`).catch(() => undefined)
+    if (typeof t === 'string') markdown.push({ path: `${dir}/${e.name}`, text: t })
   }
-  for (const v of variantFiles) {
-    const b = bases.get(v.id)
-    const t = await io.fs.read(`${absDir}/${v.name}`).catch(() => undefined)
-    if (typeof t !== 'string' || !b) continue
-    const r = parseMarkdownPrompt(t, { path: `${dir}/${v.name}`, inherit: b.base })
-    diagnostics.push(...r.diagnostics)
-    b.variants[v.tier] = r.section
-  }
+  markdown.sort((x, y) => x.path.localeCompare(y.path))
+  diagnostics.push(...assemblePrompts([], markdown, '', Object.keys(rt.cfg.tiers ?? {})).diagnostics)
   // Staleness: a `.prompt.tsx` newer than its `.compiled` (or without one).
   const stale: string[] = []
   for (const e of entries) {
@@ -96,7 +85,7 @@ export async function loadPrompts(io: Io, rt: Runtime, opts: { force?: boolean }
     if (cm === undefined || cm < e.mtimeMs) stale.push(rel)
   }
   const watch = [absDir, `${absDir}/.compiled`, ...entries.filter((e) => e.kind === 'file').map((e) => `${absDir}/${e.name}`)]
-  rt.prompts = { key, compiled, markdown: [...bases.values()], stale, diagnostics, watch }
+  rt.prompts = { key, compiled, markdown, stale, diagnostics, watch }
   rt.promptsDirty = false
   return rt.prompts
 }
@@ -139,16 +128,12 @@ export async function buildStale(io: Io, rt: Runtime): Promise<void> {
 
 // ───────────────────────── scope ─────────────────────────
 
-function ruleValue(r: MdcRule): Value {
-  return { id: r.id, path: r.path, description: r.description ?? null, body: r.body, globs: r.globs }
-}
-
+/** The render scope: core `buildScope` (the CLI's too) over the session's gate, rules, ctx, data and providers. */
 export async function buildScope(io: Io, rt: Runtime, host: RenderHostExt, model: string | undefined): Promise<{ scope: Scope_; tier: string; dataKey: string }> {
-  const gate = await io.read('gate')
-  const tier = model ? tierForModel(rt.cfg, model).tier : gate?.tier ?? (await io.read('tier')) ?? 'standard'
+  const stateGate = await io.read('gate')
+  const tier = model ? tierForModel(rt.cfg, model).tier : stateGate?.tier ?? (await io.read('tier')) ?? 'standard'
   const pct = await io.read('ctxPercent')
   const fired = await io.read('budgetsFired')
-  const th = budgetFor(rt.cfg, tier)
   const owned = budgetSections(rt)
   const active = [...owned].filter(([, k]) => fired.includes(k)).map(([id]) => id)
   const repo = await io.session.repo().catch(() => null)
@@ -158,34 +143,20 @@ export async function buildScope(io: Io, rt: Runtime, host: RenderHostExt, model
   const stored = ((await io.store.get(dataKey).catch(() => undefined)) ?? {}) as Record<string, Value>
   const data = materializeData(stored, now()).data
   const branch = await readBranch(io, rt)
-  const gateValue: Value = json({
-    profile: gate?.profile ?? null,
-    proposed: gate?.proposed?.profile ?? null,
-    tier,
-    shadow: gate?.shadow ?? false,
-    off: gate?.off ?? false,
-    groups: gate?.groups ?? [],
-    skills: gate?.skills ?? { on: [], nameOnly: [], off: [], preload: [] },
-    mcp: gate?.mcp ?? { on: [], off: [] },
-    agents: gate?.agents ?? { on: [], off: [] },
-  }) as Value
-  const scope: Scope_ = {
-    ...(await providerData(io, rt, host)),
-    gate: gateValue,
-    tier,
-    git: { branch: branch ?? null, repo: repo?.name ?? null, root: rt.root },
-    repo: { name: repo?.name ?? null, root: rt.root },
-    cursor: {
-      always: rules.filter((r) => r.type === 'always').map(ruleValue),
-      auto: rules.filter((r) => r.type === 'auto').map(ruleValue),
-      agent: rules.filter((r) => r.type === 'agent').map(ruleValue),
-      manual: rules.filter((r) => r.type === 'manual').map(ruleValue),
-    },
-    ctx: { percent: pct ?? 0 },
-    budgets: { soft: th.softContextPct, hard: th.hardContextPct, fired, active },
-    session: { model: model ?? (await io.read('model')) ?? null, tier, interactive: rt.interactive, print: !rt.interactive },
-    data,
-  }
+  const gate: Gate = stateGate ? { ...(stateGate as unknown as Gate), tier } : defaultGate(tier)
+  const providers = await providerData(io, rt, host)
+  const scope = coreBuildScope({
+    config: rt.cfg,
+    gate,
+    git: { branch: branch ?? '' },
+    rules,
+    session: { model: model ?? (await io.read('model')) ?? '', root: rt.root, interactive: rt.interactive },
+    ...(pct !== null && pct !== undefined ? { ctxPercent: pct } : {}),
+    data: data as Value,
+    budgetsFired: fired,
+    budgetsActive: active,
+    providers: { ...providers, tier, repo: { name: repo?.name ?? null, root: rt.root } },
+  }) as Scope_
   return { scope, tier, dataKey }
 }
 
@@ -205,7 +176,7 @@ async function itemBodyOf(io: Io, rt: Runtime, kind: 'skill' | 'rule', name: str
 
 export async function hostFor(io: Io, rt: Runtime): Promise<RenderHostExt> {
   const trusted = (await trustState(io, rt)) === 'trusted'
-  return makeRenderHost(io, rt, { trusted, repoKey: await repoKey(io, rt), itemBody: (kind, name) => itemBodyOf(io, rt, kind, name) })
+  return makeRenderHost(io, rt, { trusted, repoKey: await repoKey(io, rt), itemBody: (kind, name) => itemBodyOf(io, rt, kind, name), rules: () => ensureRules(io, rt) })
 }
 
 async function persistData(io: Io, dataKey: string, res: RenderResultExt): Promise<void> {
@@ -216,20 +187,14 @@ async function persistData(io: Io, dataKey: string, res: RenderResultExt): Promi
 
 // ───────────────────────── compose ─────────────────────────
 
-/** Sections to render: compiled prompts (skill bodies excluded) + Markdown sections resolved for the tier. */
-function sectionsFor(set: PromptSet, tier: string): { prompts: CompiledPrompt[]; uses: Record<string, string> } {
-  const prompts: CompiledPrompt[] = set.compiled.map((p) => {
-    const { skill: _skill, ...rest } = p
-    return rest as CompiledPrompt
-  })
-  const uses: Record<string, string> = {}
-  const md: SectionNode[] = []
-  for (const m of set.markdown) {
-    Object.assign(uses, m.uses)
-    md.push(resolveTierVariant(m.base, m.variants, tier))
-  }
-  if (md.length) prompts.push({ version: 1, compiler: 'markdown', id: 'markdown', sourceHash: '', sources: [], sections: md, diagnostics: [] })
-  return { prompts, uses }
+/** Sections to render: core `assemblePrompts` (compiled system prompts, then Markdown resolved for the tier; skills apart). */
+export function sectionsFor(rt: Runtime, set: PromptSet, tier: string): AssembledSet {
+  return assemblePrompts(set.compiled, set.markdown, tier, Object.keys(rt.cfg.tiers ?? {}))
+}
+
+/** Render options shared with `context-gate run` (`renderWith`), plus the mod's 2 s script budget. */
+export function renderOptions(rt: Runtime, tier: string): RenderOptionsExt {
+  return { tier, runBudgetMs: 2000, ...(rt.cfg.prompt?.runCacheDefault ? { runCacheDefault: rt.cfg.prompt.runCacheDefault } : {}), ...(rt.cfg.debug ? { debug: true } : {}) }
 }
 
 async function preloadSection(io: Io, rt: Runtime): Promise<{ id: string; text: string } | undefined> {
@@ -264,8 +229,7 @@ export async function composeSections(io: Io, rt: Runtime, model: string | undef
   set = await syncBuild(io, rt, set)
   const out: { id: string; text: string; scope: 'session' }[] = []
   const preload = await preloadSection(io, rt)
-  const { prompts, uses } = sectionsFor(set, '')
-  const hasSections = prompts.some((p) => p.sections.length)
+  const hasSections = set.compiled.some((p) => !p.skill && p.sections.length) || set.markdown.length > 0
   if (!hasSections) {
     if (preload) out.push({ id: SECTION_PREFIX + preload.id, text: preload.text, scope: 'session' })
     rt.lastSections = out
@@ -273,8 +237,8 @@ export async function composeSections(io: Io, rt: Runtime, model: string | undef
   }
   const host = await hostFor(io, rt)
   const { scope, tier, dataKey } = await buildScope(io, rt, host, model)
-  const tiered = sectionsFor(set, tier)
-  const res = await renderPrompt(tiered.prompts, scope, host, { tier, uses: { ...uses, ...tiered.uses }, runBudgetMs: 2000, runCacheDefault: rt.cfg.prompt?.runCacheDefault ?? '5m' })
+  const tiered = sectionsFor(rt, set, tier)
+  const res = await renderPrompt(tiered.system, scope, host, renderOptions(rt, tier))
   await persistData(io, dataKey, res)
   // Budget-owned sections appear only while their threshold is crossed.
   const owned = budgetSections(rt)
@@ -292,14 +256,39 @@ export async function composeSections(io: Io, rt: Runtime, model: string | undef
   }
   if (!staticDone && preload) out.push({ id: SECTION_PREFIX + preload.id, text: preload.text, scope: 'session' })
   await recordHealth(io, rt, res, set)
+  await writeSnapshot(io, rt, scope, tier, out)
   rt.lastSections = out
   return { sections: out, result: res }
+}
+
+/** Session id, model and ctx percent for journal snapshots (`context-gate run --ctx-from session:…`). */
+async function snapshotMeta(io: Io, rt: Runtime): Promise<{ sessionId: string; model: string; ctxPercent: number }> {
+  const sessionId = await io.session.id().catch(() => '')
+  const model = (await io.read('model')) ?? (await io.session.model().catch(() => '')) ?? ''
+  return { sessionId, model, ctxPercent: (await io.read('ctxPercent')) ?? 0 }
+}
+
+/** With `log.file`: a `snapshot` entry (core contract) per changed compose; file only, never the state ring. */
+async function writeSnapshot(io: Io, rt: Runtime, scope: Scope_, tier: string, sections: readonly { text: string }[]): Promise<void> {
+  if (!rt.cfg?.log?.file) return
+  try {
+    const meta = await snapshotMeta(io, rt)
+    const gate = await io.read('gate')
+    const data = snapshotData({ ...meta, tier, profile: gate?.profile ?? null, scope: scope as Record<string, Value>, text: sections.map((s) => s.text).join('\n\n') })
+    const key = hash(stableJson(data))
+    if (rt.lastSnapshot === key) return
+    rt.lastSnapshot = key
+    const turn = (await io.read('gateState')).turn
+    await pushFileEntry(io, rt, snapshotEntry(data, { ts: now(), turn }))
+  } catch (err) {
+    debug(io, `snapshot: ${String((err as Error)?.message ?? err)}`)
+  }
 }
 
 /** Static sections render once per session per node hash: the first text is kept (prompt cache). */
 function staticText(rt: Runtime, s: RenderedSection, tier: string): string {
   if (s.scope !== 'static') return s.text
-  const node = rt.prompts?.compiled.flatMap((p) => p.sections).find((x) => x.id === s.id) ?? rt.prompts?.markdown.find((m) => m.base.id === s.id)?.base
+  const node = rt.prompts ? sectionsFor(rt, rt.prompts, tier).system.flatMap((p) => p.sections).find((x) => x.id === s.id) : undefined
   const key = hash(stableJson(node ?? s.id) + '|' + tier)
   const c = rt.staticCache.get(s.id)
   if (c && c.hash === key) return c.text
@@ -348,15 +337,15 @@ export function argsFromText(text: string): string | undefined {
 
 export async function renderSkill(io: Io, rt: Runtime, prompt: CompiledPrompt, input: string | Record<string, unknown>): Promise<string> {
   const skill = prompt.skill!
-  const parsed = parseArgs(input, skill.args, { name: `/${skill.name}` })
-  if (!parsed.ok) return parsed.error
+  const parsed = skillArgs(prompt, input)
+  if (!parsed.ok) return parsed.text
   const host = await hostFor(io, rt)
   const { scope, tier } = await buildScope(io, rt, host, undefined)
-  scope.args = json(parsed.args) as Value
+  scope.args = parsed.args
   const section: SectionNode = { id: skill.name, scope: 'volatile', children: skill.body }
-  const res = await renderPrompt([section], scope, host, { tier, uses: prompt.uses ?? {}, runBudgetMs: 2000, runCacheDefault: rt.cfg.prompt?.runCacheDefault ?? '5m' })
+  const res = await renderPrompt([section], scope, host, { ...renderOptions(rt, tier), uses: prompt.uses ?? {} })
   const s = res.sections[0]
-  await journal(io, rt, { kind: 'skill-render', trigger: 'skill', tier, data: { skill: skill.name, args: JSON.stringify(parsed.args).slice(0, 500), ms: res.ms, chars: s?.chars ?? 0, status: s?.status ?? 'fail' } })
+  await journal(io, rt, { kind: 'skill-render', trigger: 'skill', tier, data: { ...(await snapshotMeta(io, rt)), skill: skill.name, args: parsed.args, ms: res.ms, chars: s?.chars ?? 0, status: s?.status ?? 'fail' } })
   if (!s || !s.included) return `Skill ${skill.name}: ${s?.reason ?? 'не відрендерено'}${res.diagnostics.length ? ` (${res.diagnostics.slice(0, 3).map((d) => `${d.code} ${d.message}`).join('; ')})` : ''}`
   return s.text
 }
@@ -377,34 +366,11 @@ export async function registerSkillTools(io: Io, rt: Runtime): Promise<void> {
   }
 }
 
-/** `# gate-tool: name` headers in `<dir>/scripts/*` (trusted repos only). */
+/** `# gate-tool: name` headers in `<dir>/scripts/*` (trusted repos only): core `parseToolHeader`, as the CLI. */
 export function parseScriptHeader(text: string, path: string): ScriptTool | undefined {
-  const head = text.split('\n').slice(0, 20)
-  const field = (k: string): string | undefined => {
-    for (const l of head) {
-      const m = new RegExp(`^\\s*(?:#|//)\\s*${k}:\\s*(.+?)\\s*$`).exec(l)
-      if (m) return m[1]
-    }
-    return undefined
-  }
-  const name = field('gate-tool')
-  if (!name || !/^[\w-]+$/.test(name)) return undefined
-  let input: Record<string, string> = {}
-  const raw = field('input')
-  if (raw) {
-    try {
-      const v = JSON.parse(raw) as Record<string, unknown>
-      input = Object.fromEntries(Object.entries(v).map(([k, t]) => [k, String(t)]))
-    } catch { input = {} }
-  }
-  const tiers = field('tiers')?.split(/[\s,]+/).filter(Boolean)
-  return { name, description: field('description') ?? name, path, input, ...(tiers?.length ? { tiers } : {}) }
-}
-
-function scriptSchema(input: Record<string, string>): Record<string, unknown> {
-  const properties: Record<string, unknown> = {}
-  for (const [k, t] of Object.entries(input)) properties[k] = { type: ['string', 'number', 'boolean', 'array', 'object'].includes(t) ? t : 'string' }
-  return { type: 'object', properties, additionalProperties: false }
+  const { header } = parseToolHeader(text)
+  if (!header) return undefined
+  return { name: header.name, description: header.description ?? header.name, path, inputSchema: header.inputSchema, ...(header.tiers ? { tiers: header.tiers } : {}) }
 }
 
 export async function registerScriptTools(io: Io, rt: Runtime): Promise<void> {
@@ -421,7 +387,7 @@ export async function registerScriptTools(io: Io, rt: Runtime): Promise<void> {
     const full = OWN_TOOL_PREFIX + tool.name
     if (rt.tools.has(full)) continue
     rt.tools.set(full, { kind: 'script', tool })
-    await io.tool.register({ name: tool.name, description: tool.description, inputSchema: scriptSchema(tool.input) }).catch((err: unknown) => debug(io, `script tool ${tool.name}: ${String(err)}`))
+    await io.tool.register({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }).catch((err: unknown) => debug(io, `script tool ${tool.name}: ${String(err)}`))
   }
 }
 
@@ -442,7 +408,7 @@ async function lazyText(io: Io, rt: Runtime, ref: string): Promise<string> {
     const set = await loadPrompts(io, rt)
     const host = await hostFor(io, rt)
     const { scope, tier } = await buildScope(io, rt, host, undefined)
-    const res = await renderPrompt(sectionsFor(set, tier).prompts, scope, host, { tier, only: id })
+    const res = await renderPrompt(sectionsFor(rt, set, tier).system, scope, host, { ...renderOptions(rt, tier), only: id })
     return res.sections.find((s) => s.id === id)?.text || `Секцію ${id} не знайдено`
   }
   const m = /^(skill|rule):(.+)$/.exec(ref)

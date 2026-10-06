@@ -1,8 +1,9 @@
 // Shared CLI preview helpers (VS Code panel, browser editor): argv for
-// `context-gate run --only <id> --json --dry-scripts` and a tolerant parser of its JSON output.
+// `context-gate run --only <id> --json --dry-scripts` and the parser of its RunJson output (core runjson.ts).
 
 import { execFile } from 'node:child_process'
 import type { Diagnostic, TraceEntry } from '../../core/src/types.ts'
+import { parseRunJson } from '../../core/src/runjson.ts'
 
 export interface PreviewState {
   section: string
@@ -40,28 +41,16 @@ export interface RunView {
   error?: string
 }
 
-/** Parse `run --json` stdout (tolerates log lines before the JSON object). */
+/** Parse `run --json` stdout (core `parseRunJson`: the RunJson shape; log lines before the JSON are skipped). */
 export function parseRunOutput(stdout: string, stderr = '', exitCode: number | null = 0): RunView {
   const empty: RunView = { text: '', sections: [], trace: [], diagnostics: [] }
-  const i = stdout.indexOf('{')
-  if (i < 0) return { ...empty, error: (stderr || stdout || `context-gate завершився з кодом ${exitCode}`).trim() }
-  try {
-    const j = JSON.parse(stdout.slice(i)) as Record<string, unknown>
-    const r = (j.result && typeof j.result === 'object' ? j.result : j) as Record<string, unknown>
-    const sections = Array.isArray(r.sections) ? (r.sections as RunView['sections']) : []
-    const text = typeof r.text === 'string' ? r.text : sections.map((s) => s.text ?? '').join('\n\n')
-    const view: RunView = {
-      text,
-      sections,
-      trace: Array.isArray(r.trace) ? (r.trace as TraceEntry[]) : [],
-      diagnostics: Array.isArray(r.diagnostics) ? (r.diagnostics as Diagnostic[]) : [],
-    }
-    if (typeof r.ms === 'number') view.ms = r.ms
-    if (exitCode && exitCode !== 0 && !sections.length) view.error = (stderr || `код ${exitCode}`).trim()
-    return view
-  } catch (e) {
-    return { ...empty, error: `Невірний JSON від context-gate: ${(e as Error).message}\n${(stderr || stdout).slice(0, 2000)}` }
-  }
+  if (stdout.indexOf('{') < 0) return { ...empty, error: (stderr || stdout || `context-gate завершився з кодом ${exitCode}`).trim() }
+  const parsed = parseRunJson(stdout)
+  if ('error' in parsed) return { ...empty, error: `${parsed.error} (context-gate)\n${(stderr || stdout).slice(0, 2000)}` }
+  const j = parsed.json
+  const view: RunView = { text: j.text, sections: j.sections, trace: j.trace, diagnostics: j.diagnostics, ms: j.ms }
+  if (exitCode && exitCode !== 0 && !j.sections.length) view.error = (stderr || `код ${exitCode}`).trim()
+  return view
 }
 
 /** Run the CLI and parse its JSON. Never rejects. */

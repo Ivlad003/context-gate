@@ -12,6 +12,9 @@ node --experimental-strip-types bench/run.ts --repos path/to/other-repos.json
 
 ## repos.json
 
+`repos.json` is the single list of bench repos. `node dist/cli.js bench` (no dirs) reads it too, with each repo's
+`profile` / `model` / `tier` unless the flags override them; the subdirectories of `bench/` are not repos.
+
 ```json
 { "repos": [ { "name": "basic", "dir": "examples/basic", "profile": "frontend", "model": "claude-sonnet-4-6" } ] }
 ```

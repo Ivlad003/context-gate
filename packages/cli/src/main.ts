@@ -20,32 +20,14 @@ import { expandCommand, schemaInferCommand } from './cmd-expand.ts'
 import { indexCommand } from './cmd-index.ts'
 import { formatPrompt } from './fmt.ts'
 import { loadData, loadRepo, setData, validDataKey, scriptFiles } from './context.ts'
-import { parseToolHeader } from './scripts.ts'
+import { parseToolHeader } from '../../core/src/toolheader.ts'
 import { readTrust, setTrust, trustState, readUserSettings, userSettingsPath, trustPath, binaryWhitelist, repoCacheDir } from './settings.ts'
 import { findRoot, parseJsonl, posix, readStdin, readText, walkFiles, writeText, writeJson } from './util.ts'
 
 export const VERSION: string = (pkg as { version: string }).version
 
-/** CLI-level diagnostic codes (G2xx run/providers) not yet in core codes.ts. */
-export const CLI_CODES: Record<string, { title: string; explain: string; hint?: string }> = {
-  G201: { title: 'Бінарник поза білим списком', explain: 'Виконавець, shim або cli-провайдер запускає програму, якої немає в `allowBinaries` у ~/.claude/context-gate.json (за замовчуванням bash, sh, node, python3, python, deno, git). Репозиторій список лише звужує.', hint: 'Додай бінарник у allowBinaries користувацьких налаштувань.' },
-  G202: { title: 'Немає виконавця для мови', explain: '`@run <мова>` або `<Run lang>` посилається на мову, якої немає в `executors` (вбудовані: bash, node, python, deno).', hint: 'Додай `executors.<мова>` у gate.json.' },
-  G203: { title: 'Провайдер завершився з помилкою', explain: 'cli/file/module-провайдер не повернув даних. Далі діє `onError`: unverified — значення null; skip — секцію пропущено; fail — рендер завершується з кодом 1.' },
-  G204: { title: 'Репозиторій не довірений', explain: 'До підтвердження довіри (Р2) CLI не запускає процесів репозиторію: @run/@call рендеряться заглушками, cli/module-провайдери дають null.', hint: 'context-gate trust grant або --trust-repo.' },
-  G205: { title: 'MCP недоступний у CLI', explain: 'Провайдери kind=mcp і @mcp працюють лише всередині Claude Code (mod викликає $.mcp.call). У CLI значення unverified.' },
-  G206: { title: 'Контекст --ctx-from не знайдено', explain: 'Знімок session:<id> відсутній у .claude/gate.log.jsonl або fixture не є JSON-об\'єктом.' },
-  G210: { title: 'Файл для @include не знайдено', explain: 'Шлях @include/<Include path> не існує відносно кореня репозиторію.' },
-  G211: { title: 'Секцію або елемент не знайдено', explain: '@section/@skill/@rule або --only посилається на id, якого немає.' },
-  G220: { title: 'Невірне ім\'я gate-tool', explain: 'Заголовок `# gate-tool:` має містити ім\'я з латиниці, цифр, _ або -.' },
-  G221: { title: 'Невірний input у gate-tool', explain: '`# input:` має бути JSON: скорочення `{ "path": "string" }` або повна JSON Schema.' },
-}
-
 function explainAny(code: string): string {
-  const c = code.trim().toUpperCase()
-  if (CODES[c]) return explainCode(c) + '\n'
-  const x = CLI_CODES[c]
-  if (x) return `${c} — ${x.title}\n\n${x.explain}${x.hint ? `\n\nПідказка: ${x.hint}` : ''}\n`
-  return explainCode(c) + '\n'
+  return explainCode(code) + '\n'
 }
 
 interface Io { out(s: string): void; err(s: string): void; stdin(): Promise<string> }
@@ -220,7 +202,7 @@ export const COMMANDS: Record<string, Command> = {
       const c = p.positional[0]
       if (!c) { io.err('використання: context-gate explain <code>\n'); return 2 }
       io.out(explainAny(c))
-      return CODES[c.toUpperCase()] || CLI_CODES[c.toUpperCase()] ? 0 : 1
+      return CODES[c.trim().toUpperCase()] ? 0 : 1
     },
   },
   fmt: {
@@ -266,10 +248,10 @@ export const COMMANDS: Record<string, Command> = {
   sync: {
     summary: 'static-адаптер без mods: .mdc → .claude/rules/cursor + skills, профіль → skillOverrides, DSL → prompt.generated.md',
     usage: ['sync [--profile p] [--tier t] [--watch]'],
-    flags: { ...ctxFlags, watch: { type: 'bool', desc: 'перегенеровувати при змінах' }, json: { type: 'bool', desc: 'результат JSON' }, 'no-prompt': { type: 'bool', desc: 'без prompt.generated.md' }, 'no-overrides': { type: 'bool', desc: 'без skillOverrides' } },
+    flags: { ...ctxFlags, watch: { type: 'bool', desc: 'перегенеровувати при змінах' }, json: { type: 'bool', desc: 'результат JSON' }, 'no-prompt': { type: 'bool', desc: 'без prompt.generated.md' }, 'no-overrides': { type: 'bool', desc: 'без skillOverrides' }, hard: { type: 'bool', desc: 'вимкнені skills → off (інакше user-invocable-only: /name лишається)' } },
     async run(p, root, io) {
       const once = async (): Promise<number> => {
-        const r = await syncCommand({ ...ctxOpts(p, root), noPrompt: bool(p, 'no-prompt'), noOverrides: bool(p, 'no-overrides') })
+        const r = await syncCommand({ ...ctxOpts(p, root), noPrompt: bool(p, 'no-prompt'), noOverrides: bool(p, 'no-overrides'), hard: bool(p, 'hard') })
         io.out(bool(p, 'json') ? JSON.stringify(r) + '\n' : formatSync(r))
         return 0
       }
@@ -351,7 +333,7 @@ export const COMMANDS: Record<string, Command> = {
     },
   },
   bench: {
-    summary: 'токени промпту й елементів до/після gate, unverified — по bench/* або заданих теках',
+    summary: 'токени промпту й елементів до/після gate, unverified — по bench/repos.json або заданих теках',
     usage: ['bench [--before] [--after] [dirs…] [--profile p] [--tier t] [--json]'],
     flags: { before: { type: 'bool', desc: 'колонка без gate' }, after: { type: 'bool', desc: 'колонка з gate' }, json: { type: 'bool', desc: 'JSON' }, profile: ctxFlags.profile!, tier: ctxFlags.tier!, model: ctxFlags.model! },
     async run(p, root, io) {

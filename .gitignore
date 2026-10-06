@@ -1,6 +1,13 @@
 node_modules/
 dist/
 .claude/prompt/.compiled/
+.claude/prompt/.trace/
+**/.claude/prompt/.compiled/
+**/.claude/prompt/.trace/
 .claude/gate.debug.log
 .claude-plugin/types/
 hooks/.types/
+editors/vscode/node_modules/
+editors/vscode/dist/
+editors/vscode/*.vsix
+packages/lsp/dist/

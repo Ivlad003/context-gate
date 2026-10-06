@@ -5,8 +5,9 @@ import { join, relative } from 'node:path'
 import type { CompiledPrompt, Diagnostic, Node, RenderResult, Value } from '../../core/src/types.ts'
 import { renderPrompt, formatTrace, isDataEnvelope, type RenderOptionsExt } from '../../core/src/render.ts'
 import { computeHealth, formatHealth } from '../../core/src/health.ts'
+import type { RunJson, RunJsonMeta } from '../../core/src/runjson.ts'
 import { buildPrompts, checkStale } from './build.ts'
-import { sectionText, skillArgs } from './assemble.ts'
+import { sectionText, skillArgs } from '../../core/src/assemble.ts'
 import { buildContext, setData, type ContextOptions, type RenderContext } from './context.ts'
 import { lineDiff, posix, readJson, writeJson, fileExists } from './util.ts'
 
@@ -116,27 +117,38 @@ function outputText(r: Rendered, markers: boolean): string {
   return markers ? sectionText(r.result.sections, true) : r.result.text
 }
 
-export function jsonOf(ctx: RenderContext, r: Rendered, diagnostics: Diagnostic[]): Record<string, unknown> {
-  return {
-    ok: !r.usage && !diagnostics.some((d) => d.severity === 'error'),
-    mode: r.mode,
-    ...(r.id ? { id: r.id } : {}),
-    tier: ctx.tier,
-    profile: ctx.gate.profile ?? null,
-    source: ctx.source,
-    trusted: ctx.host.trusted,
-    text: outputText(r, false),
-    ...(r.usage ? { usage: r.usage } : {}),
+/** The `run --json` object (core RunJson): what stdout prints and `.trace/last.json` holds. */
+export function jsonOf(ctx: RenderContext, r: Rendered, diagnostics: Diagnostic[], extra: Partial<RunJsonMeta> = {}): RunJson {
+  const out: RunJson = {
     sections: r.result.sections,
+    text: outputText(r, false),
     trace: r.result.trace,
     diagnostics,
     ms: r.result.ms,
-    stored: r.result.stored,
-    lazies: ctx.host.lazies,
-    gate: { profile: ctx.gate.profile ?? null, tier: ctx.gate.tier, trigger: ctx.gate.trigger, groups: ctx.gate.groups, reason: ctx.gate.reason },
     scope: ctx.scope,
-    at: Date.now(),
+    meta: {
+      ok: !r.usage && !diagnostics.some((d) => d.severity === 'error'),
+      mode: r.mode,
+      ...(r.id ? { id: r.id } : {}),
+      tier: ctx.tier,
+      profile: ctx.gate.profile ?? null,
+      source: ctx.source,
+      trusted: ctx.host.trusted,
+      ...(r.usage ? { usage: r.usage } : {}),
+      stored: r.result.stored,
+      lazies: ctx.host.lazies,
+      gate: { profile: ctx.gate.profile ?? null, tier: ctx.gate.tier, trigger: ctx.gate.trigger, groups: ctx.gate.groups, reason: ctx.gate.reason },
+      at: Date.now(),
+      ...extra,
+    },
   }
+  if (r.mode === 'prompt' && !r.usage) out.health = computeHealth(r.result, undefined, {}, ctx.repo.config.health ?? {})
+  return out
+}
+
+/** `.claude/prompt/.trace/last.json`: the last run's RunJson (scope included) for the LSP and the editors. */
+function writeTrace(ctx: RenderContext, j: RunJson): void {
+  try { writeJson(join(ctx.repo.root, ctx.repo.promptDir, '.trace', 'last.json'), j) } catch { /* read-only repo */ }
 }
 
 export async function runCommand(o: RunOptions): Promise<RunOutcome> {
@@ -162,13 +174,15 @@ export async function runCommand(o: RunOptions): Promise<RunOutcome> {
     const snapCtx = await buildContext({ ...o, ctxFrom: o.diff })
     const prev = snapCtx.snapshot?.text ?? (await renderWith(snapCtx, { ...(o.id ? { id: o.id } : {}), ...(o.only ? { only: o.only } : {}), ...(o.argsRaw !== undefined ? { argsRaw: o.argsRaw } : {}) })).result.text
     const d = lineDiff(prev, outputText(r, false))
-    stdout = o.json ? JSON.stringify({ ...jsonOf(ctx, r, diagnostics), diff: d, against: o.diff }) + '\n' : (d ? d + '\n' : `без змін відносно ${o.diff}\n`)
+    const j = jsonOf(ctx, r, diagnostics, { diff: d, against: o.diff })
+    writeTrace(ctx, j)
+    stdout = o.json ? JSON.stringify(j) + '\n' : (d ? d + '\n' : `без змін відносно ${o.diff}\n`)
     return { code, stdout, stderr, result: r.result, ctx }
   }
 
+  const j = jsonOf(ctx, r, diagnostics)
+  writeTrace(ctx, j)
   if (o.json) {
-    const j = jsonOf(ctx, r, diagnostics)
-    try { writeJson(join(ctx.repo.root, ctx.repo.promptDir, '.trace', 'last.json'), j) } catch { /* read-only repo */ }
     stdout = JSON.stringify(j) + '\n'
     return { code, stdout, stderr, result: r.result, ctx }
   }
@@ -179,7 +193,6 @@ export async function runCommand(o: RunOptions): Promise<RunOutcome> {
     if (ctx.host.lazies.length) lines.push('', 'Ліниві інструменти: ' + ctx.host.lazies.map((l) => `${l.name} (${l.ref})`).join(', '))
     if (written.length) lines.push('', 'Збережено: ' + written.join(', '))
     stdout += lines.join('\n') + '\n'
-    try { writeJson(join(ctx.repo.root, ctx.repo.promptDir, '.trace', 'last.json'), jsonOf(ctx, r, diagnostics)) } catch { /* read-only repo */ }
   } else {
     for (const d of diagnostics.filter((x) => x.severity === 'error')) stderr += `${d.code} ${d.message}${d.hint ? ` (${d.hint})` : ''}\n`
   }

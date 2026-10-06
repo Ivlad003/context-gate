@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import type { GateConfig } from '../../core/src/types.ts'
+import { binaryWhitelist as coreWhitelist } from '../../core/src/config.ts'
 import { readJson, sha256, writeJson } from './util.ts'
 
 export interface UserSettings {
@@ -16,8 +17,7 @@ export interface UserSettings {
   allowScripts?: boolean
 }
 
-/** Used when `~/.claude/context-gate.json` has no `allowBinaries`: the default executors and git. */
-export const DEFAULT_BINARIES = ['bash', 'sh', 'node', 'python3', 'python', 'deno', 'git']
+export { DEFAULT_BINARIES } from '../../core/src/config.ts'
 
 export function homeDir(): string {
   return process.env.HOME || homedir()
@@ -33,8 +33,7 @@ export function readUserSettings(): UserSettings {
 
 /** Effective whitelist: user list (or defaults) ∩ repo narrowing (`executors` commands, when the repo declares any). */
 export function binaryWhitelist(user: UserSettings, repoNarrow?: string[]): Set<string> {
-  const base = user.allowBinaries ?? DEFAULT_BINARIES
-  return new Set(repoNarrow ? base.filter((b) => repoNarrow.includes(b)) : base)
+  return new Set(coreWhitelist(user.allowBinaries, repoNarrow))
 }
 
 export function binaryName(cmd: string): string {

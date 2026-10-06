@@ -3,10 +3,13 @@
 // io.mcp.call (trusted only), cache/data via io.store, lazy includes as registered tools.
 // Repo text is data: code reaches executors only as the AST's own `run` code; inputs go through stdin.
 
-import type { ExecutorConfig, Value } from '../../packages/core/src/types.ts'
+import type { ExecutorConfig, MdcRule, Value } from '../../packages/core/src/types.ts'
 import type { ProviderCallRequest, RenderHostExt } from '../../packages/core/src/render.ts'
-import { compileGlob, hasGlobChars } from '../../packages/core/src/glob.ts'
+import { hasGlobChars } from '../../packages/core/src/glob.ts'
+import { exampleValue, selectExamples } from '../../packages/core/src/examples.ts'
+import { cursorMatch } from '../../packages/core/src/assemble.ts'
 import { parseDuration } from '../../packages/core/src/duration.ts'
+import { binaryWhitelist } from '../../packages/core/src/config.ts'
 import { type Io, OWN_TOOL_PREFIX, type Runtime, debug, insideRoot, join, now } from '../ctx.ts'
 
 export const DEFAULT_EXECUTORS: Record<string, ExecutorConfig> = {
@@ -16,9 +19,6 @@ export const DEFAULT_EXECUTORS: Record<string, ExecutorConfig> = {
   js: { command: ['node', '--input-type=module', '-e', '{code}'], timeout: '10s' },
   python: { command: ['python3', '-c', '{code}'], timeout: '20s', env: { PYTHONDONTWRITEBYTECODE: '1' } },
 }
-
-/** Binaries allowed when `~/.claude/context-gate.json` has no `binaries` list. */
-export const DEFAULT_WHITELIST = ['bash', 'sh', 'node', 'python3', 'python', 'deno', 'uv', 'git', 'jq']
 
 const NODE_SHIM = [
   "import { pathToFileURL } from 'node:url';",
@@ -37,23 +37,24 @@ const PY_SHIM = [
   "print(json.dumps([getattr(m, c['fn'])(*c['args'], **(c.get('kwargs') or {})) for c in d['calls']]))",
 ].join('\n')
 
+/** User `~/.claude/context-gate.json` `allowBinaries` (or core DEFAULT_BINARIES), narrowed by gate.json `allowBinaries`: core `binaryWhitelist`, as the CLI. */
 export async function loadWhitelist(io: Io, rt: Runtime): Promise<string[]> {
   if (rt.whitelist) return rt.whitelist
-  let list = DEFAULT_WHITELIST
+  let user: string[] | undefined
   try {
     const home = await io.env.home()
     if (home) {
       const t = await io.fs.read(`${home}/.claude/context-gate.json`).catch(() => undefined)
       if (typeof t === 'string') {
-        const v = JSON.parse(t) as { binaries?: unknown }
-        if (Array.isArray(v.binaries)) list = v.binaries.filter((x): x is string => typeof x === 'string')
+        const v = JSON.parse(t) as { allowBinaries?: unknown }
+        if (Array.isArray(v.allowBinaries)) user = v.allowBinaries.filter((x): x is string => typeof x === 'string')
       }
     }
   } catch (err) {
     debug(io, `whitelist read failed: ${String(err)}`)
   }
-  rt.whitelist = list
-  return list
+  rt.whitelist = binaryWhitelist(user, rt.cfg?.allowBinaries)
+  return rt.whitelist
 }
 
 const binOf = (argv: readonly string[]): string => (argv[0] ?? '').split(/[\\/]/).pop() ?? ''
@@ -80,7 +81,7 @@ function parseOut(stdout: string): Value {
   try { return JSON.parse(t) as Value } catch { return t }
 }
 
-/** Walk the static prefix of a glob and take the `n` smallest matching files (deterministic). */
+/** Walk the static prefix of a glob, then core `selectExamples` / `exampleValue` (the CLI's `fs.examples` too). */
 async function examples(io: Io, rt: Runtime, glob: string, n: number): Promise<Value> {
   const segs = glob.split('/')
   const prefix: string[] = []
@@ -88,7 +89,6 @@ async function examples(io: Io, rt: Runtime, glob: string, n: number): Promise<V
   if (prefix.length === segs.length) prefix.pop()
   const base = prefix.join('/')
   if (!insideRoot(base || '.')) return []
-  const match = compileGlob(glob)
   const found: { path: string; size: number }[] = []
   const queue: { rel: string; depth: number }[] = [{ rel: base, depth: 0 }]
   let visited = 0
@@ -99,14 +99,13 @@ async function examples(io: Io, rt: Runtime, glob: string, n: number): Promise<V
     for (const e of entries) {
       const p = rel ? `${rel}/${e.name}` : e.name
       if (e.kind === 'dir' && !e.isLink && depth < 8 && !e.name.startsWith('.') && e.name !== 'node_modules') queue.push({ rel: p, depth: depth + 1 })
-      else if (e.kind === 'file' && match(p)) found.push({ path: p, size: e.size })
+      else if (e.kind === 'file') found.push({ path: p, size: e.size })
     }
   }
-  found.sort((a, b) => a.size - b.size || (a.path < b.path ? -1 : 1))
   const out: Value[] = []
-  for (const f of found.slice(0, Math.max(0, Math.min(n, 20)))) {
+  for (const f of selectExamples(found, glob, Math.min(n, 20))) {
     const body = await io.fs.read(join(rt.root, f.path)).catch(() => '')
-    out.push({ path: f.path, size: f.size, body: typeof body === 'string' ? body.slice(0, 8000) : '' })
+    out.push(exampleValue(f, typeof body === 'string' ? body : ''))
   }
   return out
 }
@@ -124,13 +123,15 @@ export interface HostDeps {
   repoKey: string
   /** Section text by id for `prompt://` lazy refs. */
   itemBody: RenderHostExt['itemBody']
+  /** Parsed `.mdc` rules for `cursor.match(path)`. */
+  rules: () => Promise<MdcRule[]>
 }
 
 export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): RenderHostExt {
   const cfg = rt.cfg
   const executors = { ...DEFAULT_EXECUTORS, ...(cfg.executors ?? {}) }
   const providers = cfg.providers ?? {}
-  const callables = ['fs.examples', 'git.log']
+  const callables = ['fs.examples', 'git.log', 'cursor.match']
   for (const [name, p] of Object.entries(providers)) {
     if (p.kind === 'cli' && p.functions && !Array.isArray(p.functions)) for (const fn of Object.keys(p.functions)) callables.push(`${name}.${fn}`)
   }
@@ -190,7 +191,8 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): RenderHostE
     },
     itemBody: deps.itemBody,
     async provider(req: ProviderCallRequest) {
-      if (req.path === 'fs.examples') return examples(io, rt, String(req.args[0] ?? ''), Number(req.args[1] ?? 1))
+      if (req.path === 'fs.examples') return examples(io, rt, String(req.args[0] ?? '**/*'), typeof req.args[1] === 'number' ? req.args[1] : 1)
+      if (req.path === 'cursor.match') return cursorMatch(await deps.rules(), String(req.args[0] ?? ''), { nocase: rt.windows })
       if (req.path === 'git.log') {
         const n = Math.max(1, Math.min(50, Number(req.args[0] ?? 5)))
         const r = await runArgv(io, rt, ['git', 'log', '--oneline', `-${n}`], { timeoutMs: 5000 })

@@ -4,6 +4,7 @@
 // parsed JSON / text; no Node imports here.
 
 import type { Diagnostic, GateConfig, Scope_, TraceEntry, Value } from '../../core/src/types.ts'
+import type { RunJson } from '../../core/src/runjson.ts'
 
 export type Shape =
   | { k: 'any'; doc?: string }
@@ -125,27 +126,16 @@ export interface GateIndex {
 }
 
 /** `.claude/prompt/.trace/last.json`: the last `context-gate run --json` (or `prompt.compose`) snapshot. */
-export interface LastTrace {
-  /** Render scope the expressions were evaluated in. */
-  scope?: Scope_
-  ctx?: Scope_
-  trace?: TraceEntry[]
-  sections?: { id: string; text?: string; tokens?: number; included?: boolean; reason?: string }[]
-  diagnostics?: Diagnostic[]
-  /** Nested `run --json` result. */
-  result?: { trace?: TraceEntry[]; sections?: LastTrace['sections']; scope?: Scope_ }
-  at?: number
-}
+/** `.claude/prompt/.trace/last.json`: the last `context-gate run` (core RunJson); partial for hand-written fixtures. */
+export type LastTrace = Partial<Pick<RunJson, 'scope' | 'trace' | 'sections' | 'diagnostics' | 'meta'>>
 
 export function traceScope(t: LastTrace | undefined): Scope_ | undefined {
-  if (!t || typeof t !== 'object') return undefined
-  const s = t.scope ?? t.ctx ?? t.result?.scope
-  return s && typeof s === 'object' && !Array.isArray(s) ? s : undefined
+  const s = t && typeof t === 'object' ? t.scope : undefined
+  return s && typeof s === 'object' && !Array.isArray(s) ? s as Scope_ : undefined
 }
 
 export function traceEntries(t: LastTrace | undefined): TraceEntry[] {
-  if (!t || typeof t !== 'object') return []
-  const e = t.trace ?? t.result?.trace
+  const e = t && typeof t === 'object' ? t.trace : undefined
   return Array.isArray(e) ? e : []
 }
 

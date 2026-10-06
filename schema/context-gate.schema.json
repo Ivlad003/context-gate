@@ -745,6 +745,13 @@
       "items": {
         "type": "string"
       }
+    },
+    "allowBinaries": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Binaries repo executors/providers may start. Narrows the user whitelist (~/.claude/context-gate.json), never widens it (Р2)."
     }
   }
 }

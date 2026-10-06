@@ -188,3 +188,21 @@ test('deny texts', () => {
   assert.equal(skillOffText('nestjs', gate, cfg), 'Skill nestjs вимкнено профілем frontend. Увімкни: /gate +backend')
   assert.match(statusLine(gate, { ctxPct: 38.2 }), /^gate frontend · tier standard · skills 4\/8 · mcp 2\/4 · rules 0 · ctx 38%$/)
 })
+
+test('decideGate opts.tier forces the tier regardless of the model', () => {
+  const cfg = mergeDefaults({})
+  const { gate } = decideGate(cfg, { paths: [], model: 'claude-opus-4-5' }, { turn: 0 }, [], { tier: 'quick' })
+  assert.equal(gate.tier, 'quick')
+  assert.ok(gate.reason.some((r) => r.includes('tier quick задано явно')))
+  assert.equal(decideGate(cfg, { paths: [], model: 'claude-opus-4-5' }, { turn: 0 }, []).gate.tier, 'premium')
+})
+
+test('statusLine in shadow: nothing filtered → all/all counts, proposal with ?', () => {
+  const items = [makeItem('skill', 'tdd'), makeItem('skill', 'nestjs'), makeItem('skill', 'react-hooks'), makeItem('tool', 'mcp__figma__get', { mcp: true } as never)]
+  const { gate } = decideGate(cfg, { paths: [], manual: { profile: 'backend', add: [], remove: [] } }, { turn: 0 }, items)
+  assert.match(statusLine(gate), /^gate backend · tier \w+ · skills (\d+)\/3/)
+  assert.notEqual(statusLine(gate).match(/skills (\d+)\/3/)![1], '3')
+  const { profile, ...rest } = gate
+  const shadow = { ...rest, profile: undefined, shadow: true, proposed: { profile: profile!, confidence: 0.9 } }
+  assert.match(statusLine(shadow), /^gate \(backend\?\) · tier \w+ · skills 3\/3 · mcp (\d+)\/\1 · rules \d+$/)
+})

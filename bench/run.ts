@@ -3,6 +3,9 @@
 // and Verify-first-try from the repo's `.claude/gate.log.jsonl` (written by shiftwork via hooks-adapter/shiftwork.ts).
 //
 //   npm run build && node --experimental-strip-types bench/run.ts [--json] [--repos bench/repos.json]
+//
+// bench/repos.json is the one list of bench repos: `context-gate bench` (no dirs) reads it too. The default argv
+// below are real CLI commands (`health --json`, `pipe "collect | … | tokens"`; see `node dist/cli.js --help`).
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -11,16 +14,9 @@ import { fileURLToPath } from 'node:url'
 import type { DecisionLogEntry } from '../packages/core/src/types.ts'
 import { fromJsonl } from '../packages/core/src/journal.ts'
 import { verifyFirstTry } from '../packages/hooks-adapter/src/shiftwork.ts'
+import { readBenchRepos, type BenchRepo } from '../packages/cli/src/cmd-report.ts'
 
-export interface BenchRepo {
-  name: string
-  dir: string
-  profile?: string
-  model?: string
-  tier?: string
-  /** argv overrides for `node dist/cli.js …`. */
-  commands?: { health?: string[]; tokensOff?: string[]; tokensOn?: string[] }
-}
+export type { BenchRepo }
 
 export interface BenchResult {
   repo: string
@@ -123,7 +119,8 @@ function main(): number {
   const i = argv.indexOf('--repos')
   const reposFile = resolve(root, i >= 0 ? argv[i + 1] : 'bench/repos.json')
   if (!existsSync(cli)) { process.stderr.write(`немає ${cli}: спершу npm run build\n`); return 1 }
-  const repos = (JSON.parse(readFileSync(reposFile, 'utf8')) as { repos: BenchRepo[] }).repos
+  const repos = readBenchRepos(reposFile)
+  if (!repos.length) { process.stderr.write(`${reposFile}: немає repos\n`); return 1 }
   const rows = repos.map((r) => benchOne(r))
   process.stdout.write(json ? JSON.stringify(rows, null, 2) + '\n' : formatTable(rows) + '\n')
   return rows.some((r) => r.errors.length) ? 2 : 0

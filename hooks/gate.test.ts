@@ -36,6 +36,9 @@ describe('skill-gate', () => {
     await $.prompt.submit({ text: 'поправ @apps/web/x.tsx', wait: false, origin: ORIGIN })
     const status = await $.command.run({ command: 'gate', args: '', ...RUN })
     expect(status.text).toContain('gate (frontend?)')
+    // Shadow filters nothing, so the band counts everything as on (SPEC scenario 1: skills N/N).
+    expect(status.text).toMatch(/skills (\d+)\/\1 · mcp (\d+)\/\2/)
+    expect(status.text).toContain('(пропозиція, не застосовано)')
     const shadow = await $.prompt.attachment({ type: 'skill_listing', text: LISTING, origin: ENGINE } as never)
     expect(shadow.text).toBe(LISTING)
     const applied = await $.command.run({ command: 'gate', args: 'apply', ...RUN })

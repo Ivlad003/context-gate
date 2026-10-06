@@ -22,5 +22,8 @@
     "examples/basic/.claude/prompt/shared/*.tsx",
     "examples/basic/.claude/prompt/.types/ctx.d.ts",
     "examples/skills/*.tsx"
+  ],
+  "exclude": [
+    "test/mod-parity.test.ts"
   ]
 }

@@ -1,10 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CompiledPrompt, Value } from '../packages/core/src/types.ts'
 import { renderPrompt, type RenderHostExt } from '../packages/core/src/render.ts'
 import { REPO, cli, copyFixture } from './cli-helpers.ts'
+import { parseRunJson } from '../packages/core/src/runjson.ts'
 
 const basic = join(REPO, 'examples', 'basic')
 
@@ -23,7 +24,7 @@ test('build + run on examples/basic: CLI text equals core renderPrompt over the 
   const dir = join(root, '.claude', 'prompt', '.compiled')
   const compiled = readdirSync(dir).map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as CompiledPrompt).filter((c) => !c.skill).sort((a, c) => a.id.localeCompare(c.id))
   const host: RenderHostExt = { readFile: async (p) => { try { return readFileSync(join(root, p), 'utf8') } catch { return undefined } }, now: () => Date.now(), trusted: false }
-  const direct = await renderPrompt(compiled, res.scope as Record<string, Value>, host, { tier: res.tier, runCacheDefault: '5m' })
+  const direct = await renderPrompt(compiled, res.scope as Record<string, Value>, host, { tier: res.meta.tier, runCacheDefault: '5m' })
   assert.equal(direct.text, res.text)
   // Default output has section markers; --trace appends the table.
   const marked = await cli(root, ['run'])
@@ -37,10 +38,14 @@ test('run --json: trace shape (sections, trace, diagnostics, scope, gate) and .t
   const r = await cli(root, ['run', '--json'])
   assert.equal(r.code, 0, r.err)
   const j = JSON.parse(r.out)
-  for (const k of ['ok', 'mode', 'tier', 'profile', 'source', 'trusted', 'text', 'sections', 'trace', 'diagnostics', 'ms', 'stored', 'lazies', 'gate', 'scope', 'at']) assert.ok(k in j, `missing ${k}`)
-  assert.equal(j.mode, 'prompt')
-  assert.equal(j.source, 'live')
-  assert.equal(j.trusted, false)
+  // Core RunJson: exactly these top-level keys.
+  assert.deepEqual(Object.keys(j).sort(), ['diagnostics', 'health', 'meta', 'ms', 'scope', 'sections', 'text', 'trace'])
+  assert.ok('json' in parseRunJson(r.out))
+  for (const k of ['ok', 'mode', 'tier', 'profile', 'source', 'trusted', 'stored', 'lazies', 'gate', 'at']) assert.ok(k in j.meta, `missing meta.${k}`)
+  assert.equal(j.meta.mode, 'prompt')
+  assert.equal(j.meta.source, 'live')
+  assert.equal(j.meta.trusted, false)
+  assert.ok(Array.isArray(j.health.metrics))
   assert.deepEqual(j.sections.map((s: { id: string }) => s.id), ['intro', 'workflow', 'data'])
   for (const s of j.sections) for (const k of ['id', 'scope', 'text', 'chars', 'tokens', 'included', 'hash', 'status']) assert.ok(k in s, `section.${k}`)
   for (const t of j.trace) { assert.equal(typeof t.section, 'string'); assert.equal(typeof t.kind, 'string'); assert.equal(typeof t.detail, 'string') }
@@ -48,7 +53,11 @@ test('run --json: trace shape (sections, trace, diagnostics, scope, gate) and .t
   assert.equal(j.scope.pkg.name, 'fixture-app')
   assert.deepEqual(j.scope.cursor.always.map((x: { id: string }) => x.id), ['always'])
   assert.ok(j.diagnostics.some((d: { code: string }) => d.code === 'G205'), 'mcp provider is unverified in CLI')
-  assert.ok(existsSync(join(root, '.claude/prompt/.trace/last.json')))
+  assert.deepEqual(JSON.parse(readFileSync(join(root, '.claude/prompt/.trace/last.json'), 'utf8')).scope, j.scope, 'last.json holds the same RunJson, scope included')
+  // Plain `run` (no --json) writes last.json too.
+  rmSync(join(root, '.claude/prompt/.trace'), { recursive: true, force: true })
+  await cli(root, ['run', '--no-markers'])
+  assert.ok('json' in parseRunJson(readFileSync(join(root, '.claude/prompt/.trace/last.json'), 'utf8')))
   // --only renders one section.
   const one = JSON.parse((await cli(root, ['run', '--only', 'intro', '--json'])).out)
   assert.deepEqual(one.sections.map((s: { id: string }) => s.id), ['intro'])
@@ -89,27 +98,27 @@ test('skill prompt: run <skill> --args parses with core parseArgs; a bad arg pri
   assert.equal(bad.code, 0)
   assert.match(bad.out, /^Невірні аргументи: `style` має бути casual\|formal\. Використання: \/greet <імʼя> \[--style casual\|formal\]/)
   const missing = JSON.parse((await cli(root, ['run', 'greet', '--args', '', '--json'])).out)
-  assert.equal(missing.ok, false)
-  assert.match(missing.usage, /Невірні аргументи/)
+  assert.equal(missing.meta.ok, false)
+  assert.match(missing.meta.usage, /Невірні аргументи/)
 })
 
 test('--ctx-from fixture and session:latest; --diff against the snapshot text', async () => {
   const root = copyFixture()
   const f = JSON.parse((await cli(root, ['run', '--ctx-from', 'fixture-ctx.json', '--json'])).out)
-  assert.equal(f.source, 'fixture')
-  assert.equal(f.tier, 'quick')
+  assert.equal(f.meta.source, 'fixture')
+  assert.equal(f.meta.tier, 'quick')
   assert.equal(f.scope.gate.profile, 'frontend')
   assert.match(f.text, /Проєкт from-fixture\. Тести: `vitest`\./)
   assert.match(f.text, /Профіль фронтенду\./)
   // fs.examples picks the smallest matching file (a.ts) for the quick tier.
   assert.match(f.text, /Зразок apps\/web\/src\/a\.js: export const A = 1/)
   const s = JSON.parse((await cli(root, ['run', '--ctx-from', 'session:latest', '--json'])).out)
-  assert.equal(s.source, 'session')
-  assert.equal(s.tier, 'quick')
+  assert.equal(s.meta.source, 'session')
+  assert.equal(s.meta.tier, 'quick')
   assert.equal(s.scope.ctx.percent, 42)
   assert.equal(s.scope.gate.profile, 'frontend')
   const byId = JSON.parse((await cli(root, ['run', '--ctx-from', 'session:s1', '--json'])).out)
-  assert.equal(byId.tier, 'quick')
+  assert.equal(byId.meta.tier, 'quick')
   const d = await cli(root, ['run', '--only', 'intro', '--diff', 'session:latest'])
   assert.match(d.out, /^- Проєкт fixture-app\.$/m)
   assert.match(d.out, /^\+ Проєкт fixture-app\. Тести: `node --test`\.$/m)
@@ -144,4 +153,18 @@ test('binary whitelist: user ~/.claude/context-gate.json allowBinaries; gate.jso
   assert.doesNotMatch(b.text, /team-a/)
   assert.ok(b.diagnostics.some((d: { code: string; message: string }) => d.code === 'G203' && d.message.includes('node')))
   assert.ok(!b.diagnostics.some((d: { code: string }) => d.code === 'G302'), 'allowBinaries is not an unknown key')
+})
+
+test('build --only takes a repo-relative file path (what the mod passes) or a prompt id', { skip: !existsSync(join(basic, '.claude', 'prompt')) }, async () => {
+  const root = copyFixture(basic, 'basic')
+  const compiled = join(root, '.claude/prompt/.compiled/main.json')
+  for (const only of ['.claude/prompt/main.prompt.tsx', 'main']) {
+    rmSync(join(root, '.claude/prompt/.compiled'), { recursive: true, force: true })
+    const r = await cli(root, ['build', '--only', only, '--json'])
+    assert.equal(r.code, 0, r.out + r.err)
+    assert.deepEqual(JSON.parse(r.out).compiled, ['main'], only)
+    assert.ok(existsSync(compiled), only)
+  }
+  const none = JSON.parse((await cli(root, ['build', '--only', 'nope', '--json'])).out)
+  assert.deepEqual(none.compiled, [])
 })

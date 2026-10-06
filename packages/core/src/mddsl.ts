@@ -387,7 +387,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         if (kv.cache) node.cache = kv.cache
         if (kv.store) node.store = kv.store
         if (kv.needs) node.needs = kv.needs.split(',').map(s => s.trim()).filter(Boolean)
-        if (!kv.cache && scope === 'static') diag('G201', '@run без cache у static-секції', line, 'error', 'додати cache=… або перенести у volatile')
+        if (!kv.cache && scope === 'static') diag('G163', '@run без cache у static-секції', line, 'error', 'додати cache=… або перенести у volatile')
         run = { node, lines: [], line }
         break
       }

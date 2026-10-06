@@ -1,8 +1,10 @@
 // Decision journal: 200-entry ring in io.state, optional `.claude/gate.log.jsonl` (config log.file).
-// Metadata only: never prompt text, file contents or command output.
+// Metadata only: never the user's prompt text, file contents or command output. Exception, behind
+// `log.file` only: `snapshot` entries (core journal.ts contract) carry our own render scope and the
+// rendered system-prompt text, truncated, for `context-gate run --ctx-from session:…`.
 
 
-import { LOG_MAX, toJsonl } from '../../packages/core/src/journal.ts'
+import { LOG_MAX, pruneSnapshots, toJsonl } from '../../packages/core/src/journal.ts'
 import { json, pushRing } from '../state.ts'
 import type { LogEntry } from '../state.ts'
 import { type Io, type Runtime, debug, join, now } from '../ctx.ts'
@@ -25,6 +27,13 @@ export async function pushEntry(io: Io, rt: Runtime, entry: LogEntry): Promise<v
   }
 }
 
+/** File-only entry (`snapshot`): too large for the state ring; dropped without `log.file`. */
+export async function pushFileEntry(io: Io, rt: Runtime, entry: LogEntry): Promise<void> {
+  if (!rt.cfg?.log?.file) return
+  rt.journalBuffer.push(toJsonl({ ...entry, event: entry.kind ?? 'decision' }))
+  await flushJournal(io, rt)
+}
+
 /** No append API: keep the file's text in memory and write it whole. */
 export async function flushJournal(io: Io, rt: Runtime): Promise<void> {
   if (!rt.journalBuffer.length || !rt.root) return
@@ -36,6 +45,7 @@ export async function flushJournal(io: Io, rt: Runtime): Promise<void> {
     }
     let text = rt.journalText + rt.journalBuffer.join('')
     rt.journalBuffer = []
+    text = pruneSnapshots(text)
     const lines = text.split('\n')
     if (lines.length > FILE_MAX_LINES) text = lines.slice(lines.length - FILE_MAX_LINES).join('\n')
     rt.journalText = text

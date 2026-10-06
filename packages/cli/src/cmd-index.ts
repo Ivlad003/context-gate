@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import type { Value } from '../../core/src/types.ts'
 import { buildContext, collectItems, scriptFiles, type ContextOptions } from './context.ts'
 import { renderWith } from './cmd-run.ts'
-import { parseToolHeader } from './scripts.ts'
+import { parseToolHeader } from '../../core/src/toolheader.ts'
 import { readText, writeJson } from './util.ts'
 
 function symbolsOf(v: Value, provider: string): Record<string, Value>[] {
