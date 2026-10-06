@@ -169,6 +169,8 @@ export interface Runtime {
   whitelist?: string[]
   unknownListingLogged: boolean
   /** `turn.step` usage of the main loop (G-43, health H002/H012): totals and the last step. */
+  /** Compactions this conversation (session.compact), health «Компакції за сесію» (G-43). */
+  compactions: number
   stepUsage?: { steps: number; input: number; cacheRead: number; cacheCreation: number; output: number; last?: { input: number; cacheRead: number; cacheCreation: number; output: number; model: string } }
   /** Last failed prompt build (H013 / G*), for the `prompt ⚠ build` status marker; cleared by a good build. */
   buildError?: { code: string; message: string; at: number }
@@ -201,6 +203,7 @@ export function newRuntime(options: Options): Runtime {
     itemsDirty: true,
     promptsDirty: true,
     staticCache: new Map(),
+    compactions: 0,
     skillArgs: new Map(),
     tools: new Map(),
     readFiles: new Map(),

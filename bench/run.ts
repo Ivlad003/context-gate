@@ -2,7 +2,10 @@
 // gate off and on, and print one Markdown table: system-prompt tokens per session, item tokens, unverified sections,
 // and Verify-first-try from the repo's `.claude/gate.log.jsonl` (written by shiftwork via hooks-adapter/shiftwork.ts).
 //
-//   npm run build && node --experimental-strip-types bench/run.ts [--json] [--repos bench/repos.json]
+//   npm run build && node --experimental-strip-types bench/run.ts [--json] [--repos bench/repos.json] [--user-skills]
+//
+// Runs ignore `~/.claude/skills` (`CONTEXT_GATE_NO_USER_SKILLS=1`, the CLI's `--no-user-skills`) so the numbers do
+// not depend on the machine; `--user-skills` counts them.
 //
 // bench/repos.json is the one list of bench repos: `context-gate bench` (no dirs) reads it too. The default argv
 // below are real CLI commands (`health --json`, `pipe "collect | … | tokens"`; see `node dist/cli.js --help`).
@@ -80,8 +83,16 @@ export function readTokens(v: unknown): number | undefined {
   return typeof s.tokens === 'number' ? s.tokens : undefined
 }
 
+/** Machine-independent by default: `~/.claude/skills` of whoever runs the bench never counts (`--user-skills` opts in). */
+let userSkills = false
+
+/** Env of a bench CLI run: `CONTEXT_GATE_NO_USER_SKILLS=1` unless `--user-skills` (the CLI's `--no-user-skills`). */
+export function benchEnv(base: Record<string, string | undefined> = process.env, withUserSkills = userSkills): Record<string, string | undefined> {
+  return withUserSkills ? { ...base } : { ...base, CONTEXT_GATE_NO_USER_SKILLS: '1' }
+}
+
 function runCli(args: string[], cwd: string, env: Record<string, string> = {}): string {
-  return execFileSync(process.execPath, [cli, ...args], { cwd, env: { ...process.env, ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 })
+  return execFileSync(process.execPath, [cli, ...args], { cwd, env: { ...benchEnv(), ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 })
 }
 
 export function benchOne(r: BenchRepo, run: (args: string[], cwd: string) => string = runCli): BenchResult {
@@ -116,6 +127,7 @@ export function formatTable(rows: readonly BenchResult[]): string {
 function main(): number {
   const argv = process.argv.slice(2)
   const json = argv.includes('--json')
+  userSkills = argv.includes('--user-skills')
   const i = argv.indexOf('--repos')
   const reposFile = resolve(root, i >= 0 ? argv[i + 1] : 'bench/repos.json')
   if (!existsSync(cli)) { process.stderr.write(`немає ${cli}: спершу npm run build\n`); return 1 }

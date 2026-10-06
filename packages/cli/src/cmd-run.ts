@@ -7,6 +7,7 @@ import type { CompiledPrompt, Diagnostic, Node, RenderResult, Value } from '../.
 import { renderPrompt, formatTrace, isDataEnvelope, capDebugLog, debugLogLines, type RenderOptionsExt } from '../../core/src/render.ts'
 import { debugLogPath } from '../../core/src/config.ts'
 import { computeHealth, formatHealth } from '../../core/src/health.ts'
+import { fromJsonl, gateStatsFromJournal } from '../../core/src/journal.ts'
 import type { RunJson, RunJsonMeta } from '../../core/src/runjson.ts'
 import { buildPrompts, checkStale } from './build.ts'
 import { sectionText, skillArgs } from '../../core/src/assemble.ts'
@@ -250,7 +251,20 @@ export async function healthCommand(o: ContextOptions & { json?: boolean; strict
   const prevPath = join(ctx.repo.cacheDir, 'last-render.json')
   const previous = readJson<RenderResult>(prevPath)
   const stale = checkStale({ root: ctx.repo.root, dir: ctx.repo.promptDir })
-  const report = computeHealth(r.result, previous, { compiledStale: [...stale.stale, ...stale.missing] }, ctx.repo.config.health ?? {})
+  // H011 from the journal's `gate-attempt` entries (core journal contract; the mod and the hooks adapter write them):
+  // one session with --ctx-from session:…, else the whole journal.
+  const logText = readText(join(ctx.repo.root, '.claude', 'gate.log.jsonl'))
+  const gates = logText ? gateStatsFromJournal(fromJsonl(logText).items, ctx.snapshot?.sessionId ? { sessionId: ctx.snapshot.sessionId } : {}) : {}
+  // G-43: compactions and the gate decision from the journal, since its last `/clear` (the mod's conversation).
+  const items = logText ? (fromJsonl(logText).items as { trigger?: string; kind?: string; profile?: string | null }[]) : []
+  const conv = items.slice(items.map((e) => e.trigger).lastIndexOf('clear') + 1)
+  const decisions = conv.filter((e) => (e.kind === undefined || e.kind === 'decision') && 'profile' in e)
+  const manualOverrides = conv.filter((e) => e.trigger === 'manual').length
+  const sessionExtras = items.length ? {
+    compactions: conv.filter((e) => e.trigger === 'compact').length,
+    ...(decisions.length ? { decision: { profile: decisions[decisions.length - 1]!.profile ?? null, ...(manualOverrides ? { manualOverrides } : {}) } } : {}),
+  } : {}
+  const report = computeHealth(r.result, previous, { compiledStale: [...stale.stale, ...stale.missing], ...(Object.keys(gates).length ? { gates } : {}), ...sessionExtras }, ctx.repo.config.health ?? {})
   try { writeJson(prevPath, { ...r.result, trace: [] }) } catch { /* cache best effort */ }
   const diags = [...report.diagnostics, ...r.result.diagnostics, ...ctx.host.notes]
   const bad = report.metrics.some((m) => m.code && !m.ok)

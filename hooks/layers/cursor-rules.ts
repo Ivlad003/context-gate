@@ -13,7 +13,7 @@ import { cursorRuleDirs, frameRule, isFileRule, markdownRuleId, packInjections, 
 import { isApplied } from '../state.ts'
 import type { ContextGateDecision } from '../../types'
 import { type Io, type FileCall, type Runtime, type ToolResultLike, debug, join, now } from '../ctx.ts'
-import { ensureSession } from './config.ts'
+import { ensureSession, loadGateConfig } from './config.ts'
 import { journal } from './journal.ts'
 import { makeRenderHost, providerData } from './host.ts'
 import { repoKey, trustState } from './trust.ts'
@@ -67,14 +67,21 @@ async function loadProviderRules(io: Io, rt: Runtime, force: boolean): Promise<{
 }
 
 /** Edge case 6: the session root moved (a `cd` into another worktree): drop the caches built for the old root. */
-async function checkRoot(io: Io, rt: Runtime): Promise<void> {
+/** The new root's gate.json replaces the old one's (which also marks items and prompts dirty). Checked on every
+ *  `ensureRules`, before the 2 s re-list throttle: one engine call, and a move is seen on the very next tool call. */
+export async function checkRoot(io: Io, rt: Runtime): Promise<void> {
   const root = await io.session.root().catch(() => rt.root)
   if (!root || root === rt.root) return
+  debug(io, `session root moved: ${rt.root} → ${root}; caches dropped`)
   rt.root = root
   rt.windows = detectWindows(root, await io.env.os().catch(() => undefined))
   rt.rules = undefined
+  rt.rulesDirty = true
   rt.itemsDirty = true
+  rt.promptsDirty = true
+  rt.staticCache.clear()
   providerCache.delete(rt)
+  await loadGateConfig(io, rt)
 }
 
 /** Directories holding `.cursor/rules` below the root (nested option), breadth-first with caps. */
@@ -103,10 +110,10 @@ export function rulesActive(rt: Runtime): boolean {
 /** Parse rules once; re-list when dirty (FileChanged), on force, or at most every 2 s. */
 export async function ensureRules(io: Io, rt: Runtime, opts: { force?: boolean } = {}): Promise<MdcRule[]> {
   await ensureSession(io, rt)
+  await checkRoot(io, rt)
   if (!rulesActive(rt)) return []
   const t = now()
   if (rt.rules && !rt.rulesDirty && !opts.force && t - rt.rules.checkedAt < RECHECK_MS) return rt.rules.list
-  await checkRoot(io, rt)
   const { dirs, nested } = cursorRuleDirs(rt.cfg)
   const files: Found[] = []
   for (const d of dirs) await listFiles(io, rt, trimDir(d), files, 0)

@@ -328,6 +328,32 @@ export function parseExpr(src: string): { ast?: ExprAst; diagnostics: Diagnostic
   return res
 }
 
+/**
+ * Index of the `}}` closing the placeholder whose content starts at `from`, or -1. String literals
+ * (`"…"`, `'…'`, with `\\` escapes) are skipped and nested `{{ … }}` outside strings are balanced, so a template
+ * argument such as `map("{{ item.from }} → {{ item.to }}")` stays inside the outer placeholder.
+ */
+export function templateClose(src: string, from: number): number {
+  let depth = 0
+  let quote: string | undefined
+  for (let i = from; i < src.length; i++) {
+    const c = src[i]
+    if (quote) {
+      if (c === '\\') { i++; continue }
+      if (c === quote) quote = undefined
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; continue }
+    if (c === '{' && src[i + 1] === '{') { depth++; i++; continue }
+    if (c === '}' && src[i + 1] === '}') {
+      if (depth === 0) return i
+      depth--
+      i++
+    }
+  }
+  return -1
+}
+
 /** Split `text {{ expr }} text` into literal and expression source parts (no parsing). */
 export function splitTemplate(src: string): ({ text: string } | { expr: string })[] {
   const out: ({ text: string } | { expr: string })[] = []
@@ -335,7 +361,9 @@ export function splitTemplate(src: string): ({ text: string } | { expr: string }
   while (i < src.length) {
     const open = src.indexOf('{{', i)
     if (open < 0) { out.push({ text: src.slice(i) }); break }
-    const close = src.indexOf('}}', open + 2)
+    let close = templateClose(src, open + 2)
+    // An unbalanced quote inside the placeholder (an apostrophe in prose): fall back to the first `}}`.
+    if (close < 0) close = src.indexOf('}}', open + 2)
     if (close < 0) { out.push({ text: src.slice(i) }); break }
     if (open > i) out.push({ text: src.slice(i, open) })
     out.push({ expr: src.slice(open + 2, close).trim() })

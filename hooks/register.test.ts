@@ -1,5 +1,7 @@
 // Runs under `claude plugin test .` (the engine's own host, no Node).
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect } from 'claude-code/testing'
+
+import { test } from './testkit.ts'
 
 import { bandLine } from './register.ts'
 

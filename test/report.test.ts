@@ -72,6 +72,9 @@ test('skillRenderStats and gateFailures', () => {
   ]
   assert.deepEqual(skillRenderStats(log), [{ skill: 'pr-review', renders: 2, avgMs: 20, avgChars: 200, failed: 1, args: ['{"pr":1}', '{"pr":2}'] }])
   assert.deepEqual(gateFailures(log), { tests: { blocks: 1, overrides: 1 } })
+  // both forms of one override in the journal → counted once
+  const both = [...log, e({ kind: 'gate-attempt' as never, data: { gate: 'tests', outcome: 'override' } })]
+  assert.deepEqual(gateFailures(both), { tests: { blocks: 1, overrides: 1 } })
 })
 
 test('formatReport prints suggestions, tier costs, runner vs mod and skill costs', () => {

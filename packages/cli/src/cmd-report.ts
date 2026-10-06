@@ -2,10 +2,10 @@
 
 import { basename, join, resolve } from 'node:path'
 import type { DecisionLogEntry, GateConfig } from '../../core/src/types.ts'
-import { fromJsonl } from '../../core/src/journal.ts'
+import { fromJsonl, gateStatsFromJournal, type GateCounts } from '../../core/src/journal.ts'
 import { compareRunnerMod, denySuggestions, formatTierCosts, skillRenderStats, tierCosts, type DenySuggestion, type SkillRenderStat, type TaskCost, type TicketComparison } from '../../core/src/report.ts'
 import { tokens } from '../../core/src/pipeline.ts'
-import { buildContext, collectItems, decide, loadRepo, loadRules } from './context.ts'
+import { buildContext, collectItems, collectRepoItems, decide, loadRepo } from './context.ts'
 import { renderWith } from './cmd-run.ts'
 import { observeCounts, sinceMs } from './cmd-pipe.ts'
 import { readJson, readText } from './util.ts'
@@ -19,8 +19,12 @@ export interface Report {
   denies: Record<string, number>
   rulesNeverDelivered: string[]
   rulesDelivered: Record<string, number>
+  /** `provider` rule sources whose data was not available (untrusted, failed): their rules are unknown. */
+  rulesUnverified?: { id: string; note: string }[]
   escalations: { count: number; byTier: Record<string, number> }
   gateFailures: Record<string, number>
+  /** `gate-attempt` counters per gate (core `gateStatsFromJournal`, H011). */
+  gates: Record<string, GateCounts>
   skillRenders: Record<string, number>
   /** Attempts and tokens per tier per task (SPEC "Ескалація"). */
   tierCosts: TaskCost[]
@@ -34,7 +38,7 @@ export interface Report {
 
 export function buildReport(entries: readonly DecisionLogEntry[], ruleIds: readonly string[], from?: number, config?: GateConfig): Report {
   const es = entries.filter((e) => from === undefined || (e.ts ?? 0) >= from)
-  const r: Report = { entries: es.length, decisions: 0, triggers: { when: 0, classify: 0, manual: 0, tier: 0, other: 0, byTrigger: {} }, shadow: { proposed: 0, matched: 0, differed: 0 }, denies: {}, rulesNeverDelivered: [], rulesDelivered: {}, escalations: { count: 0, byTier: {} }, gateFailures: {}, skillRenders: {}, tierCosts: tierCosts(es), suggestions: denySuggestions(es, config, (config?.health as Record<string, number> | undefined)?.H010 ?? 3), runnerVsMod: compareRunnerMod(es), skills: skillRenderStats(es) }
+  const r: Report = { entries: es.length, decisions: 0, triggers: { when: 0, classify: 0, manual: 0, tier: 0, other: 0, byTrigger: {} }, shadow: { proposed: 0, matched: 0, differed: 0 }, denies: {}, rulesNeverDelivered: [], rulesDelivered: {}, escalations: { count: 0, byTier: {} }, gateFailures: {}, gates: gateStatsFromJournal(es), skillRenders: {}, tierCosts: tierCosts(es), suggestions: denySuggestions(es, config, (config?.health as Record<string, number> | undefined)?.H010 ?? 3), runnerVsMod: compareRunnerMod(es), skills: skillRenderStats(es) }
   for (const e of es) {
     const kind = e.kind ?? 'decision'
     const d = (e.data ?? {}) as Record<string, unknown>
@@ -85,6 +89,7 @@ export function formatReport(r: Report): string {
   if (r.suggestions.length) out.push('### Пропозиції', '', ...r.suggestions.map((s) => `- ${s.text}`), '')
   else if (denies.some(([, n]) => n > 3)) out.push('Повторні deny одного інструмента: додай його групу в профіль (`/gate +група`, потім у gate.json).', '')
   out.push('## Правила, які жодного разу не доставлено', '', r.rulesNeverDelivered.length ? r.rulesNeverDelivered.map((id) => `- ${id}`).join('\n') : 'Немає.', '')
+  if (r.rulesUnverified?.length) out.push('Не перевірено (unverified): ' + r.rulesUnverified.map((u) => `${u.id} — ${u.note}`).join('; '), '')
   out.push('## Ескалації', '', r.escalations.count ? table(['з tier', 'разів'], Object.entries(r.escalations.byTier)) : 'Немає.', '')
   if (r.tierCosts.length) out.push('## Спроби і токени за tier', '', formatTierCosts(r.tierCosts), '')
   if (r.runnerVsMod.length) {
@@ -93,17 +98,23 @@ export function formatReport(r: Report): string {
     if (differ) out.push(`Розбіжностей: ${differ}. Додай \`profiles.<p>.when.ticketType\` у gate.json, щоб runner і mod вирішували однаково.`, '')
   }
   if (Object.keys(r.gateFailures).length) out.push('## Непройдені гейти', '', table(['гейт', 'разів'], Object.entries(r.gateFailures)), '')
+  const gates = Object.entries(r.gates).filter(([, g]) => g.attempts || g.overrides)
+  if (gates.length) out.push('## Гейти (H011)', '', table(['гейт', 'спроб', 'заблоковано', '%', 'мс (сер.)', '«все одно»'], gates.map(([n, g]) => [n, g.attempts, g.blocks, g.attempts ? Math.round((g.blocks / g.attempts) * 100) : 0, g.attempts && g.ms !== undefined ? Math.round(g.ms / g.attempts) : '—', g.overrides ?? 0])), '')
   if (r.skills.length) out.push('## Виклики skills-промптів', '', table(['skill', 'рендерів', 'мс (сер.)', 'символів (сер.)', 'не ok', 'аргументи (приклади)'], r.skills.map((s) => [s.skill, s.renders, s.avgMs, s.avgChars, s.failed, s.args.map((a) => `\`${a.replace(/\|/g, '\\|')}\``).join(', ') || '—'])), '')
   else if (Object.keys(r.skillRenders).length) out.push('## Виклики skills-промптів', '', table(['skill', 'рендерів'], Object.entries(r.skillRenders)), '')
   return out.join('\n').replace(/\n+$/, '') + '\n'
 }
 
-export function reportCommand(root: string, o: { since?: string; json?: boolean }): { code: number; out: string } {
+export async function reportCommand(root: string, o: { since?: string; json?: boolean; trustRepo?: boolean }): Promise<{ code: number; out: string }> {
   const text = readText(join(root, '.claude', 'gate.log.jsonl'))
   const entries = text ? fromJsonl<DecisionLogEntry>(text).items : []
   const repo = loadRepo(root)
-  const ruleIds = loadRules(root, repo.config).rules.map((r) => r.id)
+  // Rules of every source, provider rules included (trusted repos); a source without data is listed as unverified.
+  const all = await collectRepoItems(repo, { ...(o.trustRepo ? { trustRepo: true } : {}) })
+  const ruleIds = all.rules.map((r) => r.id)
   const rep = buildReport(entries, ruleIds, sinceMs(o.since, Date.now()), repo.config)
+  const unverified = all.items.filter((i) => i.kind === 'rule' && i.status === 'unverified')
+  if (unverified.length) rep.rulesUnverified = unverified.map((i) => ({ id: i.name, note: i.description ?? '' }))
   if (o.since) rep.since = o.since
   return { code: 0, out: o.json ? JSON.stringify(rep) + '\n' : formatReport(rep) }
 }

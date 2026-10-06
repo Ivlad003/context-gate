@@ -130,3 +130,111 @@ test('init --commit-compiled: prompt.commitCompiled true, .compiled/ not gitigno
   assert.match(gi, /node_modules\//)
   assert.equal(JSON.parse(readFileSync(join(committed, '.claude/gate.json'), 'utf8')).prompt.commitCompiled, true)
 })
+
+test('hooks-adapter and pi/opencode loadRules: every rule source through core loadRuleSources, as the mod', async () => {
+  const { loadRules: hooksLoad } = await import('../packages/hooks-adapter/src/node.ts')
+  const { loadRules: adapterLoad, loadGateData } = await import('../packages/adapters/common/load.ts')
+  const dir = sandbox()
+  const root = join(dir, 'repo')
+  const gate = {
+    providers: { arch: { kind: 'file', path: 'arch.json' }, lint: { kind: 'cli', command: ['eslint'] } },
+    itemSources: [
+      { kind: 'cursor-mdc', dir: 'rules/cursor' },
+      { kind: 'cursor-mdc', dir: '.cursor/rules', nested: true },
+      { kind: 'markdown-dir', dir: 'docs/rules', frontmatter: { paths: 'globs' } },
+      { kind: 'provider', name: 'arch', field: 'deny', template: '{{ item.from }} не імпортує {{ item.to }}' },
+      { kind: 'provider', name: 'lint', field: 'rules' },
+    ],
+  }
+  write(root, {
+    '.claude/gate.json': JSON.stringify(gate),
+    '.cursor/rules/base.mdc': '---\nalwaysApply: true\n---\nBase.',
+    'rules/cursor/custom.mdc': '---\nglobs: src/**\n---\nCustom.',
+    'packages/api/.cursor/rules/api.mdc': '---\nglobs: "**/*.ts"\n---\nApi.',
+    'node_modules/x/.cursor/rules/skip.mdc': '---\nalwaysApply: true\n---\nSkip.',
+    'docs/rules/style.md': '---\npaths: ["src/**"]\n---\nStyle.',
+    'docs/rules/README.md': '# not a rule',
+    'arch.json': JSON.stringify({ deny: [{ from: 'ui', to: 'db' }] }),
+  })
+  const want = ['arch/0', 'base', 'custom', 'packages/api/api', 'style']
+  for (const [name, load] of [['hooks-adapter', hooksLoad], ['pi/opencode', adapterLoad]] as const) {
+    const r = load(root, mergeDefaults(gate as never))
+    assert.deepEqual(r.rules.map((x) => x.id).sort(), want, name)
+    assert.deepEqual(r.rules.find((x) => x.id === 'packages/api/api')!.globs, ['packages/api/**/*.ts'], name)
+    assert.equal(r.rules.find((x) => x.id === 'arch/0')!.body, 'ui не імпортує db')
+    assert.equal(r.rules.find((x) => x.id === 'style')!.source, 'markdown-dir')
+    // A cli provider needs trust: skipped with G208, no process started.
+    assert.ok(r.diagnostics.some((d) => d.code === 'G208' && d.message.includes('lint')), name)
+  }
+  assert.deepEqual(loadGateData(root).rules.map((x) => x.id).sort(), want)
+  // The CLI loads the same file-based rules (provider rules join in buildContext).
+  const { loadRules: cliLoad } = await import('../packages/cli/src/context.ts')
+  assert.deepEqual(cliLoad(root, mergeDefaults(gate as never)).rules.map((x) => x.id).sort(), want.filter((x) => x !== 'arch/0'))
+  assert.deepEqual(hooksLoad(root, mergeDefaults({ ...gate, cursorRules: { enabled: false } } as never)).rules, [])
+})
+
+test('collect / report: provider rule sources load when trusted; otherwise an unverified placeholder item', async () => {
+  const { cli, jsonl } = await import('./cli-helpers.ts')
+  const dir = sandbox()
+  const root = join(dir, 'repo')
+  write(root, {
+    '.claude/gate.json': JSON.stringify({
+      providers: { arch: { kind: 'cli', command: ['node', 'arch.mjs'] }, team: { kind: 'file', path: 'team.json' } },
+      itemSources: [
+        { kind: 'provider', name: 'arch', field: 'deny', template: '{{ item.from }} не імпортує {{ item.to }}' },
+        { kind: 'provider', name: 'team', field: 'rules' },
+      ],
+    }),
+    'arch.mjs': 'console.log(JSON.stringify({ deny: [{ from: "ui", to: "db" }] }))',
+    'team.json': JSON.stringify({ rules: [{ id: 'naming', text: 'camelCase' }] }),
+    '.cursor/rules/base.mdc': '---\nalwaysApply: true\n---\nBase.',
+  })
+  const ids = (out: string) => jsonl(out).filter((i) => i.kind === 'rule').map((i) => `${i.id}${i.status ? `:${i.status}` : ''}`).sort()
+  // Untrusted: the cli provider is not started; the file provider needs no trust.
+  const untrusted = await cli(root, ['collect'])
+  assert.equal(untrusted.code, 0, untrusted.err)
+  assert.deepEqual(ids(untrusted.out), ['rule:arch/*:unverified', 'rule:base', 'rule:team/naming'])
+  const ph = jsonl(untrusted.out).find((i) => i.id === 'rule:arch/*')!
+  assert.match(String(ph.description), /не довірений/)
+  const trusted = await cli(root, ['collect', '--trust-repo'])
+  assert.deepEqual(ids(trusted.out), ['rule:arch/0', 'rule:base', 'rule:team/naming'])
+  const piped = await cli(root, ['pipe', 'collect | where kind=rule', '--trust-repo'])
+  assert.deepEqual(ids(piped.out), ['rule:arch/0', 'rule:base', 'rule:team/naming'])
+  // report: provider rules count as rules; an unavailable source is listed as unverified.
+  const rep = JSON.parse((await cli(root, ['report', '--json'])).out)
+  assert.deepEqual(rep.rulesNeverDelivered.sort(), ['base', 'team/naming'])
+  assert.deepEqual(rep.rulesUnverified.map((u: { id: string }) => u.id), ['arch/*'])
+  const repT = JSON.parse((await cli(root, ['report', '--json', '--trust-repo'])).out)
+  assert.deepEqual(repT.rulesNeverDelivered.sort(), ['arch/0', 'base', 'team/naming'])
+  assert.equal(repT.rulesUnverified, undefined)
+  assert.match((await cli(root, ['report'])).out, /Не перевірено \(unverified\): arch\/\* — правила провайдера arch не отримано/)
+})
+
+test('itemSources prompt-dir: a custom section dir is read next to prompt.dir (core promptSectionDirs)', async () => {
+  const { promptSectionDirs, isMarkdownSectionFile } = await import('../packages/core/src/assemble.ts')
+  const { loadConfig } = await import('../packages/core/src/config.ts')
+  assert.deepEqual(promptSectionDirs({}), ['.claude/prompt'])
+  assert.deepEqual(promptSectionDirs({ prompt: { dir: './prompts/' }, itemSources: [
+    { kind: 'prompt-dir', dir: './team/sections/', as: 'section' }, { kind: 'prompt-dir', dir: 'prompts' }, { kind: 'prompt-dir', dir: 'x', as: 'skill' }, { kind: 'prompt-dir', dir: '../out' }, { kind: 'markdown-dir', dir: 'docs' },
+  ] }), ['prompts', 'team/sections'])
+  assert.equal(isMarkdownSectionFile('README.md'), false)
+  assert.equal(isMarkdownSectionFile('a.md'), true)
+  assert.ok(loadConfig(JSON.stringify({ itemSources: [{ kind: 'prompt-dir' }] })).diagnostics.some((d) => d.code === 'G313'))
+  assert.ok(loadConfig(JSON.stringify({ itemSources: [{ kind: 'prompt-dir', dir: 'x', as: 'rule' }] })).diagnostics.some((d) => d.code === 'G313'))
+  const { cli, jsonl } = await import('./cli-helpers.ts')
+  const root = join(sandbox(), 'repo')
+  write(root, {
+    '.claude/gate.json': JSON.stringify({ itemSources: [{ kind: 'prompt-dir', dir: 'team/sections', as: 'section' }] }),
+    '.claude/prompt/own.md': '---\nid: own\nscope: static\n---\nOwn section.',
+    'team/sections/shared.md': '---\nid: shared\nscope: static\n---\nShared {{ gate.tier }} section.',
+    'team/sections/shared.quick.md': 'Shared quick.',
+    'team/sections/README.md': '# not a section',
+  })
+  const r = await cli(root, ['run', '--tier', 'standard', '--no-markers'])
+  assert.equal(r.code, 0, r.err)
+  assert.match(r.out, /Own section\./)
+  assert.match(r.out, /Shared standard section\./)
+  assert.match((await cli(root, ['run', '--tier', 'quick', '--no-markers'])).out, /Shared quick\./)
+  const sections = jsonl((await cli(root, ['collect'])).out).filter((i) => i.kind === 'section').map((i) => `${i.name}@${(i.provenance as { path?: string }).path}`)
+  assert.deepEqual(sections.sort(), ['own@.claude/prompt/own.md', 'plan-then-act@builtin:plan-then-act', 'shared@team/sections/shared.md'])
+})

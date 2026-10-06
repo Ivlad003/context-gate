@@ -11,9 +11,11 @@ import type { RenderHostExt } from '../../packages/core/src/render.ts'
 import type { GateStat } from '../../packages/core/src/health.ts'
 
 import { type Io, type FileCall, type Runtime, type ToolResultLike, debug, join, now } from '../ctx.ts'
-import { providerData } from './host.ts'
+import { loadWhitelist, providerData } from './host.ts'
+import { commandGateDecision } from '../../packages/core/src/config.ts'
 import { ensureSession } from './config.ts'
-import { journal, flushJournal } from './journal.ts'
+import { journal, flushJournal, pushFileEntry } from './journal.ts'
+import { gateAttemptEntry, type GateOutcome as AttemptOutcome } from '../../packages/core/src/journal.ts'
 import { trustState } from './trust.ts'
 import { budgetsOnTurn } from './budgets.ts'
 import { checkEscalation } from './skill-gate.ts'
@@ -81,6 +83,24 @@ function recordGate(rt: Runtime, name: string, blocked: boolean, ms: number): vo
   s.gates.set(name, g)
 }
 
+/**
+ * One evaluation of a gate: the in-memory counters (this conversation's H011) plus a `gate-attempt` entry in
+ * `.claude/gate.log.jsonl` (core journal contract; file only, buffered, so the 200-entry ring keeps the decisions),
+ * which CLI `health` / `report` read with `gateStatsFromJournal`. `skip` is journaled but counts nothing.
+ */
+async function noteAttempt(io: Io, rt: Runtime, g: { name: string; on: string }, outcome: AttemptOutcome, ms: number, tier: string, skipped?: string): Promise<void> {
+  if (outcome === 'pass' || outcome === 'block') recordGate(rt, g.name, outcome === 'block', ms)
+  if (!rt.cfg?.log?.file) return
+  try {
+    const sessionId = await io.session.id().catch(() => undefined)
+    const turn = await io.read('gateState').then((s) => s.turn, () => 0)
+    const profile = (await io.read('gate'))?.profile ?? undefined
+    await pushFileEntry(io, rt, gateAttemptEntry({ gate: g.name, on: g.on, outcome, ms, ...(sessionId ? { sessionId } : {}), ...(skipped ? { skipped } : {}) }, { ts: now(), turn, tier, ...(profile ? { profile } : {}) }), { buffered: true })
+  } catch (err) {
+    debug(io, `gate-attempt journal: ${String((err as Error)?.message ?? err)}`)
+  }
+}
+
 /** Gate counters of this session for `computeHealth(…, { gates })` (H011). */
 export function gateStats(rt: Runtime): Record<string, GateStat> {
   return Object.fromEntries([...statsOf(rt).gates].map(([k, v]) => [k, { ...v }]))
@@ -142,9 +162,13 @@ export async function runCommandGate(io: Io, rt: Runtime, g: GateCheckConfig, va
   if (!g.run?.length && !g.provider) return { pass: true, skipped: 'немає run' }
   const trust = await trustState(io, rt)
   const trusted = trust === 'trusted'
-  if (g.run?.length && !trusted) {
-    debug(io, `gate ${g.name} skipped: repository not trusted`)
-    return { pass: true, skipped: 'репозиторій не довірений' }
+  if (g.run?.length) {
+    // Р2 (core): trusted repo, scripts allowed (interactive, or userConfig allowScripts under -p), binary on the whitelist.
+    const d = commandGateDecision({ trusted, whitelist: await loadWhitelist(io, rt), scriptsAllowed: rt.interactive || rt.options.allowScripts }, g.run)
+    if (!d.run) {
+      debug(io, `gate ${g.name} skipped: ${d.skipped}`)
+      return { pass: true, skipped: d.skipped }
+    }
   }
   const prov = g.provider ? await gateProvider(io, rt, g.provider, trusted) : undefined
   let r: { exitCode: number; stdout: string; stderr: string }
@@ -219,7 +243,7 @@ async function runGates(io: Io, rt: Runtime, on: GateCheckConfig['on'], tier: st
     if (g.builtin) continue
     const t0 = now()
     const out = await runCommandGate(io, rt, g, vars)
-    if (!out.skipped) recordGate(rt, g.name, !out.pass, now() - t0)
+    await noteAttempt(io, rt, g, out.skipped ? 'skip' : out.pass ? 'pass' : 'block', now() - t0, tier, out.skipped)
     if (!out.pass) {
       await failed(io, rt, g, out, tier)
       return out.message
@@ -236,7 +260,7 @@ export async function gatesBeforeFile(io: Io, rt: Runtime, c: FileCall): Promise
   const rbw = gatesFor(rt, 'write', tier).find((g) => g.builtin && g.name === 'read-before-write')
   if (rbw) {
     const blocked = !reads?.has(c.rel) && (c.tool === 'Write' ? await io.fs.exists(c.file).catch(() => false) : true)
-    recordGate(rt, rbw.name, blocked, 0)
+    await noteAttempt(io, rt, rbw, blocked ? 'block' : 'pass', 0, tier)
     if (blocked) {
       await failed(io, rt, rbw, { pass: false }, tier)
       return { deny: `Гейт read-before-write: спочатку прочитай ${c.rel} інструментом Read, потім змінюй файл.` }
@@ -268,7 +292,10 @@ export function gatesMentioned(rt: Runtime, rels: string[]): void {
 /** `prompt` gates: a failure becomes context of the prompt. `text` (the prompt) feeds the «все одно» override counter. */
 export async function promptGates(io: Io, rt: Runtime, text?: string): Promise<string | undefined> {
   const overridden = noteGateOverride(rt, text)
-  if (overridden) await journal(io, rt, { kind: 'debug', trigger: 'gate-override', data: { gate: overridden } })
+  if (overridden) {
+    const g = rt.config?.gates?.find((x) => x.name === overridden)
+    await noteAttempt(io, rt, { name: overridden, on: g?.on ?? 'gate' }, 'override', 0, await tierOf(io, undefined))
+  }
   if (!rt.config) return undefined
   return runGates(io, rt, 'prompt', await tierOf(io, undefined), {})
 }

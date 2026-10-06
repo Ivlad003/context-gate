@@ -64,6 +64,7 @@ export const CODES: Record<string, CodeInfo> = {
   G205: { severity: 'info', title: 'MCP недоступний у CLI', explain: 'Провайдери kind=mcp і @mcp працюють лише всередині Claude Code (mod викликає $.mcp.call). У CLI значення unverified.' },
   G206: { severity: 'warning', title: 'Контекст --ctx-from не знайдено', explain: 'Знімок session:<id> відсутній у .claude/gate.log.jsonl (потрібен `log.file: true`) або fixture не є JSON-об\'єктом.' },
   G207: { severity: 'warning', title: 'Дані не готові', explain: 'Після кількох проходів рендера `needs=` досі чекає на дані без джерела; секцію відрендерено з null.' },
+  G208: { severity: 'info', title: 'Дані провайдера недоступні в адаптері', explain: 'Адаптер без моделі довіри (claude-code-hooks, pi, opencode) не запускає процеси репозиторію: `itemSources` kind=provider над cli/module/mcp-провайдером пропущено. Провайдери kind=file читаються. Повний набір — у mod і CLI.', hint: 'Використай file-провайдер (JSON, який пише CI) або mod.' },
   G210: { severity: 'warning', title: 'Файл для @include не знайдено', explain: 'Шлях @include/<Include path> не існує відносно кореня репозиторію.' },
   G211: { severity: 'warning', title: 'Секцію або елемент не знайдено', explain: '@section/@skill/@rule або --only посилається на id, якого немає.' },
   G220: { severity: 'error', title: 'Невірне ім\'я gate-tool', explain: 'Заголовок `# gate-tool:` має містити ім\'я з латиниці, цифр, _ або -.' },

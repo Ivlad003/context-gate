@@ -4,6 +4,7 @@
 
 import type { Diagnostic, IncludeMode, Node, Scope, SectionNode, Tier } from './types.ts'
 import { evalExpr, isStatic, newBudget, parseExpr, splitTemplate } from './expr.ts'
+import { canonicalNodes } from './canonical.ts'
 
 export interface MarkdownParseResult {
   section: SectionNode
@@ -194,7 +195,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
   }
   // Р5: `store=` on @run/@call is the legacy form of `@store`; accepted until 1.0 with G180.
   const legacyStore = (d: 'run' | 'call', key: string, as: string | undefined, line: number): void => {
-    diag('G180', `store= на @${d} — застаріла форма збереження`, line, 'warning', `@${d} … as=${as ?? key}, потім «@store ${as ?? key}»`)
+    diag('G180', `store= на @${d} — застаріла форма збереження`, line, 'warning', `@${d} … as=${as ?? key}, потім «@store ${as ?? key}${as && as !== key ? ` to=${key}` : ''}»`)
   }
   const checkExpr = (src: string, line: number): void => {
     for (const d of parseExpr(src).diagnostics) diagnostics.push({ ...d, path, line })
@@ -379,8 +380,9 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         break
       }
       case 'store': {
-        if (!/^[A-Za-z_][\w-]*$/.test(rest)) { diag('G004', 'Очікувалось «@store ім\'я»', line); break }
-        target().push({ t: 'store', name: rest })
+        const sm = /^([A-Za-z_][\w-]*)(?:\s+to=([\w][\w.-]*))?$/.exec(rest)
+        if (!sm) { diag('G004', 'Очікувалось «@store ім\'я [to=ключ]»', line); break }
+        target().push({ t: 'store', name: sm[1]!, ...(sm[2] && sm[2] !== sm[1] ? { key: sm[2] } : {}) })
         break
       }
       case 'run': {
@@ -586,7 +588,8 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
   const fmUses: Node[] = fm.use && typeof fm.use === 'object' && !Array.isArray(fm.use)
     ? Object.entries(fm.use).map(([name, p]) => ({ t: 'use', name, path: p }))
     : []
-  section.children = [...fmUses, ...expand(root.children, [])]
+  // Р5: only canonical nodes leave the compiler (`store=` → `store`, `@let x = scripts.f()` → `call`).
+  section.children = canonicalNodes([...fmUses, ...expand(root.children, [])])
 
   return { section, uses, diagnostics, ...(sourceHash ? { sourceHash } : {}), frontmatter: fm }
 }
@@ -656,7 +659,7 @@ export function printMarkdownNodes(nodes: readonly Node[]): string {
         case 'let': case 'set': dir(`@${n.t} ${n.name} = ${n.value}`); break
         case 'repeat': dir(`@repeat ${n.n}`); walk(n.children, listKind); dir('@end'); break
         case 'break': case 'continue': dir(`@${n.t}`); break
-        case 'store': dir(`@store ${n.name}`); break
+        case 'store': dir(`@store ${n.name}${n.key ? ` to=${n.key}` : ''}`); break
         case 'run': dir(`@run ${n.lang}${opts({ as: n.as, cache: n.cache, store: n.store, needs: n.needs?.join(',') })}`); out += n.code + '\n'; dir('@end'); break
         case 'use': dir(`@use ${n.name} ${n.path}`); break
         case 'call': {

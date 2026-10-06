@@ -4,7 +4,7 @@
 import type { Diagnostic, GateConfig, Item, ItemSourceConfig, MdcRule, RuleType, Value } from './types.ts'
 import { diag } from './codes.ts'
 import { matchAny, splitTopLevel } from './glob.ts'
-import { evalSource, newBudget, toText } from './expr.ts'
+import { evalSource, newBudget, splitTemplate, toText } from './expr.ts'
 
 export interface ParseMdcOptions {
   /** Repo-relative POSIX path of the `.mdc` file. */
@@ -397,9 +397,10 @@ function globsOf(v: Value | undefined): string[] {
 
 /** `{{ item.from }} не імпортує {{ item.to }}`: each `{{ expr }}` is a core expression over `{ item, index }`. */
 export function renderItemTemplate(template: string, item: Value, index: number): string {
-  return template.replace(/\{\{([\s\S]*?)\}\}/g, (_m, expr: string) => {
-    try { return toText(evalSource(expr.trim(), { item, index }, newBudget(1000))) } catch { return '' }
-  })
+  return splitTemplate(template).map((p) => {
+    if ('text' in p) return p.text
+    try { return toText(evalSource(p.expr, { item, index }, newBudget(1000))) } catch { return '' }
+  }).join('')
 }
 
 /** Rules from a provider value (`provider` source): `field` (or `pick`) selects a list (an object's values,
@@ -447,4 +448,100 @@ export function providerRules(value: Value | undefined, src: ItemSourceConfig): 
 /** A rule that lives in a repo file (instruction-file delivery is possible), as opposed to provider data. */
 export function isFileRule(rule: Pick<MdcRule, 'source'>): boolean {
   return !rule.source?.startsWith('provider:')
+}
+
+// ───────────────────────── all rule sources over a sync file port ─────────────────────────
+
+/** Repo access for `loadRuleSources`: repo-relative POSIX paths (`''` is the root). */
+export interface RuleSourceFs {
+  /** Entries of a directory; `[]` when it is missing. Links are reported as their target kind or skipped. */
+  list(dir: string): { name: string; kind: 'file' | 'dir' }[]
+  read(path: string): string | undefined
+}
+
+const RULE_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'target', 'vendor', '.venv'])
+const RULE_MAX_DEPTH = 6
+const RULE_MAX_DIRS = 400
+const MD_RULE_FILE = /^(?!readme\.md$).+\.(md|markdown)$/i
+
+function trimRuleDir(d: string): string {
+  return d.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+}
+
+function listRuleFiles(fs: RuleSourceFs, dir: string, ext: RegExp, out: string[], depth = 0): void {
+  if (depth > RULE_MAX_DEPTH) return
+  for (const e of fs.list(dir)) {
+    const rel = dir ? `${dir}/${e.name}` : e.name
+    if (e.kind === 'file' && ext.test(e.name)) out.push(rel)
+    else if (e.kind === 'dir' && !RULE_SKIP_DIRS.has(e.name)) listRuleFiles(fs, rel, ext, out, depth + 1)
+  }
+}
+
+/** `*\/.cursor/rules` below the root (the `nested` option), breadth-first with the mod's caps. */
+export function nestedCursorRuleDirs(fs: RuleSourceFs): string[] {
+  const found: string[] = []
+  const queue: { rel: string; depth: number }[] = [{ rel: '', depth: 0 }]
+  let visited = 0
+  while (queue.length && visited < RULE_MAX_DIRS) {
+    const { rel, depth } = queue.shift()!
+    visited++
+    for (const e of fs.list(rel)) {
+      if (e.kind !== 'dir') continue
+      if (e.name === '.cursor' && rel) found.push(`${rel}/.cursor/rules`)
+      if (e.name.startsWith('.') || RULE_SKIP_DIRS.has(e.name) || depth + 1 > RULE_MAX_DEPTH) continue
+      queue.push({ rel: rel ? `${rel}/${e.name}` : e.name, depth: depth + 1 })
+    }
+  }
+  return found
+}
+
+/**
+ * Every rule source of the config, as the mod's layer 1 loads them (G-04, G-51): `.cursor/rules` plus each
+ * `cursor-mdc` `dir` (and nested `*\/.cursor/rules` when asked), `markdown-dir` sources, then `provider` sources.
+ * `providerValue(name)` gives the provider's data; `undefined` means the adapter cannot produce it (a `G208` info
+ * names the skipped source). Ids are unique: a later source never replaces an earlier rule with the same id.
+ */
+export function loadRuleSources(cfg: GateConfig, fs: RuleSourceFs, opts: { providerValue?: (name: string) => Value | undefined } = {}): { rules: MdcRule[]; diagnostics: Diagnostic[] } {
+  const rules: MdcRule[] = []
+  const diagnostics: Diagnostic[] = []
+  if (cfg.cursorRules?.enabled === false) return { rules, diagnostics }
+  const { dirs, nested } = cursorRuleDirs(cfg)
+  const mdc: string[] = []
+  for (const d of dirs) listRuleFiles(fs, trimRuleDir(d), /\.mdc$/, mdc)
+  if (nested) for (const d of nestedCursorRuleDirs(fs)) listRuleFiles(fs, d, /\.mdc$/, mdc)
+  for (const path of [...new Set(mdc)].sort()) {
+    const text = fs.read(path)
+    if (text === undefined) continue
+    const { id, dirPrefix } = ruleIdFromPath(path)
+    const r = parseMdc(text, { path, id, dirPrefix })
+    rules.push(r.rule)
+    diagnostics.push(...r.diagnostics)
+  }
+  const has = (id: string) => rules.some((x) => x.id === id)
+  const md: { path: string; src: ItemSourceConfig }[] = []
+  for (const src of ruleSourcesOf(cfg)) {
+    if (src.kind !== 'markdown-dir' || !src.dir) continue
+    const found: string[] = []
+    listRuleFiles(fs, trimRuleDir(src.dir), MD_RULE_FILE, found)
+    for (const path of found) md.push({ path, src })
+  }
+  for (const f of md.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    const text = fs.read(f.path)
+    if (text === undefined) continue
+    const r = parseMarkdownRule(text, { path: f.path, id: markdownRuleId(f.path, trimRuleDir(f.src.dir!)), ...(f.src.frontmatter ? { frontmatter: f.src.frontmatter } : {}), ...(f.src.as ? { as: f.src.as } : {}) })
+    if (!has(r.rule.id)) rules.push(r.rule)
+    diagnostics.push(...r.diagnostics)
+  }
+  for (const src of ruleSourcesOf(cfg)) {
+    if (src.kind !== 'provider' || !src.name) continue
+    const v = opts.providerValue?.(src.name)
+    if (v === undefined) {
+      diagnostics.push(diag('G208', `itemSources provider ${src.name}: дані провайдера недоступні в цьому адаптері — правила пропущено`))
+      continue
+    }
+    const r = providerRules(v, src)
+    for (const rule of r.rules) if (!has(rule.id)) rules.push(rule)
+    diagnostics.push(...r.diagnostics)
+  }
+  return { rules, diagnostics }
 }

@@ -280,3 +280,19 @@ test('filterEnv keeps whitelisted, set names; maskSecrets hides every value; deb
   assert.deepEqual(debugLogPath({}, true), { path: DEBUG_LOG_PATH, maxBytes: 1024 * 1024 })
   assert.deepEqual(debugLogPath({ debug: true, debugLog: { path: 'x.log', maxBytes: 10 } }), { path: 'x.log', maxBytes: 10 })
 })
+
+test('commandAllowed / commandGateDecision: binary whitelist and trust for command gates (Р2)', async () => {
+  const { commandAllowed, commandGateDecision, binaryWhitelist } = await import('../packages/core/src/config.ts')
+  const wl = binaryWhitelist(['node', 'eslint', 'bash'], undefined)
+  const rows: [string[], boolean][] = [[['eslint', '-f', 'json'], true], [['/usr/local/bin/node', 'x.js'], true], [['npx', 'tsc'], false], [[], false], [[''], false]]
+  for (const [argv, ok] of rows) {
+    assert.equal(commandAllowed(argv, wl), ok, argv.join(' '))
+    assert.equal(commandAllowed(argv, new Set(wl)), ok, `set: ${argv.join(' ')}`)
+  }
+  assert.deepEqual(commandGateDecision({ trusted: true, whitelist: wl }, ['eslint', '.']), { run: true })
+  assert.deepEqual(commandGateDecision({ trusted: false, whitelist: wl }, ['eslint', '.']), { run: false, skipped: 'репозиторій не довірений' })
+  assert.match((commandGateDecision({ trusted: true, whitelist: wl }, ['npx', 'tsc']) as { skipped: string }).skipped, /npx поза білим списком/)
+  assert.match((commandGateDecision({ trusted: true, whitelist: wl, scriptsAllowed: false }, ['eslint']) as { skipped: string }).skipped, /allowScripts/)
+  // The repo list only narrows the user list.
+  assert.equal(commandAllowed(['eslint'], binaryWhitelist(['node', 'eslint'], ['node'])), false)
+})

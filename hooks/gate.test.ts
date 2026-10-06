@@ -1,7 +1,7 @@
 // Layer 2 (skill-gate), budgets, gates, trust, /gate and the band, through `claude plugin test`.
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect } from 'claude-code/testing'
 
-import { BAND_PROPS, ROOT, RUN, mountRepo } from './testkit.ts'
+import { BAND_PROPS, ROOT, RUN, mountRepo, test } from './testkit.ts'
 
 const CONFIG = {
   groups: {
@@ -206,8 +206,25 @@ describe('gates', () => {
     expect(repo.runs).toHaveLength(0)
   })
 
-  test('a trusted repo runs the commit gate and denies on failure', { options: { trustBuild: 'always' } }, async ($, on) => {
-    const repo = mountRepo(on, { files: FILES, run: () => ({ exitCode: 1, stdout: 'FAIL a.test.ts', stderr: '' }) })
+  test('a command gate whose binary is off the whitelist, or without allowScripts under -p, is skipped (core commandGateDecision)', { options: { trustBuild: 'always', allowScripts: true } }, async ($, on) => {
+    const repo = mountRepo(on, { files: FILES }) // default whitelist: no npm
+    on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as never)
+    const r = await $.tool.call({ tool: 'Bash', tool_use_id: 't1', command: 'git commit -m wip' })
+    expect(r.deny).toBeUndefined()
+    expect(repo.runs).toHaveLength(0)
+  })
+
+  test('a trusted repo with npm whitelisted but no allowScripts under -p skips the gate', { options: { trustBuild: 'always' } }, async ($, on) => {
+    const repo = mountRepo(on, { files: FILES, allowBinaries: ['npm'], run: () => ({ exitCode: 1, stdout: 'FAIL', stderr: '' }) })
+    on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as never)
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+    expect((await $.tool.call({ tool: 'Bash', tool_use_id: 't1', command: 'git commit -m wip' })).deny).toBeUndefined()
+    expect(repo.runs).toHaveLength(0)
+  })
+
+  test('a trusted repo runs the commit gate and denies on failure', { options: { trustBuild: 'always', allowScripts: true } }, async ($, on) => {
+    const repo = mountRepo(on, { files: FILES, allowBinaries: ['npm'], run: () => ({ exitCode: 1, stdout: 'FAIL a.test.ts', stderr: '' }) })
     on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as never)
     const r = await $.tool.call({ tool: 'Bash', tool_use_id: 't1', command: 'git commit -m wip' })
     expect(repo.runs).toEqual([['npm', 'test']])
@@ -225,10 +242,10 @@ describe('gates', () => {
     expect(repo.runs).toHaveLength(0)
   })
 
-  test('a turn gate with onlyNew blocks only violations beyond the baseline', { options: { trustBuild: 'always' } }, async ($, on) => {
+  test('a turn gate with onlyNew blocks only violations beyond the baseline', { options: { trustBuild: 'always', allowScripts: true } }, async ($, on) => {
     const cfg = { ...CONFIG, gates: [{ name: 'typecheck', on: 'turn', run: ['tsc', '--noEmit'], onlyNew: true, baseline: '.claude/gate.baseline.json' }] }
     let out = 'a.ts(1,1): error TS1'
-    const repo = mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg) }, run: () => ({ exitCode: 2, stdout: out, stderr: '' }) })
+    const repo = mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg) }, allowBinaries: ['tsc'], run: () => ({ exitCode: 2, stdout: out, stderr: '' }) })
     on('turn.complete', ($, e) => ({ text: e.answer }))
     const turn = () => $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 'x', reason: 'answer' } as never)
     await turn()

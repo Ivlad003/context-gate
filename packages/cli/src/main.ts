@@ -19,9 +19,9 @@ import { benchCommand, reportCommand } from './cmd-report.ts'
 import { expandCommand, schemaInferCommand } from './cmd-expand.ts'
 import { indexCommand } from './cmd-index.ts'
 import { formatPrompt } from './fmt.ts'
-import { loadData, loadRepo, setData, validDataKey, scriptFiles } from './context.ts'
-import { parseToolHeader } from '../../core/src/toolheader.ts'
+import { buildContext, callScriptTool, loadData, loadRepo, scriptTools, setData, validDataKey } from './context.ts'
 import { readTrust, setTrust, trustState, readUserSettings, userSettingsPath, trustPath, binaryWhitelist, repoCacheDir } from './settings.ts'
+import { withUserSkills } from './host-node.ts'
 import { findRoot, parseJsonl, posix, readStdin, readText, walkFiles, writeText, writeJson } from './util.ts'
 
 export const VERSION: string = (pkg as { version: string }).version
@@ -100,7 +100,7 @@ async function doBuild(root: string, p: ParsedArgv, io: Io): Promise<number> {
 
 async function stageCommand(name: PipeStageName, p: ParsedArgv, root: string, io: Io): Promise<number> {
   const args: Record<string, string> = {}
-  for (const [k, v] of Object.entries(p.flags)) if (k !== 'root' && k !== 'help' && k !== 'trust-repo') args[k] = Array.isArray(v) ? v.join(',') : String(v)
+  for (const [k, v] of Object.entries(p.flags)) if (k !== 'root' && k !== 'help' && k !== 'trust-repo' && k !== 'user-skills') args[k] = Array.isArray(v) ? v.join(',') : String(v)
   const stage: PipeStage = { stage: name, args, positional: p.positional, ...(name === 'where' ? { expr: p.positional.join(' ') } : {}) }
   const needsInput = name !== 'collect' && name !== 'why' && name !== 'signals'
   const input = needsInput || !process.stdin.isTTY ? parseJsonl(await io.stdin()) : { items: [], bad: 0 }
@@ -331,17 +331,18 @@ export const COMMANDS: Record<string, Command> = {
     usage: ['report [--since 7d] [--json]'],
     flags: { since: { type: 'string', desc: 'вікно (7d, 24h або дата)', arg: '<dur>' }, json: { type: 'bool', desc: 'JSON' } },
     async run(p, root, io) {
-      const r = reportCommand(root, { ...(str(p, 'since') ? { since: str(p, 'since') } : {}), json: bool(p, 'json') })
+      const r = await reportCommand(root, { ...(str(p, 'since') ? { since: str(p, 'since') } : {}), json: bool(p, 'json'), ...(bool(p, 'trust-repo') ? { trustRepo: true } : {}) })
       io.out(r.out)
       return r.code
     },
   },
   bench: {
     summary: 'токени промпту й елементів до/після gate, unverified — по bench/repos.json або заданих теках',
-    usage: ['bench [--before] [--after] [dirs…] [--profile p] [--tier t] [--json]'],
+    usage: ['bench [--before] [--after] [dirs…] [--profile p] [--tier t] [--json] [--user-skills]'],
     flags: { before: { type: 'bool', desc: 'колонка без gate' }, after: { type: 'bool', desc: 'колонка з gate' }, json: { type: 'bool', desc: 'JSON' }, profile: ctxFlags.profile!, tier: ctxFlags.tier!, model: ctxFlags.model! },
     async run(p, root, io) {
-      const r = await benchCommand(root, p.positional, { before: bool(p, 'before'), after: bool(p, 'after'), json: bool(p, 'json'), ...(str(p, 'profile') ? { profile: str(p, 'profile') } : {}), ...(str(p, 'tier') ? { tier: str(p, 'tier') } : {}), ...(str(p, 'model') ? { model: str(p, 'model') } : {}) })
+      // Bench numbers never depend on the machine: user skills only with an explicit --user-skills.
+      const r = await withUserSkills(p.flags['user-skills'] === true, () => benchCommand(root, p.positional, { before: bool(p, 'before'), after: bool(p, 'after'), json: bool(p, 'json'), ...(str(p, 'profile') ? { profile: str(p, 'profile') } : {}), ...(str(p, 'tier') ? { tier: str(p, 'tier') } : {}), ...(str(p, 'model') ? { model: str(p, 'model') } : {}) }))
       io.out(r.out)
       return r.code
     },
@@ -391,20 +392,29 @@ export const COMMANDS: Record<string, Command> = {
     },
   },
   tools: {
-    summary: 'інструменти моделі зі скриптів .claude/prompt/scripts (заголовки # gate-tool:)',
-    usage: ['tools [--json]'],
-    flags: { json: { type: 'bool', desc: 'JSON' } },
+    summary: 'інструменти моделі: # gate-tool: у .claude/prompt/scripts і над експортами модулів (lib, module-провайдери, use); --call виконує один',
+    usage: ['tools [--json]', "tools --call <name> [--input '{\"k\":1}'] [--trust-repo]"],
+    flags: { json: { type: 'bool', desc: 'JSON' }, call: { type: 'string', desc: 'виконати інструмент як mod (гейт, tiers, довіра)', arg: '<name>' }, input: { type: 'string', desc: 'вхід інструмента (JSON-обʼєкт)', arg: '<json>' }, ...ctxFlags },
     async run(p, root, io) {
-      const repo = loadRepo(root)
-      const tools: Record<string, unknown>[] = []
-      let bad = 0
-      for (const f of scriptFiles(repo)) {
-        const { header, diagnostics } = parseToolHeader(readText(join(root, f)) ?? '')
-        printDiags(io, diagnostics.map((d) => ({ ...d, path: f })))
-        bad += diagnostics.filter((d) => d.severity === 'error').length
-        if (header) tools.push({ ...header, path: f })
+      const name = str(p, 'call')
+      if (name) {
+        let input: Record<string, Value> = {}
+        const raw = str(p, 'input')
+        if (raw) {
+          try { input = JSON.parse(raw) as Record<string, Value> } catch (e) { io.err(`--input: не JSON (${(e as Error).message})\n`); return 2 }
+          if (!input || typeof input !== 'object' || Array.isArray(input)) { io.err('--input: потрібен JSON-обʼєкт\n'); return 2 }
+        }
+        const ctx = await buildContext(ctxOpts(p, root))
+        const r = await callScriptTool(ctx, name, input)
+        if ('deny' in r) { io.err(r.deny + '\n'); return 1 }
+        io.out(r.result.endsWith('\n') ? r.result : r.result + '\n')
+        return 'isError' in r ? 1 : 0
       }
-      io.out(bool(p, 'json') ? JSON.stringify(tools) + '\n' : tools.length ? tools.map((t) => `${t.name} — ${t.description ?? ''} (${t.path}${t.tiers ? `; tiers ${(t.tiers as string[]).join(', ')}` : ''})`).join('\n') + '\n' : 'немає скриптів із # gate-tool:\n')
+      const repo = loadRepo(root)
+      const { tools, diagnostics } = scriptTools(repo)
+      printDiags(io, diagnostics)
+      const bad = diagnostics.filter((d) => d.severity === 'error').length
+      io.out(bool(p, 'json') ? JSON.stringify(tools) + '\n' : tools.length ? tools.map((t) => `${t.name} — ${t.description ?? ''} (${t.path}${t.fn ? `#${t.fn}` : ''}${t.tiers ? `; tiers ${t.tiers.join(', ')}` : ''})`).join('\n') + '\n' : 'немає інструментів із # gate-tool:\n')
       return bad ? 1 : 0
     },
   },
@@ -464,7 +474,7 @@ export async function main(argv: readonly string[], io: Io): Promise<number> {
   if (p.errors.length) { io.err(p.errors.join('\n') + `\ncontext-gate ${name} --help — довідка.\n`); return 2 }
   const root = str(p, 'root') ? resolve(str(p, 'root')!) : findRoot(process.cwd())
   try {
-    return await cmd.run(p, root, io)
+    return await withUserSkills(p.flags['user-skills'] !== false, () => cmd.run(p, root, io))
   } catch (e) {
     io.err(`context-gate ${name}: ${(e as Error)?.stack ?? String(e)}\n`)
     return 1

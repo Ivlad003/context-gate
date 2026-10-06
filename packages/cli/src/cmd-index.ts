@@ -4,10 +4,9 @@
 import { join } from 'node:path'
 import type { Value } from '../../core/src/types.ts'
 import { buildGateIndex, symbolsOf } from '../../core/src/gateindex.ts'
-import { buildContext, collectItems, scriptFiles, type ContextOptions } from './context.ts'
+import { buildContext, collectItems, scriptTools, type ContextOptions } from './context.ts'
 import { renderWith } from './cmd-run.ts'
-import { parseToolHeader } from '../../core/src/toolheader.ts'
-import { readText, writeJson } from './util.ts'
+import { writeJson } from './util.ts'
 
 /** The CLI's index: core `buildGateIndex` over the repo on disk (the mod adds the session fields). */
 export async function buildIndex(o: ContextOptions): Promise<Record<string, unknown>> {
@@ -26,10 +25,8 @@ export async function buildIndex(o: ContextOptions): Promise<Record<string, unkn
     providers[name] = { kind: p.kind, ...(p.builtin ? { builtin: true } : {}), ...(p.schema ? { schema: p.schema } : {}), ...(fns.length ? { functions: fns } : {}), ...(p.exposes ? { exposes: p.exposes } : {}) }
     if (p.exposes?.includes('symbols')) symbols.push(...symbolsOf(await ctx.providers.value(name), name))
   }
-  const tools = scriptFiles(ctx.repo).flatMap((f) => {
-    const { header } = parseToolHeader(readText(join(ctx.repo.root, f)) ?? '')
-    return header ? [{ name: header.name, path: f, ...(header.description ? { description: header.description } : {}), inputSchema: header.inputSchema, ...(header.tiers ? { tiers: header.tiers } : {}) }] : []
-  })
+  // Whole-script tools and function-level `# gate-tool:` exports (lib/*, module providers, use paths), as the mod.
+  const tools = scriptTools(ctx.repo, [...ctx.prompts.system, ...Object.values(ctx.prompts.skills)]).tools.map((t) => ({ name: t.name, path: t.path, ...(t.description ? { description: t.description } : {}), inputSchema: t.inputSchema, ...(t.tiers ? { tiers: t.tiers } : {}) }))
   return buildGateIndex({
     generatedBy: 'context-gate index',
     generatedAt: new Date().toISOString(),

@@ -1,10 +1,10 @@
 // `/gate` UI through `claude plugin test`: provenance in `/gate`, `/gate a | b` pipes in-mod, the health and
 // section panes, `/gate edit` (browser editor via $.process.spawn), the `prompt ⚠ build` marker and the
 // mod's `.claude/gate.index.json`.
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { BAND_PROPS, ROOT, RUN, mountRepo } from './testkit.ts'
+import { BAND_PROPS, ROOT, RUN, mountRepo, test } from './testkit.ts'
 
 const CONFIG = {
   groups: { frontend: ['skill:react-*', 'tool:mcp__figma__*'], backend: ['skill:prisma', 'tool:mcp__postgres__*'], base: ['skill:tdd'] },

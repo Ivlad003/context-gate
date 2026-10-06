@@ -2,15 +2,31 @@
 # End-to-end check (SPEC "Тести": «claude --plugin-dir ./context-gate на еталонному репозиторії … де
 # context-report-подібний хук на prompt.context підтверджує, що правила справді дійшли до моделі»).
 #
-# Copies examples/reference to a temp dir, runs one `claude -p` turn with context-gate and the probe plugin
-# (probe/context-gate-probe), then reads <copy>/.claude/probe.json and checks that every Always rule of the
-# reference repo is in what prompt.context returned (instruction files, or the cursorRules fallback block).
+# Copies examples/reference to a temp dir and plants a unique code word in each delivery path:
+#   - every Always rule (.cursor/rules/*.mdc with alwaysApply: true)  → prompt.context
+#   - the Auto Attached rule $E2E_AUTO (api-conventions; its globs match $E2E_READ) → tool.call Read context
+#   - the Manual rule $E2E_MANUAL (security-review), mentioned as @<id>            → prompt.submit context
+#   - a Markdown DSL section .claude/prompt/cg-e2e.md                               → prompt.compose section
+#   - the first static section of the first compiled prompt (.compiled/*.json)     → prompt.compose section
+# examples/basic: E2E_READ=src/util.ts E2E_AUTO=typescript E2E_MANUAL=release scripts/e2e.sh --repo examples/basic
+# Then runs ONE `claude -p` turn with context-gate and the probe plugin (probe/context-gate-probe), prompt
+# prefixed with `[gate:frontend]`, and checks:
+#   - every code word is in the answer (it can only be there if that path delivered it),
+#   - the model never read .cursor/rules or .claude (stream-json tool uses),
+#   - the `[gate:frontend]` prefix was stripped (the model reports what its message starts with) and the
+#     journal (.claude/gate.log.jsonl, log.file on in the copy) records profile frontend,
+#   - the probe's prompt.context sample (as before).
 #
-# Needs the claude CLI and credentials; makes one model call. Skips (exit 0) when claude is absent.
+# Needs the claude CLI and credentials; makes one model call (model: $E2E_MODEL, default haiku).
+# Skips (exit 0) when claude is absent.
 #   scripts/e2e.sh [--keep] [--repo <dir>]
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 src="$root/examples/reference"
+model="${E2E_MODEL:-haiku}"
+read_file="${E2E_READ:-apps/api/src/users.controller.ts}"   # the file the model reads (created when missing)
+auto_rule="${E2E_AUTO:-api-conventions}"                     # an Auto Attached rule whose globs match read_file
+manual_rule="${E2E_MANUAL:-security-review}"                 # a Manual rule, mentioned as @<id>
 keep=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,48 +44,77 @@ if ! command -v claude >/dev/null 2>&1; then echo "claude CLI not found: skippin
 work="$(mktemp -d "${TMPDIR:-/tmp}/context-gate-e2e.XXXXXX")"
 [[ $keep -eq 1 ]] || trap 'rm -rf "$work"' EXIT
 cp -r "$src/." "$work/"
-rm -f "$work/.claude/probe.json"
-# A unique code word in every Always rule of the copy: the answer can only contain it if the rule reached the model.
-markers=""
+rm -f "$work/.claude/probe.json" "$work/.claude/gate.log.jsonl"
+
+word() { printf 'CG-E2E-%s-%s' "$1" "$RANDOM$RANDOM"; }
+plant() { printf '\nКодове слово цього правила: %s\n' "$2" >> "$1"; }
+
+# Always rules: a code word in each.
+always=""
 for f in "$work"/.cursor/rules/*.mdc; do
   if grep -qE '^alwaysApply:[[:space:]]*true[[:space:]]*$' "$f"; then
-    m="CG-E2E-$(basename "$f" .mdc | tr 'a-z' 'A-Z')-$RANDOM"
-    printf '\nКодове слово цього правила: %s\n' "$m" >> "$f"
-    markers+="$m "
+    m="$(word "ALWAYS-$(basename "$f" .mdc | tr 'a-z' 'A-Z')")"; plant "$f" "$m"; always+="$m "
   fi
 done
+auto=""; manual=""; section=""; compiled=""
+if [[ ! -f "$work/$read_file" ]]; then mkdir -p "$(dirname "$work/$read_file")"; printf 'export const answer = 42\n' > "$work/$read_file"; fi
+if [[ -f "$work/.cursor/rules/$auto_rule.mdc" ]]; then auto="$(word AUTO)"; plant "$work/.cursor/rules/$auto_rule.mdc" "$auto"; fi
+if [[ -f "$work/.cursor/rules/$manual_rule.mdc" ]]; then manual="$(word MANUAL)"; plant "$work/.cursor/rules/$manual_rule.mdc" "$manual"; fi
+first_compiled="$(ls "$work"/.claude/prompt/.compiled/*.json 2>/dev/null | head -1 || true)"
+if [[ -n "$first_compiled" ]]; then
+  compiled="$(word COMPILED)"
+  node -e 'const [f,w]=process.argv.slice(1),fs=require("fs");const c=JSON.parse(fs.readFileSync(f,"utf8"));const s=(c.sections||[]).find((x)=>x.scope==="static"&&!x.when);if(!s)process.exit(3);s.children=[...(s.children||[]),{t:"text",value:`\nКодове слово скомпільованої секції: ${w}\n`}];fs.writeFileSync(f,JSON.stringify(c))' "$first_compiled" "$compiled" || compiled=""
+fi
+if [[ -d "$work/.claude/prompt" ]]; then
+  section="$(word SECTION)"
+  printf -- '---\nid: cg-e2e\nscope: static\n---\nКодове слово секції системного промпту: %s\n' "$section" > "$work/.claude/prompt/cg-e2e.md"
+fi
+# The journal file, so the applied profile can be checked after the run.
+if [[ -f "$work/.claude/gate.json" ]]; then
+  node -e 'const f=process.argv[1],fs=require("fs");const c=JSON.parse(fs.readFileSync(f,"utf8"));c.log={...(c.log||{}),file:true};fs.writeFileSync(f,JSON.stringify(c,null,2))' "$work/.claude/gate.json"
+fi
 ( cd "$work" && git init -q && git add -A && git -c user.email=e2e@local -c user.name=e2e commit -qm init ) >/dev/null
 
-echo "e2e: $work"
-( cd "$work" && unset CONTEXT_GATE_PROBE_OUT && claude -p \
-    --plugin-dir "$root" --plugin-dir "$root/probe/context-gate-probe" \
-    "Прочитай apps/api/src/users.controller.ts і одним реченням скажи, що він робить. Потім перелічи всі кодові слова (CG-E2E-…) з правил проєкту, які ти бачиш у своєму контексті, не читаючи файлів .cursor/rules." ) > "$work/e2e.out" 2>&1 || {
-  cat "$work/e2e.out"; echo "claude -p failed" >&2; exit 1; }
+prompt="[gate:frontend] @$manual_rule Прочитай $read_file інструментом Read і одним реченням скажи, що він робить. Не читай файлів у .cursor/ і .claude/.
+Потім:
+1) перелічи ВСІ кодові слова виду CG-E2E-… , які ти бачиш у своєму контексті (системний промпт, правила проєкту, результати інструментів, нотатки до мого повідомлення), кожне з нового рядка;
+2) окремим рядком напиши PREFIX:YES, якщо моє повідомлення, як ти його отримав, починається з квадратної дужки «[», інакше PREFIX:NO."
 
-probe="$work/.claude/probe.json"
-[[ -f "$probe" ]] || { cat "$work/e2e.out"; echo "no $probe: the probe plugin did not load" >&2; exit 1; }
+echo "e2e: $work (model $model)"
+( cd "$work" && unset CONTEXT_GATE_PROBE_OUT && claude -p --model "$model" --output-format stream-json --verbose \
+    --plugin-dir "$root" --plugin-dir "$root/probe/context-gate-probe" "$prompt" ) > "$work/e2e.jsonl" 2> "$work/e2e.err" || {
+  tail -20 "$work/e2e.err"; tail -5 "$work/e2e.jsonl"; echo "claude -p failed" >&2; exit 1; }
 
-missing_words=""
-for m in $markers; do grep -qF "$m" "$work/e2e.out" || missing_words+="$m "; done
-
-node - "$work" "$probe" "$missing_words" <<'JS'
+node - "$work" "$always" "$auto" "$manual" "$section" "$compiled" <<'JS'
 const fs = require('fs'), path = require('path')
-const [work, probeFile, missingWords] = process.argv.slice(2)
-const rulesDir = path.join(work, '.cursor', 'rules')
-const always = fs.readdirSync(rulesDir).filter((f) => f.endsWith('.mdc'))
-  .filter((f) => /^alwaysApply:\s*true\s*$/m.test(fs.readFileSync(path.join(rulesDir, f), 'utf8')))
-  .map((f) => f.replace(/\.mdc$/, ''))
-const report = JSON.parse(fs.readFileSync(probeFile, 'utf8'))
-const samples = (report.points?.prompt_context_subagent?.samples ?? []).filter((s) => s.kind === 'prompt.context')
-if (!samples.length) { console.error('prompt.context never fired'); process.exit(1) }
-const files = samples.flatMap((s) => (s.resultInstructionFiles ?? []).map((f) => f.path))
-const block = samples.some((s) => s.hasCursorRulesBlock)
-const missing = always.filter((id) => !files.some((p) => p.endsWith(`${id}.mdc`)))
-console.log(`Always rules: ${always.join(', ') || '—'}`)
-console.log(`instruction files returned: ${files.join(', ') || '—'}; cursorRules block: ${block}`)
-// The probe sees the result of the plugins below it only, so an empty list is not a failure by itself (plugin order);
-// the code words in the answer are the proof that the rules reached the model.
-if (missing.length && !block) console.log(`probe: not in the prompt.context result it saw (plugin order?): ${missing.join(', ')}`)
-if (missingWords.trim()) { console.error(`the model did not see the Always rules: missing code words ${missingWords.trim()}`); process.exit(1) }
-console.log('ok: every Always rule reached the model (code words in the answer)')
+const [work, always, auto, manual, section, compiled] = process.argv.slice(2)
+const lines = fs.readFileSync(path.join(work, 'e2e.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return {} } })
+const result = lines.filter((l) => l.type === 'result').pop()
+const answer = result?.result ?? ''
+fs.writeFileSync(path.join(work, 'e2e.out'), answer)
+const toolUses = lines.filter((l) => l.type === 'assistant').flatMap((l) => l.message?.content ?? []).filter((b) => b.type === 'tool_use')
+const touched = toolUses.map((b) => `${b.name}(${b.input?.file_path ?? b.input?.pattern ?? b.input?.command ?? ''})`)
+let failed = 0
+const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++ }
+console.log(`tool uses: ${touched.join(', ') || '—'}`)
+const peeked = toolUses.some((b) => /\.cursor\/|\.claude\//.test(JSON.stringify(b.input ?? {})))
+check(!peeked, 'the model did not read .cursor/ or .claude/ (the code words came through context-gate)')
+for (const m of always.split(' ').filter(Boolean)) check(answer.includes(m), `Always rule delivered (prompt.context): ${m}`)
+if (auto) check(answer.includes(auto), `Auto Attached rule after Read (tool.call context): ${auto}`)
+if (manual) check(answer.includes(manual), `@mention Manual rule (prompt.submit context): ${manual}`)
+if (section) check(answer.includes(section), `Markdown DSL section (prompt.compose): ${section}`)
+if (compiled) check(answer.includes(compiled), `compiled DSL section (prompt.compose): ${compiled}`)
+check(/PREFIX:NO/.test(answer) && !/PREFIX:YES/.test(answer), '[gate:frontend] prefix stripped before the model')
+const logFile = path.join(work, '.claude', 'gate.log.jsonl')
+const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []
+check(log.some((e) => e.profile === 'frontend'), `journal records profile frontend (${log.length} entries)`)
+const probeFile = path.join(work, '.claude', 'probe.json')
+if (fs.existsSync(probeFile)) {
+  const report = JSON.parse(fs.readFileSync(probeFile, 'utf8'))
+  const samples = (report.points?.prompt_context_subagent?.samples ?? []).filter((s) => s.kind === 'prompt.context')
+  const compose = (report.points?.prompt_compose_print?.samples ?? [])
+  console.log(`probe: prompt.context fired ${samples.length}x; prompt.compose traits ${JSON.stringify([...new Set(compose.flatMap((s) => s.traits ?? []))])}`)
+} else console.log('probe: no .claude/probe.json (the probe plugin did not load)')
+console.log(`answer:\n${answer}`)
+process.exit(failed ? 1 : 0)
 JS

@@ -127,11 +127,14 @@ test('@run block keeps raw code and options; @call, @use, @mcp', () => {
   ].join('\n'))
   // Р5: store= on @run/@call is accepted with G180 (canonical: as= + @store).
   assert.deepEqual(r.diagnostics.map((d) => [d.code, d.severity, d.line]), [['G180', 'warning', 4], ['G180', 'warning', 12]])
-  const [run1, run2, use, call, mcp] = r.section.children
-  assert.deepEqual(run1, { t: 'run', lang: 'python', code: 'import json\nprint(json.dumps({"x": "{{ not interpolated }}"}))', as: 'diff', cache: '10m', store: 'api', needs: ['a', 'b'] })
+  // …and normalized (core canonicalNodes): the run/call without store=, then a separate store node.
+  const [run1, store1, run2, use, call, store2, mcp] = r.section.children
+  assert.deepEqual(run1, { t: 'run', lang: 'python', code: 'import json\nprint(json.dumps({"x": "{{ not interpolated }}"}))', as: 'diff', cache: '10m', needs: ['a', 'b'] })
+  assert.deepEqual(store1, { t: 'store', name: 'diff', key: 'api' })
   assert.deepEqual(run2, { t: 'run', lang: 'bash', code: 'git log --oneline -5' })
   assert.deepEqual(use, { t: 'use', name: 'util', path: 'scripts/util.py' })
-  assert.deepEqual(call, { t: 'call', fn: 'util.summarize', args: ['commits'], kwargs: { tier: 'gate.tier' }, as: 'summary', cache: '1h', store: 'sum' })
+  assert.deepEqual(call, { t: 'call', fn: 'util.summarize', args: ['commits'], kwargs: { tier: 'gate.tier' }, as: 'summary', cache: '1h' })
+  assert.deepEqual(store2, { t: 'store', name: 'summary', key: 'sum' })
   assert.deepEqual(mcp, { t: 'include', source: 'mcp', ref: 'github.list_prs', mode: 'inline', args: { state: '"open"' }, as: 'prs' })
   assert.deepEqual(r.uses, { util: 'scripts/util.py' })
 })

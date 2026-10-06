@@ -170,14 +170,20 @@ export function skillRenderStats(entries: readonly DecisionLogEntry[], samples =
 
 // ───────────────────────── gate counters from the journal (H011 in the CLI) ─────────────────────────
 
-/** Blocks per gate from `gate-failed`, overrides from `debug {trigger: gate-override}` (attempts are mod-side). */
+/** Blocks per gate from `gate-failed`; overrides from `gate-attempt {outcome: override}` (the current contract,
+ * core journal.ts). Legacy `debug {trigger: gate-override}` entries count only for gates with no `gate-attempt`
+ * override, so a journal holding both forms never counts one «все одно» twice. */
 export function gateFailures(entries: readonly DecisionLogEntry[]): Record<string, { blocks: number; overrides: number }> {
   const out: Record<string, { blocks: number; overrides: number }> = {}
+  const legacy: Record<string, number> = {}
+  const modern = new Set<string>()
   for (const e of entries) {
     const g = typeof e.data?.gate === 'string' ? e.data.gate : undefined
     if (!g) continue
     if (e.kind === 'gate-failed') (out[g] ??= { blocks: 0, overrides: 0 }).blocks++
-    else if (e.kind === 'debug' && e.trigger === 'gate-override') (out[g] ??= { blocks: 0, overrides: 0 }).overrides++
+    else if ((e.kind as string) === 'gate-attempt' && e.data?.outcome === 'override') { modern.add(g); (out[g] ??= { blocks: 0, overrides: 0 }).overrides++ }
+    else if (e.kind === 'debug' && e.trigger === 'gate-override') legacy[g] = (legacy[g] ?? 0) + 1
   }
+  for (const [g, n] of Object.entries(legacy)) if (!modern.has(g)) (out[g] ??= { blocks: 0, overrides: 0 }).overrides += n
   return out
 }

@@ -506,6 +506,8 @@ class Interp {
   waitingSections = false
   stale = new Set<string>()
   storedMeta: Record<string, { fetchedAt: number; cache?: string }> = {}
+  /** Variables bound by `run` / `call`: the result's metadata, which a later `store` node persists with the value. */
+  varMeta = new Map<string, { ready?: Ready; cache?: string } | 'pending'>()
   refs: { id: string; mode: IncludeMode }[] = []
   uses: Record<string, string>
   frame: Scope_
@@ -778,9 +780,14 @@ class Interp {
       }
       case 'break': return 'break'
       case 'continue': return 'continue'
-      case 'let': this.define(n.name, this.ev(n.value, frame), frame); this.vars.add(n.name); return
-      case 'set': this.assign(n.name, this.ev(n.value, frame), frame); this.vars.add(n.name); return
-      case 'store': this.storeValue(n.name, lookup(frame, n.name)); return
+      case 'let': this.define(n.name, this.ev(n.value, frame), frame); this.vars.add(n.name); this.varMeta.delete(n.name); return
+      case 'set': this.assign(n.name, this.ev(n.value, frame), frame); this.vars.add(n.name); this.varMeta.delete(n.name); return
+      case 'store': {
+        const m = this.varMeta.get(n.name)
+        if (m === 'pending') return // the producing run/call has no result yet in this pass
+        this.storeValue(n.key ?? n.name, lookup(frame, n.name), m?.ready, m?.cache)
+        return
+      }
       case 'use': this.uses[n.name] = n.path; return
       case 'run': return this.runNode(n, frame)
       case 'call': return this.callNode(n, frame)
@@ -897,11 +904,13 @@ class Interp {
       this.addTrace('run', `${n.lang} as=${name}: ${ready.source}${ready.bytes !== undefined ? `, ${ready.bytes} B` : ''}${ready.detail ? ` — ${ready.detail}` : ''}`, { source: ready.source, ...(ready.ms !== undefined ? { ms: ready.ms } : {}) })
       if (ready.detail && ready.status !== 'ok') this.diag('G203', ready.status === 'fail' ? 'error' : 'warning', `@run ${n.lang} (${name}) не виконано: ${ready.detail.replace(/; stderr:.*$/s, '')}`)
       if (ready.stale) this.stale.add(`run:${name}`)
+      this.varMeta.set(name, { ready, cache: n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE })
       if (n.store) this.storeValue(n.store, ready.value, ready, n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE)
       if (ready.error) return 'stop'
       return
     }
     this.define(name, null)
+    this.varMeta.set(name, 'pending')
     const waiting = (n.needs ?? []).filter(d => !this.readyNames.has(d) && !this.runReady(d))
     if (waiting.length) return
     const stdin = JSON.stringify({ ctx: snapshot(frame, this.r.root), args: lookup(frame, 'args') })
@@ -922,11 +931,13 @@ class Interp {
       const ready = this.useReady(key)
       if (!ready) {
         this.define(n.as, null)
+        this.varMeta.set(n.as, 'pending')
         this.needs.set(key, { kind: 'call', key, module, fn, label: n.fn, args, kwargs, cacheMs: parseDurationMs(n.cache ?? this.r.opts.runCacheDefault) })
         return
       }
       this.define(n.as, ready.value)
       this.readyNames.add(n.as)
+      this.varMeta.set(n.as, { ready, ...(n.cache ? { cache: n.cache } : {}) })
       this.addTrace('call', `${n.fn} as=${n.as}: ${ready.source}${ready.detail ? ` — ${ready.detail}` : ''}`, { source: ready.source })
       if (ready.stale) this.stale.add(`call:${n.as}`)
       if (n.store) this.storeValue(n.store, ready.value, ready, n.cache)
@@ -934,7 +945,9 @@ class Interp {
     }
     const v = this.callFn(n.fn, args, kwargs)
     this.define(n.as, v)
-    if (!this.needs.has(`prov:${n.fn}:${stableJson([args, kwargs])}`)) {
+    if (this.needs.has(`prov:${n.fn}:${stableJson([args, kwargs])}`)) this.varMeta.set(n.as, 'pending')
+    else {
+      this.varMeta.set(n.as, {})
       this.readyNames.add(n.as)
       this.addTrace('call', `${n.fn} as=${n.as}`, { source: 'run' })
       if (n.store) this.storeValue(n.store, v)

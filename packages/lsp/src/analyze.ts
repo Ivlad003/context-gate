@@ -6,6 +6,7 @@
 
 import type TS from 'typescript'
 import type { Code, Diagnostic } from '../../core/src/types.ts'
+import { templateClose } from '../../core/src/expr.ts'
 import { checkExpr, completeExpr, hoverExpr, inferShape, type Bindings, type CompletionResult, type ExprHover } from './exprcheck.ts'
 import type { CtxModel, Shape } from './model.ts'
 
@@ -138,7 +139,8 @@ export function placeholderRanges(s: string): [number, number][] {
   while (i < s.length) {
     const open = s.indexOf('{{', i)
     if (open < 0) break
-    const close = s.indexOf('}}', open + 2)
+    let close = templateClose(s, open + 2)
+    if (close < 0) close = s.indexOf('}}', open + 2)
     let a = open + 2
     let b = close < 0 ? s.length : close
     while (a < b && /\s/.test(s[a]!)) a++

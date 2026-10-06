@@ -9,6 +9,7 @@ import { normalizePath } from '../../core/src/glob.ts'
 import { makeItem } from '../../core/src/items.ts'
 import { extractMentions, extractPromptFlag } from '../../core/src/gatecmd.ts'
 import { tierForModel } from '../../core/src/config.ts'
+import { gateAttemptEntry } from '../../core/src/journal.ts'
 
 /** Claude Code saves a hook's additionalContext above this size to a file and shows a preview only. */
 export const ADDITIONAL_CONTEXT_LIMIT = 10_000
@@ -430,14 +431,18 @@ function writeGate(input: HookInput, ctx: HookContext, state: SessionState, tool
   const exists = rel !== '' && ctx.exists(rel)
   const gateStub = { profile: state.gate.profile, tier } as Gate
 
-  if (exists && readBeforeWriteActive(ctx.config, tier) && !state.read.includes(rel)) {
+  const rbw = exists && readBeforeWriteActive(ctx.config, tier)
+  // H011: every evaluation of the gate is a `gate-attempt` (core journal contract), a block also `gate-failed`.
+  const attempt = (outcome: 'pass' | 'block'): DecisionLogEntry => gateAttemptEntry({ gate: 'read-before-write', on: 'write', outcome, adapter: 'claude-code-hooks', ...(input.session_id ? { sessionId: input.session_id } : {}) }, { ts: ctx.now, turn: state.gate.turn, tier, ...(state.gate.profile ? { profile: state.gate.profile } : {}) })
+  if (rbw && !state.read.includes(rel)) {
     const reason = tool === 'Write'
       ? `read-before-write: ${rel} уже існує; прочитай його інструментом Read перед перезаписом (tier ${tier}).`
       : `read-before-write: спершу прочитай ${rel} інструментом Read, потім редагуй (tier ${tier}).`
     const entry: DecisionLogEntry = { ...denyLog(ctx, state, gateStub, `file:${rel}`, reason, false), kind: 'gate-failed', trigger: 'read-before-write' }
     if (entry.profile === undefined) delete entry.profile
-    return { output: denyOutput(reason), state, log: [entry] }
+    return { output: denyOutput(reason), state, log: [entry, attempt('block')] }
   }
+  const passed = rbw ? [attempt('pass')] : []
   // strictWrite (edge case 2): a Write of a new file whose Auto Attached rule hasn't been delivered.
   if (!exists && tool === 'Write' && ctx.config.cursorRules?.strictWrite) {
     const applied = isApplied(ctx.config, state, ctx.env)
@@ -447,8 +452,8 @@ function writeGate(input: HookInput, ctx: HookContext, state: SessionState, tool
       const packed = packWithin(rules, ADDITIONAL_CONTEXT_LIMIT - 300, perInjection(ctx.config))
       for (const id of packed.included) state.seen.push(dedupKey(input, id))
       const reason = `${packed.text}\n\nДля ${rel} діють правила вище. Повтори запис з їх урахуванням.`
-      return { output: denyOutput(reason), state, log: [deliveredLog(ctx, state.gate.turn, tier, packed.included, 'strict-write', rel)] }
+      return { output: denyOutput(reason), state, log: [deliveredLog(ctx, state.gate.turn, tier, packed.included, 'strict-write', rel), ...passed] }
     }
   }
-  return { state, log: [] }
+  return { state, log: passed }
 }

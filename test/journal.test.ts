@@ -113,3 +113,22 @@ test('snapshot contract: snapshotEntry → JSONL → findSnapshot (+ skill-rende
   const pruned = fromJsonl(pruneSnapshots(many, 2)).items as { kind: string; data?: { ctxPercent: number } }[]
   assert.deepEqual(pruned.map((e) => e.kind === 'snapshot' ? e.data!.ctxPercent : e.kind), [3, 4, 'deny'])
 })
+
+test('gate-attempt contract: gateAttemptEntry → gateStatsFromJournal (H011); override and skip are not attempts', async () => {
+  const { gateAttemptEntry, gateStatsFromJournal } = await import('../packages/core/src/journal.ts')
+  const at = { ts: 100, turn: 1, tier: 'quick' }
+  const e = gateAttemptEntry({ gate: 'lint', on: 'commit', outcome: 'block', ms: 12.4, sessionId: 'a' }, { ...at, profile: 'web' })
+  assert.deepEqual(e, { ts: 100, turn: 1, trigger: 'gate:commit', profile: 'web', tier: 'quick', enabled: [], disabled: [], reason: [], kind: 'gate-attempt', data: { gate: 'lint', outcome: 'block', on: 'commit', ms: 12, sessionId: 'a' } })
+  const entries = [
+    e,
+    gateAttemptEntry({ gate: 'lint', outcome: 'pass', ms: 8, sessionId: 'a' }, at),
+    gateAttemptEntry({ gate: 'lint', outcome: 'override', sessionId: 'a' }, at),
+    gateAttemptEntry({ gate: 'lint', outcome: 'skip', skipped: 'репозиторій не довірений', sessionId: 'a' }, at),
+    gateAttemptEntry({ gate: 'tsc', outcome: 'block', sessionId: 'b' }, { ...at, ts: 50 }),
+    { kind: 'gate-failed', data: { gate: 'lint' } },
+    null,
+  ]
+  assert.deepEqual(gateStatsFromJournal(entries), { lint: { attempts: 2, blocks: 1, ms: 20, overrides: 1 }, tsc: { attempts: 1, blocks: 1, ms: 0, overrides: 0 } })
+  assert.deepEqual(Object.keys(gateStatsFromJournal(entries, { sessionId: 'b' })), ['tsc'])
+  assert.deepEqual(Object.keys(gateStatsFromJournal(entries, { from: 60 })), ['lint'])
+})

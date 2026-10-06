@@ -80,6 +80,8 @@ export interface BuildResult {
 export interface PromptLock {
   compiler: string
   prompts: Record<string, { entry?: string; sourceHash: string; sources: { path: string; hash: string }[]; package?: string }>
+  /** `prompt.packages` as built: by the configured name, the resolved version and the hash of its package.json. */
+  packages?: Record<string, { version?: string; hash: string }>
 }
 
 const posix = (p: string) => p.split(sep).join('/')
@@ -564,7 +566,17 @@ export function readBuildConfig(root: string): BuildConfig | undefined {
 
 // ───────────────────────── Prompt packages (SPEC «Спільні бібліотеки промптів») ─────────────────────────
 
-export interface PromptPackage { name: string; version?: string; dir: string; jobs: EntryJob[] }
+export interface PromptPackage {
+  /** `name@version` label (provenance in SKILL.md). */
+  name: string
+  /** The name as configured in `prompt.packages` (the lock key). */
+  spec: string
+  version?: string
+  /** sha256 of the resolved package.json: a new version or a changed manifest makes its skills stale. */
+  hash: string
+  dir: string
+  jobs: EntryJob[]
+}
 
 /**
  * Resolves `prompt.packages` entries: npm names (looked up in `node_modules` from the root upwards) or
@@ -586,7 +598,8 @@ export function resolvePromptPackages(root: string, names: readonly string[]): {
       }
     }
     let pkg: Record<string, unknown> | undefined
-    try { pkg = dir ? JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, unknown> : undefined } catch { pkg = undefined }
+    let manifest = ''
+    try { manifest = dir ? readFileSync(join(dir, 'package.json'), 'utf8') : ''; pkg = dir ? JSON.parse(manifest) as Record<string, unknown> : undefined } catch { pkg = undefined }
     if (!dir || !pkg) { diagnostics.push(diag('G164', 'error', `Пакет промптів «${name}» не знайдено (prompt.packages).`, { path: '.claude/gate.json', hint: `npm i -D ${name}` })); continue }
     const label = `${typeof pkg.name === 'string' ? pkg.name : name}${typeof pkg.version === 'string' ? `@${pkg.version}` : ''}`
     const cg = (pkg['context-gate'] ?? pkg.contextGate) as { skills?: unknown } | undefined
@@ -606,7 +619,7 @@ export function resolvePromptPackages(root: string, names: readonly string[]): {
       if (entry) jobs.push({ entry, kind: 'skills', package: label })
       else diagnostics.push(diag('G164', 'error', `Пакет ${label}: немає вхідного модуля (exports, module, main або context-gate.skills).`, { path: '.claude/gate.json' }))
     }
-    packages.push({ name: label, ...(typeof pkg.version === 'string' ? { version: pkg.version } : {}), dir, jobs })
+    packages.push({ name: label, spec: name, ...(typeof pkg.version === 'string' ? { version: pkg.version } : {}), hash: sha256(manifest), dir, jobs })
   }
   return { packages, diagnostics }
 }
@@ -647,10 +660,14 @@ export async function buildPrompts(opts: BuildOptions): Promise<BuildResult> {
   const jobs: EntryJob[] = entries.map((entry) => ({ entry, kind: 'default' }))
   const diagnostics: Diagnostic[] = []
   const pkgNames = Array.isArray(config?.prompt?.packages) ? config!.prompt!.packages! : []
-  if (pkgNames.length && !opts.only?.length) {
-    const pk = resolvePromptPackages(root, pkgNames)
+  // `only` may name packages as `npm:<name>` (what `checkStale` reports); without `only` every package builds.
+  const onlyPkgs = opts.only?.filter((o) => o.startsWith('npm:')).map((o) => o.slice(4))
+  const wantPkgs = !opts.only?.length ? pkgNames : pkgNames.filter((n) => onlyPkgs!.includes(n))
+  const builtPkgs: PromptPackage[] = []
+  if (wantPkgs.length) {
+    const pk = resolvePromptPackages(root, wantPkgs)
     diagnostics.push(...pk.diagnostics)
-    for (const p of pk.packages) jobs.push(...p.jobs)
+    for (const p of pk.packages) { jobs.push(...p.jobs); builtPkgs.push(p) }
   }
   const built = (await Promise.all(jobs.map((j) => buildEntry(env, j)))).flat()
 
@@ -685,7 +702,15 @@ export async function buildPrompts(opts: BuildOptions): Promise<BuildResult> {
     const entryRels = new Set(findEntries(root, dir).map((e) => posix(relative(root, e))))
     const lock: PromptLock = { compiler: COMPILER, prompts: {} }
     // Keep entries of prompts not rebuilt now (failed or filtered by `only`) whose entry still exists.
-    for (const [id, p] of Object.entries(prevLock?.prompts ?? {})) if (!p.entry || entryRels.has(p.entry) || (p.package && opts.only?.length)) lock.prompts[id] = p
+    for (const [id, p] of Object.entries(prevLock?.prompts ?? {})) if (!p.entry || entryRels.has(p.entry) || (p.package && opts.only?.length && !builtPkgs.some((b) => b.name === p.package))) lock.prompts[id] = p
+    // Package versions (G-19 staleness): kept for packages not rebuilt now, still configured.
+    const pkgLock: NonNullable<PromptLock['packages']> = {}
+    for (const [n, v] of Object.entries(prevLock?.packages ?? {})) if (pkgNames.includes(n)) pkgLock[n] = v
+    for (const b of builtPkgs) {
+      const failed = built.some((x) => x.package === b.name && x.diagnostics.some((d) => d.severity === 'error'))
+      if (!failed) pkgLock[b.spec] = { ...(b.version ? { version: b.version } : {}), hash: b.hash }
+    }
+    if (Object.keys(pkgLock).length) lock.packages = Object.fromEntries(Object.entries(pkgLock).sort(([a], [b]) => a.localeCompare(b)))
     const skillBody = config?.prompt?.skillBody ?? 'live'
     const skillsToWrite: CompiledPrompt[] = []
     for (const cp of compiled) {
@@ -733,8 +758,13 @@ export interface StaleResult {
   missing: string[]
 }
 
-/** Compares current source hashes with `.compiled/*.json` (falls back to the lock for the id) without building. */
-export function checkStale(opts: { root: string; dir?: string }): StaleResult {
+/**
+ * Compares current source hashes with `.compiled/*.json` (falls back to the lock for the id) without building.
+ * `prompt.packages` (G-19): a package whose resolved package.json (version, manifest) differs from the one recorded in
+ * `prompt.lock.json` is stale, one never built is missing; both are reported as `npm:<name>`, which `buildPrompts`
+ * accepts in `only`. A package that does not resolve is left to the build (G164).
+ */
+export function checkStale(opts: { root: string; dir?: string; config?: BuildConfig }): StaleResult {
   const root = resolve(opts.root)
   const dir = opts.dir ?? DEFAULT_DIR
   const compiledDir = join(resolve(root, dir), '.compiled')
@@ -760,6 +790,16 @@ export function checkStale(opts: { root: string; dir?: string }): StaleResult {
       try { return { path: s.path, hash: sha256(readFileSync(join(root, s.path))) } } catch { return { path: s.path, hash: 'missing' } }
     })
     if (computeSourceHash(current) !== cp.sourceHash) stale.push(rel)
+  }
+  const config = opts.config ?? readBuildConfig(root)
+  const pkgNames = Array.isArray(config?.prompt?.packages) ? config!.prompt!.packages! : []
+  if (pkgNames.length) {
+    const lock = readLock(root, dir)
+    for (const p of resolvePromptPackages(root, pkgNames).packages) {
+      const rec = lock?.packages?.[p.spec]
+      if (!rec) missing.push(`npm:${p.spec}`)
+      else if (rec.hash !== p.hash || rec.version !== p.version) stale.push(`npm:${p.spec}`)
+    }
   }
   return { stale, missing }
 }

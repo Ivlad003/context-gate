@@ -100,6 +100,7 @@ var init_codes = __esm({
       G205: { severity: "info", title: "MCP \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0438\u0439 \u0443 CLI", explain: "\u041F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u0438 kind=mcp \u0456 @mcp \u043F\u0440\u0430\u0446\u044E\u044E\u0442\u044C \u043B\u0438\u0448\u0435 \u0432\u0441\u0435\u0440\u0435\u0434\u0438\u043D\u0456 Claude Code (mod \u0432\u0438\u043A\u043B\u0438\u043A\u0430\u0454 $.mcp.call). \u0423 CLI \u0437\u043D\u0430\u0447\u0435\u043D\u043D\u044F unverified." },
       G206: { severity: "warning", title: "\u041A\u043E\u043D\u0442\u0435\u043A\u0441\u0442 --ctx-from \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E", explain: "\u0417\u043D\u0456\u043C\u043E\u043A session:<id> \u0432\u0456\u0434\u0441\u0443\u0442\u043D\u0456\u0439 \u0443 .claude/gate.log.jsonl (\u043F\u043E\u0442\u0440\u0456\u0431\u0435\u043D `log.file: true`) \u0430\u0431\u043E fixture \u043D\u0435 \u0454 JSON-\u043E\u0431'\u0454\u043A\u0442\u043E\u043C." },
       G207: { severity: "warning", title: "\u0414\u0430\u043D\u0456 \u043D\u0435 \u0433\u043E\u0442\u043E\u0432\u0456", explain: "\u041F\u0456\u0441\u043B\u044F \u043A\u0456\u043B\u044C\u043A\u043E\u0445 \u043F\u0440\u043E\u0445\u043E\u0434\u0456\u0432 \u0440\u0435\u043D\u0434\u0435\u0440\u0430 `needs=` \u0434\u043E\u0441\u0456 \u0447\u0435\u043A\u0430\u0454 \u043D\u0430 \u0434\u0430\u043D\u0456 \u0431\u0435\u0437 \u0434\u0436\u0435\u0440\u0435\u043B\u0430; \u0441\u0435\u043A\u0446\u0456\u044E \u0432\u0456\u0434\u0440\u0435\u043D\u0434\u0435\u0440\u0435\u043D\u043E \u0437 null." },
+      G208: { severity: "info", title: "\u0414\u0430\u043D\u0456 \u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u0430 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0456 \u0432 \u0430\u0434\u0430\u043F\u0442\u0435\u0440\u0456", explain: "\u0410\u0434\u0430\u043F\u0442\u0435\u0440 \u0431\u0435\u0437 \u043C\u043E\u0434\u0435\u043B\u0456 \u0434\u043E\u0432\u0456\u0440\u0438 (claude-code-hooks, pi, opencode) \u043D\u0435 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0454 \u043F\u0440\u043E\u0446\u0435\u0441\u0438 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0456\u044E: `itemSources` kind=provider \u043D\u0430\u0434 cli/module/mcp-\u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u043E\u043C \u043F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u043E. \u041F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u0438 kind=file \u0447\u0438\u0442\u0430\u044E\u0442\u044C\u0441\u044F. \u041F\u043E\u0432\u043D\u0438\u0439 \u043D\u0430\u0431\u0456\u0440 \u2014 \u0443 mod \u0456 CLI.", hint: "\u0412\u0438\u043A\u043E\u0440\u0438\u0441\u0442\u0430\u0439 file-\u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440 (JSON, \u044F\u043A\u0438\u0439 \u043F\u0438\u0448\u0435 CI) \u0430\u0431\u043E mod." },
       G210: { severity: "warning", title: "\u0424\u0430\u0439\u043B \u0434\u043B\u044F @include \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E", explain: "\u0428\u043B\u044F\u0445 @include/<Include path> \u043D\u0435 \u0456\u0441\u043D\u0443\u0454 \u0432\u0456\u0434\u043D\u043E\u0441\u043D\u043E \u043A\u043E\u0440\u0435\u043D\u044F \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0456\u044E." },
       G211: { severity: "warning", title: "\u0421\u0435\u043A\u0446\u0456\u044E \u0430\u0431\u043E \u0435\u043B\u0435\u043C\u0435\u043D\u0442 \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E", explain: "@section/@skill/@rule \u0430\u0431\u043E --only \u043F\u043E\u0441\u0438\u043B\u0430\u0454\u0442\u044C\u0441\u044F \u043D\u0430 id, \u044F\u043A\u043E\u0433\u043E \u043D\u0435\u043C\u0430\u0454." },
       G220: { severity: "error", title: "\u041D\u0435\u0432\u0456\u0440\u043D\u0435 \u0456\u043C'\u044F gate-tool", explain: "\u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A `# gate-tool:` \u043C\u0430\u0454 \u043C\u0456\u0441\u0442\u0438\u0442\u0438 \u0456\u043C'\u044F \u0437 \u043B\u0430\u0442\u0438\u043D\u0438\u0446\u0456, \u0446\u0438\u0444\u0440, _ \u0430\u0431\u043E -." },
@@ -327,6 +328,36 @@ function parseExpr(src) {
   parseCache.set(src, res);
   return res;
 }
+function templateClose(src, from) {
+  let depth = 0;
+  let quote;
+  for (let i = from; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = void 0;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      continue;
+    }
+    if (c === "{" && src[i + 1] === "{") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === "}" && src[i + 1] === "}") {
+      if (depth === 0) return i;
+      depth--;
+      i++;
+    }
+  }
+  return -1;
+}
 function splitTemplate(src) {
   const out = [];
   let i = 0;
@@ -336,7 +367,8 @@ function splitTemplate(src) {
       out.push({ text: src.slice(i) });
       break;
     }
-    const close = src.indexOf("}}", open + 2);
+    let close = templateClose(src, open + 2);
+    if (close < 0) close = src.indexOf("}}", open + 2);
     if (close < 0) {
       out.push({ text: src.slice(i) });
       break;
@@ -3563,6 +3595,14 @@ function binaryWhitelist(user, repo) {
   const base = user ?? DEFAULT_BINARIES;
   return repo ? base.filter((b) => repo.includes(b)) : [...base];
 }
+function binaryOf(cmd) {
+  return cmd.split(/[\\/]/).pop() ?? "";
+}
+function commandAllowed(argv, whitelist) {
+  const bin = binaryOf(argv[0] ?? "");
+  if (!bin) return false;
+  return Array.isArray(whitelist) ? whitelist.includes(bin) : whitelist.has(bin);
+}
 function typeOf(v) {
   if (v === null) return "null";
   if (Array.isArray(v)) return "array";
@@ -3681,12 +3721,17 @@ function semanticChecks(raw, out) {
   sources.forEach((src, i) => {
     if (!isObj3(src)) return;
     const where = `$.itemSources[${i}] (${String(src.kind)})`;
-    if (src.kind === "markdown-dir" && typeof src.dir !== "string") out.push(diag("G313", `${where}: \u043F\u043E\u0442\u0440\u0456\u0431\u043D\u0435 \u043F\u043E\u043B\u0435 dir`));
+    if ((src.kind === "markdown-dir" || src.kind === "prompt-dir") && typeof src.dir !== "string") out.push(diag("G313", `${where}: \u043F\u043E\u0442\u0440\u0456\u0431\u043D\u0435 \u043F\u043E\u043B\u0435 dir`));
+    if (src.kind === "prompt-dir" && src.as !== void 0 && src.as !== "section") out.push(diag("G313", `${where}: prompt-dir \u0434\u0430\u0454 \u043B\u0438\u0448\u0435 \u0441\u0435\u043A\u0446\u0456\u0457 (as: "section")`));
     if (src.kind === "provider") {
       if (typeof src.name !== "string") out.push(diag("G313", `${where}: \u043F\u043E\u0442\u0440\u0456\u0431\u043D\u0435 \u043F\u043E\u043B\u0435 name`));
       else if (!providerNames.has(src.name)) out.push(diag("G313", `${where}: \u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440 "${src.name}" \u043D\u0435 \u043E\u0433\u043E\u043B\u043E\u0448\u0435\u043D\u043E \u0432 providers`));
     }
   });
+  for (const [name, p] of Object.entries(isObj3(raw.providers) ? raw.providers : {})) {
+    if (!isObj3(p) || p.kind === "cli") continue;
+    for (const k of ["okExitCodes", "parseOnError"]) if (k in p) out.push(diag("G302", `$.providers.${name}.${k}: \u0434\u0456\u0454 \u043B\u0438\u0448\u0435 \u0434\u043B\u044F kind "cli", \u0456\u0433\u043D\u043E\u0440\u0443\u0454\u0442\u044C\u0441\u044F`));
+  }
   const esc3 = raw.escalation;
   if (isObj3(esc3) && Array.isArray(esc3.order)) {
     for (const t of esc3.order) if (typeof t === "string" && !tierNames.has(t)) out.push(diag("G305", `$.escalation.order: tier "${t}" \u043D\u0435 \u043E\u0433\u043E\u043B\u043E\u0448\u0435\u043D\u043E \u0432 tiers`));
@@ -4048,6 +4093,8 @@ var init_config = __esm({
               args: { type: "object" },
               cache: { type: "string", format: "duration" },
               onError: { enum: ["unverified", "skip", "fail"] },
+              okExitCodes: { type: "array", items: { type: "integer" }, description: "cli: exit codes that count as success (default [0])." },
+              parseOnError: { type: "boolean", description: "cli: another exit code with JSON on stdout still yields data (eslint -f json exits 1)." },
               schema: {},
               exposes: strArr
             }
@@ -4802,13 +4849,14 @@ function globsOf(v) {
   return [];
 }
 function renderItemTemplate(template, item, index) {
-  return template.replace(/\{\{([\s\S]*?)\}\}/g, (_m, expr) => {
+  return splitTemplate(template).map((p) => {
+    if ("text" in p) return p.text;
     try {
-      return toText(evalSource(expr.trim(), { item, index }, newBudget(1e3)));
+      return toText(evalSource(p.expr, { item, index }, newBudget(1e3)));
     } catch {
       return "";
     }
-  });
+  }).join("");
 }
 function providerRules(value, src) {
   const name = src.name ?? "provider";
@@ -4968,6 +5016,27 @@ function findSnapshot(entries, which) {
   if (str4(sd.skill)) out.skill = str4(sd.skill);
   return out;
 }
+function gateStatsFromJournal(entries, opts = {}) {
+  const out = {};
+  for (const raw of entries) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw;
+    if (e.kind !== "gate-attempt" || !e.data || typeof e.data.gate !== "string") continue;
+    if (opts.from !== void 0 && typeof e.ts === "number" && e.ts < opts.from) continue;
+    if (opts.sessionId && e.data.sessionId !== opts.sessionId) continue;
+    const g = out[e.data.gate] ??= { attempts: 0, blocks: 0, ms: 0, overrides: 0 };
+    const outcome = e.data.outcome;
+    if (outcome === "override") {
+      g.overrides = (g.overrides ?? 0) + 1;
+      continue;
+    }
+    if (outcome !== "pass" && outcome !== "block") continue;
+    g.attempts++;
+    if (outcome === "block") g.blocks++;
+    if (typeof e.data.ms === "number") g.ms = (g.ms ?? 0) + e.data.ms;
+  }
+  return out;
+}
 function parseWhere(expr) {
   let s = expr.trim().replace(/^where\b/, "").trim();
   const conds = [];
@@ -5033,6 +5102,100 @@ function filterWhere(records, expr, resolve8) {
 var init_journal = __esm({
   "packages/core/src/journal.ts"() {
     "use strict";
+  }
+});
+
+// packages/core/src/canonical.ts
+function splitArgs(src) {
+  const out = [];
+  let depth = 0;
+  let quote;
+  let start = 0;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = void 0;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) {
+      out.push(src.slice(start, i).trim());
+      start = i + 1;
+    }
+    if (depth < 0) return void 0;
+  }
+  if (quote || depth !== 0) return void 0;
+  const last = src.slice(start).trim();
+  if (last) out.push(last);
+  else if (out.length) return void 0;
+  return out;
+}
+function scriptsCallOf(expr) {
+  const m = /^\s*scripts\.([A-Za-z_][\w-]*)\s*\(([\s\S]*)\)\s*$/.exec(expr);
+  if (!m) return void 0;
+  const ast = parseExpr(expr).ast;
+  if (!ast || ast.k !== "call" || ast.path !== `scripts.${m[1]}`) return void 0;
+  const parts = splitArgs(m[2]);
+  if (!parts || parts.length !== ast.args.length + Object.keys(ast.kwargs).length) return void 0;
+  const args = [];
+  const kwargs = {};
+  for (const p of parts) {
+    const kv = /^([A-Za-z_][\w]*)\s*=(?!=)\s*([\s\S]+)$/.exec(p);
+    if (kv && kv[1] in ast.kwargs) kwargs[kv[1]] = kv[2].trim();
+    else args.push(p);
+  }
+  return { fn: `scripts.${m[1]}`, args, ...Object.keys(kwargs).length ? { kwargs } : {} };
+}
+function canonicalNodes(nodes, nested = false) {
+  const out = [];
+  for (const n of nodes) {
+    switch (n.t) {
+      case "run":
+      case "call": {
+        if (!n.store) {
+          out.push(n);
+          break;
+        }
+        const { store, ...rest } = n;
+        const name = n.t === "run" ? n.as ?? "run" : n.as;
+        out.push(rest, { t: "store", name, ...store !== name ? { key: store } : {} });
+        break;
+      }
+      case "let": {
+        const c = nested ? void 0 : scriptsCallOf(n.value);
+        out.push(c ? { t: "call", fn: c.fn, args: c.args, ...c.kwargs ? { kwargs: c.kwargs } : {}, as: n.name } : n);
+        break;
+      }
+      case "if":
+        out.push({ ...n, then: canonicalNodes(n.then, true), ...n.else ? { else: canonicalNodes(n.else, true) } : {} });
+        break;
+      case "each":
+      case "repeat":
+      case "tier":
+      case "el":
+      case "fence":
+      case "list":
+        out.push({ ...n, children: canonicalNodes(n.children, true) });
+        break;
+      default:
+        out.push(n);
+    }
+  }
+  return out;
+}
+var init_canonical = __esm({
+  "packages/core/src/canonical.ts"() {
+    "use strict";
+    init_expr();
   }
 });
 
@@ -5197,7 +5360,7 @@ function parseMarkdownPrompt(text, opts) {
     diagnostics.push({ code, severity, message, path, line, ...hint ? { hint } : {} });
   };
   const legacyStore = (d, key, as, line) => {
-    diag3("G180", `store= \u043D\u0430 @${d} \u2014 \u0437\u0430\u0441\u0442\u0430\u0440\u0456\u043B\u0430 \u0444\u043E\u0440\u043C\u0430 \u0437\u0431\u0435\u0440\u0435\u0436\u0435\u043D\u043D\u044F`, line, "warning", `@${d} \u2026 as=${as ?? key}, \u043F\u043E\u0442\u0456\u043C \xAB@store ${as ?? key}\xBB`);
+    diag3("G180", `store= \u043D\u0430 @${d} \u2014 \u0437\u0430\u0441\u0442\u0430\u0440\u0456\u043B\u0430 \u0444\u043E\u0440\u043C\u0430 \u0437\u0431\u0435\u0440\u0435\u0436\u0435\u043D\u043D\u044F`, line, "warning", `@${d} \u2026 as=${as ?? key}, \u043F\u043E\u0442\u0456\u043C \xAB@store ${as ?? key}${as && as !== key ? ` to=${key}` : ""}\xBB`);
   };
   const checkExpr3 = (src, line) => {
     for (const d of parseExpr(src).diagnostics) diagnostics.push({ ...d, path, line });
@@ -5416,11 +5579,12 @@ function parseMarkdownPrompt(text, opts) {
         break;
       }
       case "store": {
-        if (!/^[A-Za-z_][\w-]*$/.test(rest)) {
-          diag3("G004", "\u041E\u0447\u0456\u043A\u0443\u0432\u0430\u043B\u043E\u0441\u044C \xAB@store \u0456\u043C'\u044F\xBB", line);
+        const sm = /^([A-Za-z_][\w-]*)(?:\s+to=([\w][\w.-]*))?$/.exec(rest);
+        if (!sm) {
+          diag3("G004", "\u041E\u0447\u0456\u043A\u0443\u0432\u0430\u043B\u043E\u0441\u044C \xAB@store \u0456\u043C'\u044F [to=\u043A\u043B\u044E\u0447]\xBB", line);
           break;
         }
-        target().push({ t: "store", name: rest });
+        target().push({ t: "store", name: sm[1], ...sm[2] && sm[2] !== sm[1] ? { key: sm[2] } : {} });
         break;
       }
       case "run": {
@@ -5675,7 +5839,7 @@ function parseMarkdownPrompt(text, opts) {
   };
   for (const [fname, fn2] of fns) expand(fn2.body, [fname]);
   const fmUses = fm.use && typeof fm.use === "object" && !Array.isArray(fm.use) ? Object.entries(fm.use).map(([name, p]) => ({ t: "use", name, path: p })) : [];
-  section.children = [...fmUses, ...expand(root.children, [])];
+  section.children = canonicalNodes([...fmUses, ...expand(root.children, [])]);
   return { section, uses, diagnostics, ...sourceHash ? { sourceHash } : {}, frontmatter: fm };
 }
 function dedent(lines) {
@@ -5792,7 +5956,7 @@ function printMarkdownNodes(nodes) {
           dir(`@${n.t}`);
           break;
         case "store":
-          dir(`@store ${n.name}`);
+          dir(`@store ${n.name}${n.key ? ` to=${n.key}` : ""}`);
           break;
         case "run":
           dir(`@run ${n.lang}${opts({ as: n.as, cache: n.cache, store: n.store, needs: n.needs?.join(",") })}`);
@@ -5874,6 +6038,7 @@ var init_mddsl = __esm({
   "packages/core/src/mddsl.ts"() {
     "use strict";
     init_expr();
+    init_canonical();
     MAX_IF_DEPTH = 3;
     MAX_LOOP_DEPTH = 2;
     MAX_REPEAT = 1e3;
@@ -6486,6 +6651,8 @@ var init_render = __esm({
       waitingSections = false;
       stale = /* @__PURE__ */ new Set();
       storedMeta = {};
+      /** Variables bound by `run` / `call`: the result's metadata, which a later `store` node persists with the value. */
+      varMeta = /* @__PURE__ */ new Map();
       refs = [];
       uses;
       frame;
@@ -6777,14 +6944,19 @@ var init_render = __esm({
           case "let":
             this.define(n.name, this.ev(n.value, frame), frame);
             this.vars.add(n.name);
+            this.varMeta.delete(n.name);
             return;
           case "set":
             this.assign(n.name, this.ev(n.value, frame), frame);
             this.vars.add(n.name);
+            this.varMeta.delete(n.name);
             return;
-          case "store":
-            this.storeValue(n.name, lookup(frame, n.name));
+          case "store": {
+            const m = this.varMeta.get(n.name);
+            if (m === "pending") return;
+            this.storeValue(n.key ?? n.name, lookup(frame, n.name), m?.ready, m?.cache);
             return;
+          }
           case "use":
             this.uses[n.name] = n.path;
             return;
@@ -6928,11 +7100,13 @@ var init_render = __esm({
           this.addTrace("run", `${n.lang} as=${name}: ${ready.source}${ready.bytes !== void 0 ? `, ${ready.bytes} B` : ""}${ready.detail ? ` \u2014 ${ready.detail}` : ""}`, { source: ready.source, ...ready.ms !== void 0 ? { ms: ready.ms } : {} });
           if (ready.detail && ready.status !== "ok") this.diag("G203", ready.status === "fail" ? "error" : "warning", `@run ${n.lang} (${name}) \u043D\u0435 \u0432\u0438\u043A\u043E\u043D\u0430\u043D\u043E: ${ready.detail.replace(/; stderr:.*$/s, "")}`);
           if (ready.stale) this.stale.add(`run:${name}`);
+          this.varMeta.set(name, { ready, cache: n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE });
           if (n.store) this.storeValue(n.store, ready.value, ready, n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE);
           if (ready.error) return "stop";
           return;
         }
         this.define(name, null);
+        this.varMeta.set(name, "pending");
         const waiting = (n.needs ?? []).filter((d) => !this.readyNames.has(d) && !this.runReady(d));
         if (waiting.length) return;
         const stdin = JSON.stringify({ ctx: snapshot(frame, this.r.root), args: lookup(frame, "args") });
@@ -6952,11 +7126,13 @@ var init_render = __esm({
           const ready = this.useReady(key);
           if (!ready) {
             this.define(n.as, null);
+            this.varMeta.set(n.as, "pending");
             this.needs.set(key, { kind: "call", key, module, fn: fn2, label: n.fn, args, kwargs, cacheMs: parseDurationMs(n.cache ?? this.r.opts.runCacheDefault) });
             return;
           }
           this.define(n.as, ready.value);
           this.readyNames.add(n.as);
+          this.varMeta.set(n.as, { ready, ...n.cache ? { cache: n.cache } : {} });
           this.addTrace("call", `${n.fn} as=${n.as}: ${ready.source}${ready.detail ? ` \u2014 ${ready.detail}` : ""}`, { source: ready.source });
           if (ready.stale) this.stale.add(`call:${n.as}`);
           if (n.store) this.storeValue(n.store, ready.value, ready, n.cache);
@@ -6964,7 +7140,9 @@ var init_render = __esm({
         }
         const v = this.callFn(n.fn, args, kwargs);
         this.define(n.as, v);
-        if (!this.needs.has(`prov:${n.fn}:${stableJson([args, kwargs])}`)) {
+        if (this.needs.has(`prov:${n.fn}:${stableJson([args, kwargs])}`)) this.varMeta.set(n.as, "pending");
+        else {
+          this.varMeta.set(n.as, {});
           this.readyNames.add(n.as);
           this.addTrace("call", `${n.fn} as=${n.as}`, { source: "run" });
           if (n.store) this.storeValue(n.store, v);
@@ -7142,6 +7320,19 @@ var init_render = __esm({
 });
 
 // packages/core/src/assemble.ts
+function promptSectionDirs(cfg) {
+  const norm = (d) => d.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  const out = [norm(cfg.prompt?.dir ?? DEFAULT_PROMPT_DIR)];
+  for (const s of [...cfg.itemSources ?? [], ...cfg.ruleSources ?? []]) {
+    if (s.kind !== "prompt-dir" || !s.dir || s.as !== void 0 && s.as !== "section") continue;
+    const d = norm(s.dir);
+    if (d && !d.split("/").includes("..") && !d.startsWith("/") && !out.includes(d)) out.push(d);
+  }
+  return out;
+}
+function isMarkdownSectionFile(name) {
+  return name.endsWith(".md") && !/^readme\.md$/i.test(name);
+}
 function wrapSection(section, uses, path) {
   return { version: 1, compiler: "markdown", id: section.id, sourceHash: "", sources: [{ path, hash: "" }], sections: [section], ...Object.keys(uses).length ? { uses } : {}, diagnostics: [] };
 }
@@ -7181,7 +7372,22 @@ function assemblePrompts(compiled, markdown, tier, tierNames, opts = {}) {
   }
   const builtin = opts.builtins !== false ? planThenAct(system, tier) : void 0;
   if (builtin) system.push(builtin);
+  const preload = opts.preload?.length ? preloadPrompt(system, opts.preload, tier) : void 0;
+  if (preload) system.unshift(preload);
   return { system, skills, diagnostics };
+}
+function preloadPrompt(system, skills, tier) {
+  const names = [...new Set(skills)].filter(Boolean);
+  if (!names.length) return void 0;
+  if (system.some((cp) => cp.id === PRELOAD_ID || cp.sections.some((s) => s.id === PRELOAD_ID))) return void 0;
+  const children = [{ t: "text", value: `Skills, \u0432\u0431\u0443\u0434\u043E\u0432\u0430\u043D\u0456 \u0434\u043B\u044F tier ${tier} (\u043D\u0435 \u0432\u0438\u043A\u043B\u0438\u043A\u0430\u0439 \u0457\u0445 \u043E\u043A\u0440\u0435\u043C\u043E):
+
+` }];
+  for (const name of names) children.push({ t: "text", value: `## ${name}
+
+` }, { t: "include", source: "skill", ref: name, mode: "inline" });
+  const section = { id: PRELOAD_ID, scope: "profile", children, source: { path: "builtin:preload" } };
+  return { version: 1, compiler: "builtin", id: PRELOAD_ID, sourceHash: "", sources: [], sections: [section], diagnostics: [] };
 }
 function planThenAct(system, tier) {
   if (!tier || tier === "premium" || !system.some((cp) => cp.sections.length)) return void 0;
@@ -7267,7 +7473,7 @@ function sectionText(sections, markers) {
   return sections.filter((s) => s.included && s.text).map((s) => markers ? `<!-- section:${s.id} ${s.scope} -->
 ${s.text}` : s.text).join("\n\n");
 }
-var PLAN_THEN_ACT_ID, PLAN_THEN_ACT_TEXT, DEFAULT_GIT;
+var DEFAULT_PROMPT_DIR, PRELOAD_ID, PLAN_THEN_ACT_ID, PLAN_THEN_ACT_TEXT, DEFAULT_GIT;
 var init_assemble = __esm({
   "packages/core/src/assemble.ts"() {
     "use strict";
@@ -7276,6 +7482,8 @@ var init_assemble = __esm({
     init_mdc();
     init_argparse();
     init_render();
+    DEFAULT_PROMPT_DIR = ".claude/prompt";
+    PRELOAD_ID = "preload";
     PLAN_THEN_ACT_ID = "plan-then-act";
     PLAN_THEN_ACT_TEXT = [
       "\u041F\u0440\u0430\u0446\u044E\u0439 \u0437\u0430 \u0441\u0445\u0435\u043C\u043E\u044E \xAB\u043F\u043B\u0430\u043D \u2192 \u043F\u0440\u0430\u0432\u043A\u0430 \u2192 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u043A\u0430\xBB:",
@@ -7390,6 +7598,39 @@ function scriptLang(path, text) {
 }
 function scriptFnName(path) {
   return (path.split("/").pop() ?? path).replace(/\.[^.]+$/, "").replace(/[^\w]/g, "_");
+}
+function scriptArgv(absPath, lang) {
+  const interp = { bash: ["bash"], node: ["node"], python: ["python3"], deno: ["deno", "run", "--no-prompt", "--allow-read=."] };
+  return [...interp[lang ?? ""] ?? [lang ?? "sh"], absPath];
+}
+function walkNodes(nodes, fn2) {
+  for (const n of nodes) {
+    fn2(n);
+    if (n.t === "if") {
+      walkNodes(n.then, fn2);
+      if (n.else) walkNodes(n.else, fn2);
+    } else if ("children" in n && Array.isArray(n.children)) walkNodes(n.children, fn2);
+  }
+}
+function usedFunctions(prompts) {
+  const want = /* @__PURE__ */ new Map();
+  for (const cp of prompts) {
+    const uses = { ...cp.uses ?? {} };
+    const nodes = [...cp.sections.flatMap((s) => s.children), ...cp.skill?.body ?? []];
+    walkNodes(nodes, (n) => {
+      if (n.t === "use") uses[n.name] = n.path;
+    });
+    const text = JSON.stringify(nodes);
+    for (const [ns, path] of Object.entries(uses)) {
+      const set = want.get(path) ?? /* @__PURE__ */ new Set();
+      for (const m of text.matchAll(new RegExp(`(?<![\\w.])${ns.replace(/[$]/g, "\\$")}\\.([A-Za-z_][\\w]*)\\s*\\(`, "g"))) set.add(m[1]);
+      walkNodes(nodes, (n) => {
+        if (n.t === "call" && n.fn.startsWith(ns + ".")) set.add(n.fn.slice(ns.length + 1));
+      });
+      want.set(path, set);
+    }
+  }
+  return want;
 }
 var DEFAULT_EXECUTORS, LANG_ALIASES, NODE_SHIM, PYTHON_SHIM, BASH_SHIM, EXT_LANG;
 var init_shims = __esm({
@@ -7709,9 +7950,6 @@ function readUserSettings() {
 function binaryWhitelist2(user, repoNarrow) {
   return new Set(binaryWhitelist(user.allowBinaries, repoNarrow));
 }
-function binaryName(cmd) {
-  return basename2(cmd);
-}
 function gitRemote(root) {
   try {
     return execFileSync("git", ["config", "--get", "remote.origin.url"], { cwd: root, stdio: ["ignore", "pipe", "ignore"], timeout: 3e3 }).toString().trim();
@@ -7782,9 +8020,21 @@ import { join as join5, resolve as resolve2, sep as sep2 } from "node:path";
 function executorsOf2(config) {
   return executorsOf(config);
 }
+function userSkillsEnabled(env = process.env) {
+  return !userSkillsOff && env.CONTEXT_GATE_NO_USER_SKILLS !== "1";
+}
+async function withUserSkills(on, fn2) {
+  const prev = userSkillsOff;
+  userSkillsOff = !on || prev;
+  try {
+    return await fn2();
+  } finally {
+    userSkillsOff = prev;
+  }
+}
 function skillDirs(root) {
   const home = process.env.HOME;
-  return [join5(root, ".claude", "skills"), ...home ? [join5(home, ".claude", "skills")] : []].filter((d) => existsSync2(d));
+  return [join5(root, ".claude", "skills"), ...home && userSkillsEnabled() ? [join5(home, ".claude", "skills")] : []].filter((d) => existsSync2(d));
 }
 function listSkills(root) {
   const out = [];
@@ -7808,7 +8058,7 @@ function listSkills(root) {
   }
   return out;
 }
-var NodeHost;
+var NodeHost, userSkillsOff;
 var init_host_node = __esm({
   "packages/cli/src/host-node.ts"() {
     "use strict";
@@ -7816,6 +8066,7 @@ var init_host_node = __esm({
     init_build();
     init_shims();
     init_settings();
+    init_config();
     init_util();
     NodeHost = class {
       root;
@@ -7866,8 +8117,9 @@ var init_host_node = __esm({
         const p = this.abs(path);
         return p ? readText(p) : void 0;
       }
+      /** Core `commandAllowed`: the binary's basename on the effective whitelist (user ∩ repo narrowing). */
       allowed(bin) {
-        return this.whitelist.has(binaryName(bin));
+        return commandAllowed([bin], this.whitelist);
       }
       // ───────────────────────── run ─────────────────────────
       async run(req) {
@@ -7980,6 +8232,7 @@ var init_host_node = __esm({
         return void 0;
       }
     };
+    userSkillsOff = false;
   }
 });
 
@@ -8054,6 +8307,26 @@ function parseToolHeader(text) {
   const header = { name, inputSchema, line: nameField.line, ...fields.description?.value ? { description: fields.description.value } : {}, ...tiers?.length ? { tiers } : {} };
   return { header, diagnostics };
 }
+function parseToolHeaders(text) {
+  const headers = [];
+  const diagnostics = [];
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    if (!COMMENT.test(lines[i]) || i === 0 && lines[i].startsWith("#!")) {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < lines.length && COMMENT.test(lines[i]) && !(i === 0 && lines[i].startsWith("#!"))) i++;
+    const block = lines.slice(start, i);
+    if (!block.some((l) => /^\s*(?:#|\/\/|--|;)\s?\s*gate-tool\s*:/.test(l))) continue;
+    const r = parseToolHeader(block.join("\n"));
+    for (const d of r.diagnostics) diagnostics.push({ ...d, ...d.line !== void 0 ? { line: d.line + start } : {} });
+    if (r.header && !headers.some((h) => h.name === r.header.name)) headers.push({ ...r.header, line: r.header.line + start });
+  }
+  return { headers, diagnostics };
+}
 var COMMENT, SHORTHAND;
 var init_toolheader = __esm({
   "packages/core/src/toolheader.ts"() {
@@ -8079,13 +8352,71 @@ var init_shims2 = __esm({
   }
 });
 
+// packages/core/src/providers.ts
+function pickFields(v, pick) {
+  if (!pick?.length || !v || typeof v !== "object" || Array.isArray(v)) return v;
+  const out = {};
+  for (const p of pick) {
+    const parts = p.split(".");
+    let cur = v;
+    for (const k of parts) cur = cur && typeof cur === "object" && !Array.isArray(cur) ? cur[k] : void 0;
+    if (cur === void 0) continue;
+    let o = out;
+    for (const k of parts.slice(0, -1)) o = o[k] ??= {};
+    o[parts[parts.length - 1]] = cur;
+  }
+  return out;
+}
+function parseLoose2(stdout) {
+  const t = stdout.trim();
+  if (!t) return null;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return t;
+  }
+}
+function providerResultOk(cfg, exitCode, stdout) {
+  const okCodes = cfg.okExitCodes?.length ? cfg.okExitCodes : [0];
+  if (okCodes.includes(exitCode)) return { ok: true, value: parseLoose2(stdout) };
+  if (cfg.parseOnError) {
+    const t = stdout.trim();
+    if (t) {
+      try {
+        return { ok: true, value: JSON.parse(t) };
+      } catch {
+      }
+    }
+    return { ok: false, error: `exit ${exitCode}, stdout \u043D\u0435 \u0454 JSON (parseOnError)` };
+  }
+  return { ok: false, error: `exit ${exitCode}` };
+}
+function fileProviderValue(path, text, pick) {
+  if (/\.json$/i.test(path)) {
+    try {
+      return { value: pickFields(JSON.parse(text), pick) };
+    } catch (e) {
+      return { error: `JSON: ${e.message}` };
+    }
+  }
+  if (/\.mdx?$/i.test(path)) return { markdown: true };
+  return { value: text };
+}
+var init_providers = __esm({
+  "packages/core/src/providers.ts"() {
+    "use strict";
+  }
+});
+
 // packages/cli/src/context.ts
 var context_exports = {};
 __export(context_exports, {
   BUILTIN_PROVIDERS: () => BUILTIN_PROVIDERS,
   Providers: () => Providers,
   buildContext: () => buildContext,
+  callScriptTool: () => callScriptTool,
   collectItems: () => collectItems,
+  collectRepoItems: () => collectRepoItems,
   dataDir: () => dataDir,
   dataMetaPath: () => dataMetaPath,
   decide: () => decide,
@@ -8104,7 +8435,10 @@ __export(context_exports, {
   readSnapshot: () => readSnapshot,
   referencedNames: () => referencedNames,
   scriptFiles: () => scriptFiles,
+  scriptTools: () => scriptTools,
   setData: () => setData,
+  toolModules: () => toolModules,
+  unverifiedProviderRuleItems: () => unverifiedProviderRuleItems,
   validDataKey: () => validDataKey
 });
 import { existsSync as existsSync3, readdirSync as readdirSync3, readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
@@ -8145,14 +8479,20 @@ function loadMarkdownRules(root, config) {
 async function loadProviderRules(config, value) {
   const rules = [];
   const diagnostics = [];
-  if (config.cursorRules?.enabled === false) return { rules, diagnostics };
+  const missing = [];
+  if (config.cursorRules?.enabled === false) return { rules, diagnostics, missing };
   for (const src of ruleSourcesOf(config)) {
     if (src.kind !== "provider" || !src.name) continue;
-    const r = providerRules(await value(src.name), src);
+    const v = await value(src.name);
+    const r = providerRules(v, src);
+    if (v === null || v === void 0 || r.diagnostics.some((d) => d.code === "G203" || d.code === "G313")) missing.push(src.name);
     rules.push(...r.rules);
     diagnostics.push(...r.diagnostics);
   }
-  return { rules, diagnostics };
+  return { rules, diagnostics, missing };
+}
+function unverifiedProviderRuleItems(names, why) {
+  return names.map((name) => makeItem("rule", `${name}/*`, { status: "unverified", description: `\u043F\u0440\u0430\u0432\u0438\u043B\u0430 \u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u0430 ${name} \u043D\u0435 \u043E\u0442\u0440\u0438\u043C\u0430\u043D\u043E: ${why(name)}`, provenance: { source: `provider:${name}` }, attach: { when: "manual" } }));
 }
 function loadRules(root, config) {
   const rules = [];
@@ -8279,21 +8619,65 @@ function loadCompiled(repo) {
   return cached2.length ? { compiled: cached2, from: "cache" } : { compiled: [], from: "none" };
 }
 function loadMarkdown(repo) {
-  const dir = join6(repo.root, repo.promptDir);
-  if (!existsSync3(dir)) return [];
-  return readdirSync3(dir, { withFileTypes: true }).filter((d) => d.isFile() && d.name.endsWith(".md") && !/^readme\.md$/i.test(d.name)).map((d) => ({ path: posix(join6(repo.promptDir, d.name)), text: readFileSync3(join6(dir, d.name), "utf8") })).sort((a, b) => a.path.localeCompare(b.path));
+  const out = /* @__PURE__ */ new Map();
+  for (const rel of promptSectionDirs({ ...repo.config, prompt: { ...repo.config.prompt, dir: repo.promptDir } })) {
+    const dir = join6(repo.root, rel);
+    if (!existsSync3(dir)) continue;
+    for (const d of readdirSync3(dir, { withFileTypes: true })) {
+      if (!d.isFile() || !isMarkdownSectionFile(d.name)) continue;
+      const path = posix(join6(rel, d.name));
+      if (!out.has(path)) out.set(path, { path, text: readFileSync3(join6(dir, d.name), "utf8") });
+    }
+  }
+  return [...out.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
-function loadPrompts(repo, tier) {
+function loadPrompts(repo, tier, preload) {
   const { compiled, from } = loadCompiled(repo);
-  const set = assemblePrompts(compiled, loadMarkdown(repo), tier, Object.keys(repo.config.tiers ?? {}));
+  const set = assemblePrompts(compiled, loadMarkdown(repo), tier, Object.keys(repo.config.tiers ?? {}), preload?.length ? { preload } : {});
   return { ...set, compiledFrom: from };
 }
 function scriptFiles(repo) {
   const dir = join6(repo.promptDir, "scripts");
   return existsSync3(join6(repo.root, dir)) ? walkFiles(repo.root, { under: dir }) : [];
 }
-function collectItems(repo, rules) {
-  const items = [];
+function toolModules(repo, prompts) {
+  const out = /* @__PURE__ */ new Set();
+  const lib = join6(repo.root, repo.promptDir, "lib");
+  if (existsSync3(lib)) {
+    for (const d of readdirSync3(lib, { withFileTypes: true })) if (d.isFile() && shimLang(d.name)) out.add(posix(join6(repo.promptDir, "lib", d.name)));
+  }
+  for (const p of Object.values(repo.config.providers ?? {})) if (p.kind === "module" && p.path) out.add(p.path.replace(/^\.\//, ""));
+  for (const path of usedFunctions(prompts).keys()) out.add(path.replace(/^\.\//, ""));
+  const inside = (p) => !p.startsWith("/") && !p.split("/").includes("..");
+  return [...out].filter(inside).sort();
+}
+function scriptTools(repo, prompts) {
+  const tools = [];
+  const diagnostics = [];
+  const add = (t) => {
+    if (!tools.some((x) => x.name === t.name)) tools.push(t);
+  };
+  const info = (h, path, fn2) => ({ name: h.name, ...h.description ? { description: h.description } : {}, inputSchema: h.inputSchema, ...h.tiers ? { tiers: h.tiers } : {}, path, ...fn2 ? { fn: fn2 } : {}, line: h.line });
+  for (const f of scriptFiles(repo)) {
+    const { header, diagnostics: d } = parseToolHeader(readText(join6(repo.root, f)) ?? "");
+    diagnostics.push(...d.map((x) => ({ ...x, path: f })));
+    if (header) add(info(header, f));
+  }
+  const set = prompts ?? (() => {
+    const p = loadPrompts(repo, "standard");
+    return [...p.system, ...Object.values(p.skills)];
+  })();
+  for (const path of toolModules(repo, set)) {
+    const text = readText(join6(repo.root, path));
+    if (!text?.includes("gate-tool")) continue;
+    const r = parseToolHeaders(text);
+    diagnostics.push(...r.diagnostics.map((x) => ({ ...x, path })));
+    for (const h of r.headers) add(info(h, path, h.name));
+  }
+  return { tools, diagnostics };
+}
+function collectItems(repo, rules, extra = []) {
+  const items = [...extra];
   for (const r of rules ?? loadRules(repo.root, repo.config).rules) items.push(ruleToItem(r));
   for (const s of listSkills(repo.root)) {
     if (s.name.startsWith("cursor-") && s.body.includes("generated by context-gate from")) continue;
@@ -8308,11 +8692,10 @@ function collectItems(repo, rules) {
       items.push(makeItem("agent", name, { body, provenance: { source: "claude-agents", path: `.claude/agents/${f}` }, ...typeof meta.description === "string" ? { description: meta.description } : {} }));
     }
   }
-  for (const f of scriptFiles(repo)) {
-    const { header } = parseToolHeader(readText(join6(repo.root, f)) ?? "");
-    if (header) items.push(makeItem("tool", header.name, { provenance: { source: "gate-tool", path: f }, ...header.description ? { description: header.description } : {}, ...header.tiers ? { tags: header.tiers.map((t) => `tier:${t}`) } : {} }));
-  }
   const prompts = loadPrompts(repo, "standard");
+  for (const t of scriptTools(repo, [...prompts.system, ...Object.values(prompts.skills)]).tools) {
+    items.push(makeItem("tool", t.name, { provenance: { source: "gate-tool", path: t.path }, ...t.description ? { description: t.description } : {}, ...t.tiers ? { tags: t.tiers.map((x) => `tier:${x}`) } : {} }));
+  }
   for (const cp of prompts.system) {
     for (const s of cp.sections) {
       const chars = JSON.stringify(s.children).length;
@@ -8340,29 +8723,6 @@ function decide(config, items, flags, data = {}) {
   };
   const { gate } = decideGate(config, signals, { turn: 0 }, items, { evalExpr: evalExpr2, ...flags.tier ? { tier: flags.tier } : {} });
   return gate;
-}
-function pickFields(v, pick) {
-  if (!pick?.length || !v || typeof v !== "object" || Array.isArray(v)) return v;
-  const out = {};
-  for (const p of pick) {
-    const parts = p.split(".");
-    let cur = v;
-    for (const k of parts) cur = cur && typeof cur === "object" && !Array.isArray(cur) ? cur[k] : void 0;
-    if (cur === void 0) continue;
-    let o = out;
-    for (const k of parts.slice(0, -1)) o = o[k] ??= {};
-    o[parts[parts.length - 1]] = cur;
-  }
-  return out;
-}
-function parseLoose2(stdout) {
-  const t = stdout.trim();
-  if (!t) return null;
-  try {
-    return JSON.parse(t);
-  } catch {
-    return t;
-  }
 }
 function markdownValue(text) {
   const { meta, body } = splitFrontmatter(text);
@@ -8406,6 +8766,29 @@ function referencedNames(prompts, candidates) {
   for (const name of candidates) if (new RegExp(`(?<![\\w.$-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(s)) out.add(name);
   return out;
 }
+function providerWhy(providers, host, name) {
+  const f = providers.failed.find((x) => x.name === name);
+  if (f) return f.message;
+  const p = providers.cfg[name];
+  if (!host.trusted && p && (p.kind === "cli" || p.kind === "module")) return "\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0456\u0439 \u043D\u0435 \u0434\u043E\u0432\u0456\u0440\u0435\u043D\u0438\u0439 (trust grant \u0430\u0431\u043E --trust-repo)";
+  if (p?.kind === "mcp") return "MCP \u043F\u0440\u0430\u0446\u044E\u0454 \u043B\u0438\u0448\u0435 \u0432 mod";
+  if (host.dryScripts) return "\u043D\u0435\u043C\u0430\u0454 \u043A\u0435\u0448\u043E\u0432\u0430\u043D\u043E\u0433\u043E \u0437\u043D\u0430\u0447\u0435\u043D\u043D\u044F (--dry-scripts)";
+  return "\u043D\u0435\u043C\u0430\u0454 \u0434\u0430\u043D\u0438\u0445";
+}
+async function collectRepoItems(repo, o = {}) {
+  const { rules, diagnostics } = loadRules(repo.root, repo.config);
+  let extra = [];
+  if (ruleSourcesOf(repo.config).some((s) => s.kind === "provider" && s.name)) {
+    const trust = trustState(repo.root, repo.config, { flag: o.trustRepo });
+    const host = new NodeHost({ root: repo.root, config: repo.config, trusted: trust.trusted, dryScripts: o.dryScripts, cacheDir: repo.cacheDir, ...repo.narrowBinaries ? { narrowBinaries: repo.narrowBinaries } : {} });
+    const providers = new Providers({ repo, host, rules, liveGit: false });
+    const pr = await loadProviderRules(repo.config, (name) => providers.value(name));
+    rules.push(...pr.rules);
+    diagnostics.push(...pr.diagnostics, ...host.notes);
+    extra = unverifiedProviderRuleItems(pr.missing, (n) => providerWhy(providers, host, n));
+  }
+  return { items: collectItems(repo, rules, extra), rules, diagnostics };
+}
 async function buildContext(o) {
   const root = resolve3(o.root);
   const repo = loadRepo(root);
@@ -8435,16 +8818,18 @@ async function buildContext(o) {
   const providers = new Providers({ repo, host, rules, liveGit: live });
   host.provider = (req) => providers.call(req);
   host.callables = providers.callables();
+  let unverifiedRules = [];
   if (live) {
     const pr = await loadProviderRules(repo.config, (name) => providers.value(name));
     rules.push(...pr.rules);
     diagnostics.push(...pr.diagnostics);
+    unverifiedRules = unverifiedProviderRuleItems(pr.missing, (n) => providerWhy(providers, host, n));
   }
   host.rules = rules.map((r) => ({ id: r.id, path: r.path, body: r.body, ...r.description ? { description: r.description } : {} }));
-  const items = collectItems(repo, rules);
+  const items = collectItems(repo, rules, unverifiedRules);
   const gate = decide(repo.config, items, { ...flags, paths: o.paths ?? (live ? git2?.changed ?? [] : []), branch: o.branch ?? (typeof git2?.branch === "string" ? git2.branch : void 0) }, {});
   const tier = gate.tier;
-  const prompts = loadPrompts(repo, tier);
+  const prompts = loadPrompts(repo, tier, gate.skills.preload);
   diagnostics.push(...prompts.diagnostics);
   let scope;
   if (snapshot2?.scope) {
@@ -8474,6 +8859,28 @@ async function buildContext(o) {
   }
   return { repo, gate, tier, scope, host, providers, rules, diagnostics, trust, source, ...snapshot2 ? { snapshot: snapshot2 } : {}, prompts };
 }
+async function callScriptTool(ctx, name, input) {
+  const all = [...ctx.prompts.system, ...Object.values(ctx.prompts.skills)];
+  const tool = scriptTools(ctx.repo, all).tools.find((t) => t.name === name);
+  if (!tool) return { isError: true, result: `\u0406\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 ${name} \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E (# gate-tool: \u0443 scripts/ \u0430\u0431\u043E \u043D\u0430\u0434 \u0435\u043A\u0441\u043F\u043E\u0440\u0442\u043E\u043C \u043C\u043E\u0434\u0443\u043B\u044F)` };
+  if (ctx.gate.items[`tool:${name}`] === "off") return { deny: `\u0406\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 ${name} \u0432\u0438\u043C\u043A\u043D\u0435\u043D\u043E \u043F\u0440\u043E\u0444\u0456\u043B\u0435\u043C ${ctx.gate.profile ?? "\u2014"}` };
+  if (tool.tiers && !tool.tiers.includes(ctx.tier)) return { deny: `\u0406\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 ${name} \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0438\u0439 \u0434\u043B\u044F tier ${ctx.tier} (tiers: ${tool.tiers.join(", ")})` };
+  if (!ctx.host.trusted) return { deny: `\u0406\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 ${name}: \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0456\u0439 \u043D\u0435 \u0434\u043E\u0432\u0456\u0440\u0435\u043D\u0438\u0439` };
+  if (tool.fn) {
+    const r2 = await ctx.host.shim(tool.path, [{ fn: tool.fn, args: [], kwargs: input }], 3e4);
+    if (r2.errors[0]) return { isError: true, result: r2.errors[0] };
+    const v = r2.results[0];
+    return { result: typeof v === "string" ? v : JSON.stringify(v ?? null) };
+  }
+  const abs = join6(ctx.repo.root, tool.path);
+  const argv = scriptArgv(abs, scriptLang(tool.path, readText(abs) ?? ""));
+  if (!ctx.host.allowed(argv[0])) return { deny: `\u0406\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 ${name}: ${argv[0]} \u043D\u0435 \u0432 \u0431\u0456\u043B\u043E\u043C\u0443 \u0441\u043F\u0438\u0441\u043A\u0443 \u0431\u0456\u043D\u0430\u0440\u043D\u0438\u043A\u0456\u0432` };
+  ctx.host.processes++;
+  const r = await runProcess(argv, { cwd: ctx.repo.root, stdin: JSON.stringify({ args: input, ctx: { tier: ctx.tier, profile: ctx.gate.profile ?? null } }), timeoutMs: 3e4 });
+  if (r.exitCode !== 0) return { isError: true, result: `exit ${r.exitCode}
+${r.stderr.slice(-2e3)}` };
+  return { result: r.stdout };
+}
 var BUILTIN_PROVIDERS, Providers;
 var init_context = __esm({
   "packages/cli/src/context.ts"() {
@@ -8492,10 +8899,12 @@ var init_context = __esm({
     init_assemble();
     init_host_node();
     init_toolheader();
+    init_shims();
     init_scripts();
     init_shims2();
     init_settings();
     init_util();
+    init_providers();
     BUILTIN_PROVIDERS = /* @__PURE__ */ new Set(["git", "fs", "cursor", "session", "gate", "ctx", "scripts", "data", "args", "budgets"]);
     Providers = class {
       o;
@@ -8555,11 +8964,12 @@ var init_context = __esm({
           if (host.dryScripts) return void 0;
           host.processes++;
           const r = await runProcess(argv, { cwd: this.o.repo.root, timeoutMs: 1e4 });
-          if (r.exitCode !== 0) {
-            this.fail(name, p, `exit ${r.exitCode}: ${r.stderr.trim().split("\n")[0]?.slice(0, 200) ?? ""}`);
+          const res = providerResultOk(p, r.exitCode, r.stdout);
+          if (!res.ok) {
+            this.fail(name, p, `${res.error}: ${r.stderr.trim().split("\n")[0]?.slice(0, 200) ?? ""}`);
             return void 0;
           }
-          return parseLoose2(r.stdout);
+          return res.value;
         });
         return v === void 0 ? null : pickFields(v, p.pick);
       }
@@ -8611,13 +9021,10 @@ var init_context = __esm({
         else if (p.kind === "file") {
           const text = p.path ? await this.o.host.readFile(p.path) : void 0;
           if (text === void 0) v = this.fail(name, p, `\u0444\u0430\u0439\u043B ${p.path} \u043D\u0435 \u0437\u043D\u0430\u0439\u0434\u0435\u043D\u043E`);
-          else if (/\.json$/i.test(p.path)) {
-            try {
-              v = pickFields(JSON.parse(text), p.pick);
-            } catch (e) {
-              v = this.fail(name, p, `JSON: ${e.message}`);
-            }
-          } else v = /\.mdx?$/i.test(p.path) ? markdownValue(text) : text;
+          else {
+            const f = fileProviderValue(p.path, text, p.pick);
+            v = "markdown" in f ? markdownValue(text) : "error" in f ? this.fail(name, p, f.error) : f.value;
+          }
         } else if (p.kind === "cli") v = p.command?.length ? await this.cliRun(name, p, p.command) : null;
         else if (p.kind === "module") v = await this.moduleCall(name, p, "__default__", [], {});
         else if (p.kind === "mcp") {
@@ -9132,8 +9539,10 @@ function resolvePromptPackages(root, names) {
       }
     }
     let pkg;
+    let manifest = "";
     try {
-      pkg = dir ? JSON.parse(readFileSync4(join7(dir, "package.json"), "utf8")) : void 0;
+      manifest = dir ? readFileSync4(join7(dir, "package.json"), "utf8") : "";
+      pkg = dir ? JSON.parse(manifest) : void 0;
     } catch {
       pkg = void 0;
     }
@@ -9159,7 +9568,7 @@ function resolvePromptPackages(root, names) {
       if (entry) jobs.push({ entry, kind: "skills", package: label });
       else diagnostics.push(diag2("G164", "error", `\u041F\u0430\u043A\u0435\u0442 ${label}: \u043D\u0435\u043C\u0430\u0454 \u0432\u0445\u0456\u0434\u043D\u043E\u0433\u043E \u043C\u043E\u0434\u0443\u043B\u044F (exports, module, main \u0430\u0431\u043E context-gate.skills).`, { path: ".claude/gate.json" }));
     }
-    packages.push({ name: label, ...typeof pkg.version === "string" ? { version: pkg.version } : {}, dir, jobs });
+    packages.push({ name: label, spec: name, ...typeof pkg.version === "string" ? { version: pkg.version } : {}, hash: sha2562(manifest), dir, jobs });
   }
   return { packages, diagnostics };
 }
@@ -9190,10 +9599,16 @@ async function buildPrompts(opts) {
   const jobs = entries.map((entry) => ({ entry, kind: "default" }));
   const diagnostics = [];
   const pkgNames = Array.isArray(config?.prompt?.packages) ? config.prompt.packages : [];
-  if (pkgNames.length && !opts.only?.length) {
-    const pk = resolvePromptPackages(root, pkgNames);
+  const onlyPkgs = opts.only?.filter((o) => o.startsWith("npm:")).map((o) => o.slice(4));
+  const wantPkgs = !opts.only?.length ? pkgNames : pkgNames.filter((n) => onlyPkgs.includes(n));
+  const builtPkgs = [];
+  if (wantPkgs.length) {
+    const pk = resolvePromptPackages(root, wantPkgs);
     diagnostics.push(...pk.diagnostics);
-    for (const p of pk.packages) jobs.push(...p.jobs);
+    for (const p of pk.packages) {
+      jobs.push(...p.jobs);
+      builtPkgs.push(p);
+    }
   }
   const built = (await Promise.all(jobs.map((j) => buildEntry(env, j)))).flat();
   const compiled = [];
@@ -9225,7 +9640,14 @@ async function buildPrompts(opts) {
     const prevLock = readLock(root, dir);
     const entryRels = new Set(findEntries(root, dir).map((e) => posix2(relative3(root, e))));
     const lock = { compiler: COMPILER, prompts: {} };
-    for (const [id, p] of Object.entries(prevLock?.prompts ?? {})) if (!p.entry || entryRels.has(p.entry) || p.package && opts.only?.length) lock.prompts[id] = p;
+    for (const [id, p] of Object.entries(prevLock?.prompts ?? {})) if (!p.entry || entryRels.has(p.entry) || p.package && opts.only?.length && !builtPkgs.some((b) => b.name === p.package)) lock.prompts[id] = p;
+    const pkgLock = {};
+    for (const [n, v] of Object.entries(prevLock?.packages ?? {})) if (pkgNames.includes(n)) pkgLock[n] = v;
+    for (const b of builtPkgs) {
+      const failed = built.some((x) => x.package === b.name && x.diagnostics.some((d) => d.severity === "error"));
+      if (!failed) pkgLock[b.spec] = { ...b.version ? { version: b.version } : {}, hash: b.hash };
+    }
+    if (Object.keys(pkgLock).length) lock.packages = Object.fromEntries(Object.entries(pkgLock).sort(([a], [b]) => a.localeCompare(b)));
     const skillBody = config?.prompt?.skillBody ?? "live";
     const skillsToWrite = [];
     for (const cp of compiled) {
@@ -9306,6 +9728,16 @@ function checkStale(opts) {
       }
     });
     if (computeSourceHash(current) !== cp.sourceHash) stale.push(rel);
+  }
+  const config = opts.config ?? readBuildConfig(root);
+  const pkgNames = Array.isArray(config?.prompt?.packages) ? config.prompt.packages : [];
+  if (pkgNames.length) {
+    const lock = readLock(root, dir);
+    for (const p of resolvePromptPackages(root, pkgNames).packages) {
+      const rec = lock?.packages?.[p.spec];
+      if (!rec) missing.push(`npm:${p.spec}`);
+      else if (rec.hash !== p.hash || rec.version !== p.version) stale.push(`npm:${p.spec}`);
+    }
   }
   return { stale, missing };
 }
@@ -9670,6 +10102,7 @@ init_build();
 var GLOBAL_FLAGS = {
   root: { type: "string", desc: "\u043A\u043E\u0440\u0456\u043D\u044C \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0456\u044E (\u0437\u0430 \u0437\u0430\u043C\u043E\u0432\u0447\u0443\u0432\u0430\u043D\u043D\u044F\u043C \u2014 \u043D\u0430\u0439\u0431\u043B\u0438\u0436\u0447\u0438\u0439 \u0437 .claude/ \u0430\u0431\u043E .git \u0432\u0456\u0434 cwd)", arg: "<dir>" },
   "trust-repo": { type: "bool", desc: "\u0434\u043E\u0432\u0456\u0440\u044F\u0442\u0438 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0456\u044E \u043D\u0430 \u0446\u0435\u0439 \u0437\u0430\u043F\u0443\u0441\u043A (CI, claude -p): \u0434\u043E\u0437\u0432\u043E\u043B\u044F\u0454 \u043F\u0440\u043E\u0446\u0435\u0441\u0438 \u0439 cli-\u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u0438" },
+  "user-skills": { type: "bool", desc: "--no-user-skills: \u043D\u0435 \u0447\u0438\u0442\u0430\u0442\u0438 ~/.claude/skills (\u0432\u0456\u0434\u0442\u0432\u043E\u0440\u044E\u0432\u0430\u043D\u0456 collect/report/bench; \u0430\u0431\u043E CONTEXT_GATE_NO_USER_SKILLS=1)" },
   help: { type: "bool", desc: "\u0434\u043E\u0432\u0456\u0434\u043A\u0430", short: "h" }
 };
 function parseArgv(argv, spec, loose = false) {
@@ -9997,17 +10430,18 @@ function formatHealth(report) {
 }
 
 // packages/cli/src/cmd-run.ts
+init_journal();
 init_build();
 init_assemble();
 init_context();
 init_util();
-function walkNodes(nodes, fn2) {
+function walkNodes2(nodes, fn2) {
   for (const n of nodes) {
     fn2(n);
     if (n.t === "if") {
-      walkNodes(n.then, fn2);
-      if (n.else) walkNodes(n.else, fn2);
-    } else if ("children" in n && Array.isArray(n.children)) walkNodes(n.children, fn2);
+      walkNodes2(n.then, fn2);
+      if (n.else) walkNodes2(n.else, fn2);
+    } else if ("children" in n && Array.isArray(n.children)) walkNodes2(n.children, fn2);
   }
 }
 async function validateUses(prompts, ctx) {
@@ -10017,14 +10451,14 @@ async function validateUses(prompts, ctx) {
   for (const cp of prompts) {
     const uses = { ...cp.uses ?? {} };
     const nodes = [...cp.sections.flatMap((s) => s.children), ...cp.skill?.body ?? []];
-    walkNodes(nodes, (n) => {
+    walkNodes2(nodes, (n) => {
       if (n.t === "use") uses[n.name] = n.path;
     });
     const text = JSON.stringify(nodes);
     for (const [ns, path] of Object.entries(uses)) {
       const set = want.get(path) ?? /* @__PURE__ */ new Set();
       for (const m of text.matchAll(new RegExp(`(?<![\\w.])${ns.replace(/[$]/g, "\\$")}\\.([A-Za-z_][\\w]*)\\s*\\(`, "g"))) set.add(m[1]);
-      walkNodes(nodes, (n) => {
+      walkNodes2(nodes, (n) => {
         if (n.t === "call" && n.fn.startsWith(ns + ".")) set.add(n.fn.slice(ns.length + 1));
       });
       want.set(path, set);
@@ -10199,7 +10633,17 @@ async function healthCommand(o) {
   const prevPath = join8(ctx.repo.cacheDir, "last-render.json");
   const previous = readJson(prevPath);
   const stale = checkStale({ root: ctx.repo.root, dir: ctx.repo.promptDir });
-  const report = computeHealth(r.result, previous, { compiledStale: [...stale.stale, ...stale.missing] }, ctx.repo.config.health ?? {});
+  const logText = readText(join8(ctx.repo.root, ".claude", "gate.log.jsonl"));
+  const gates = logText ? gateStatsFromJournal(fromJsonl(logText).items, ctx.snapshot?.sessionId ? { sessionId: ctx.snapshot.sessionId } : {}) : {};
+  const items = logText ? fromJsonl(logText).items : [];
+  const conv = items.slice(items.map((e) => e.trigger).lastIndexOf("clear") + 1);
+  const decisions = conv.filter((e) => (e.kind === void 0 || e.kind === "decision") && "profile" in e);
+  const manualOverrides = conv.filter((e) => e.trigger === "manual").length;
+  const sessionExtras = items.length ? {
+    compactions: conv.filter((e) => e.trigger === "compact").length,
+    ...decisions.length ? { decision: { profile: decisions[decisions.length - 1].profile ?? null, ...manualOverrides ? { manualOverrides } : {} } } : {}
+  } : {};
+  const report = computeHealth(r.result, previous, { compiledStale: [...stale.stale, ...stale.missing], ...Object.keys(gates).length ? { gates } : {}, ...sessionExtras }, ctx.repo.config.health ?? {});
   try {
     writeJson(prevPath, { ...r.result, trace: [] });
   } catch {
@@ -10780,7 +11224,8 @@ function cliPipeHost(env) {
     config: repo.config,
     now: env.now ?? Date.now(),
     deliverNeedsDryRun: true,
-    collect: () => collectItems(repo),
+    // Async: `provider` rule sources resolve when the repo is trusted, else they stay `unverified` items.
+    collect: async () => (await collectRepoItems(repo, { ...env.trustRepo ? { trustRepo: true } : {} })).items,
     decide: (items, f) => decide(repo.config, items, { ...f.profile ? { profile: f.profile } : {}, ...f.model ? { model: f.model } : {}, ...f.tier ? { tier: f.tier } : {}, ...f.branch ? { branch: f.branch } : {}, paths: f.paths }).items,
     signals: async (a) => {
       const ctx = await buildContext({ root: env.root, trustRepo: env.trustRepo, dryScripts: true, providerNames: /* @__PURE__ */ new Set() });
@@ -10949,7 +11394,7 @@ init_context();
 init_util();
 function buildReport(entries, ruleIds, from, config) {
   const es = entries.filter((e) => from === void 0 || (e.ts ?? 0) >= from);
-  const r = { entries: es.length, decisions: 0, triggers: { when: 0, classify: 0, manual: 0, tier: 0, other: 0, byTrigger: {} }, shadow: { proposed: 0, matched: 0, differed: 0 }, denies: {}, rulesNeverDelivered: [], rulesDelivered: {}, escalations: { count: 0, byTier: {} }, gateFailures: {}, skillRenders: {}, tierCosts: tierCosts(es), suggestions: denySuggestions(es, config, config?.health?.H010 ?? 3), runnerVsMod: compareRunnerMod(es), skills: skillRenderStats(es) };
+  const r = { entries: es.length, decisions: 0, triggers: { when: 0, classify: 0, manual: 0, tier: 0, other: 0, byTrigger: {} }, shadow: { proposed: 0, matched: 0, differed: 0 }, denies: {}, rulesNeverDelivered: [], rulesDelivered: {}, escalations: { count: 0, byTier: {} }, gateFailures: {}, gates: gateStatsFromJournal(es), skillRenders: {}, tierCosts: tierCosts(es), suggestions: denySuggestions(es, config, config?.health?.H010 ?? 3), runnerVsMod: compareRunnerMod(es), skills: skillRenderStats(es) };
   for (const e of es) {
     const kind = e.kind ?? "decision";
     const d = e.data ?? {};
@@ -10998,6 +11443,7 @@ function formatReport(r) {
   if (r.suggestions.length) out.push("### \u041F\u0440\u043E\u043F\u043E\u0437\u0438\u0446\u0456\u0457", "", ...r.suggestions.map((s) => `- ${s.text}`), "");
   else if (denies.some(([, n]) => n > 3)) out.push("\u041F\u043E\u0432\u0442\u043E\u0440\u043D\u0456 deny \u043E\u0434\u043D\u043E\u0433\u043E \u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430: \u0434\u043E\u0434\u0430\u0439 \u0439\u043E\u0433\u043E \u0433\u0440\u0443\u043F\u0443 \u0432 \u043F\u0440\u043E\u0444\u0456\u043B\u044C (`/gate +\u0433\u0440\u0443\u043F\u0430`, \u043F\u043E\u0442\u0456\u043C \u0443 gate.json).", "");
   out.push("## \u041F\u0440\u0430\u0432\u0438\u043B\u0430, \u044F\u043A\u0456 \u0436\u043E\u0434\u043D\u043E\u0433\u043E \u0440\u0430\u0437\u0443 \u043D\u0435 \u0434\u043E\u0441\u0442\u0430\u0432\u043B\u0435\u043D\u043E", "", r.rulesNeverDelivered.length ? r.rulesNeverDelivered.map((id) => `- ${id}`).join("\n") : "\u041D\u0435\u043C\u0430\u0454.", "");
+  if (r.rulesUnverified?.length) out.push("\u041D\u0435 \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0435\u043D\u043E (unverified): " + r.rulesUnverified.map((u) => `${u.id} \u2014 ${u.note}`).join("; "), "");
   out.push("## \u0415\u0441\u043A\u0430\u043B\u0430\u0446\u0456\u0457", "", r.escalations.count ? table(["\u0437 tier", "\u0440\u0430\u0437\u0456\u0432"], Object.entries(r.escalations.byTier)) : "\u041D\u0435\u043C\u0430\u0454.", "");
   if (r.tierCosts.length) out.push("## \u0421\u043F\u0440\u043E\u0431\u0438 \u0456 \u0442\u043E\u043A\u0435\u043D\u0438 \u0437\u0430 tier", "", formatTierCosts(r.tierCosts), "");
   if (r.runnerVsMod.length) {
@@ -11006,16 +11452,21 @@ function formatReport(r) {
     if (differ) out.push(`\u0420\u043E\u0437\u0431\u0456\u0436\u043D\u043E\u0441\u0442\u0435\u0439: ${differ}. \u0414\u043E\u0434\u0430\u0439 \`profiles.<p>.when.ticketType\` \u0443 gate.json, \u0449\u043E\u0431 runner \u0456 mod \u0432\u0438\u0440\u0456\u0448\u0443\u0432\u0430\u043B\u0438 \u043E\u0434\u043D\u0430\u043A\u043E\u0432\u043E.`, "");
   }
   if (Object.keys(r.gateFailures).length) out.push("## \u041D\u0435\u043F\u0440\u043E\u0439\u0434\u0435\u043D\u0456 \u0433\u0435\u0439\u0442\u0438", "", table(["\u0433\u0435\u0439\u0442", "\u0440\u0430\u0437\u0456\u0432"], Object.entries(r.gateFailures)), "");
+  const gates = Object.entries(r.gates).filter(([, g]) => g.attempts || g.overrides);
+  if (gates.length) out.push("## \u0413\u0435\u0439\u0442\u0438 (H011)", "", table(["\u0433\u0435\u0439\u0442", "\u0441\u043F\u0440\u043E\u0431", "\u0437\u0430\u0431\u043B\u043E\u043A\u043E\u0432\u0430\u043D\u043E", "%", "\u043C\u0441 (\u0441\u0435\u0440.)", "\xAB\u0432\u0441\u0435 \u043E\u0434\u043D\u043E\xBB"], gates.map(([n, g]) => [n, g.attempts, g.blocks, g.attempts ? Math.round(g.blocks / g.attempts * 100) : 0, g.attempts && g.ms !== void 0 ? Math.round(g.ms / g.attempts) : "\u2014", g.overrides ?? 0])), "");
   if (r.skills.length) out.push("## \u0412\u0438\u043A\u043B\u0438\u043A\u0438 skills-\u043F\u0440\u043E\u043C\u043F\u0442\u0456\u0432", "", table(["skill", "\u0440\u0435\u043D\u0434\u0435\u0440\u0456\u0432", "\u043C\u0441 (\u0441\u0435\u0440.)", "\u0441\u0438\u043C\u0432\u043E\u043B\u0456\u0432 (\u0441\u0435\u0440.)", "\u043D\u0435 ok", "\u0430\u0440\u0433\u0443\u043C\u0435\u043D\u0442\u0438 (\u043F\u0440\u0438\u043A\u043B\u0430\u0434\u0438)"], r.skills.map((s) => [s.skill, s.renders, s.avgMs, s.avgChars, s.failed, s.args.map((a) => `\`${a.replace(/\|/g, "\\|")}\``).join(", ") || "\u2014"])), "");
   else if (Object.keys(r.skillRenders).length) out.push("## \u0412\u0438\u043A\u043B\u0438\u043A\u0438 skills-\u043F\u0440\u043E\u043C\u043F\u0442\u0456\u0432", "", table(["skill", "\u0440\u0435\u043D\u0434\u0435\u0440\u0456\u0432"], Object.entries(r.skillRenders)), "");
   return out.join("\n").replace(/\n+$/, "") + "\n";
 }
-function reportCommand(root, o) {
+async function reportCommand(root, o) {
   const text = readText(join12(root, ".claude", "gate.log.jsonl"));
   const entries = text ? fromJsonl(text).items : [];
   const repo = loadRepo(root);
-  const ruleIds = loadRules(root, repo.config).rules.map((r) => r.id);
+  const all = await collectRepoItems(repo, { ...o.trustRepo ? { trustRepo: true } : {} });
+  const ruleIds = all.rules.map((r) => r.id);
   const rep = buildReport(entries, ruleIds, sinceMs(o.since, Date.now()), repo.config);
+  const unverified = all.items.filter((i) => i.kind === "rule" && i.status === "unverified");
+  if (unverified.length) rep.rulesUnverified = unverified.map((i) => ({ id: i.name, note: i.description ?? "" }));
   if (o.since) rep.since = o.since;
   return { code: 0, out: o.json ? JSON.stringify(rep) + "\n" : formatReport(rep) };
 }
@@ -11342,7 +11793,6 @@ function buildGateIndex(i) {
 
 // packages/cli/src/cmd-index.ts
 init_context();
-init_toolheader();
 init_util();
 async function buildIndex(o) {
   const ctx = await buildContext({ ...o, dryScripts: o.dryScripts ?? true });
@@ -11360,10 +11810,7 @@ async function buildIndex(o) {
     providers[name] = { kind: p.kind, ...p.builtin ? { builtin: true } : {}, ...p.schema ? { schema: p.schema } : {}, ...fns.length ? { functions: fns } : {}, ...p.exposes ? { exposes: p.exposes } : {} };
     if (p.exposes?.includes("symbols")) symbols.push(...symbolsOf(await ctx.providers.value(name), name));
   }
-  const tools = scriptFiles(ctx.repo).flatMap((f) => {
-    const { header } = parseToolHeader(readText(join14(ctx.repo.root, f)) ?? "");
-    return header ? [{ name: header.name, path: f, ...header.description ? { description: header.description } : {}, inputSchema: header.inputSchema, ...header.tiers ? { tiers: header.tiers } : {} }] : [];
-  });
+  const tools = scriptTools(ctx.repo, [...ctx.prompts.system, ...Object.values(ctx.prompts.skills)]).tools.map((t) => ({ name: t.name, path: t.path, ...t.description ? { description: t.description } : {}, inputSchema: t.inputSchema, ...t.tiers ? { tiers: t.tiers } : {} }));
   return buildGateIndex({
     generatedBy: "context-gate index",
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -11480,8 +11927,8 @@ function formatPrompt(src) {
 
 // packages/cli/src/main.ts
 init_context();
-init_toolheader();
 init_settings();
+init_host_node();
 init_util();
 var VERSION = package_default.version;
 function explainAny(code) {
@@ -11566,7 +12013,7 @@ async function doBuild(root, p, io) {
 }
 async function stageCommand(name, p, root, io) {
   const args = {};
-  for (const [k, v] of Object.entries(p.flags)) if (k !== "root" && k !== "help" && k !== "trust-repo") args[k] = Array.isArray(v) ? v.join(",") : String(v);
+  for (const [k, v] of Object.entries(p.flags)) if (k !== "root" && k !== "help" && k !== "trust-repo" && k !== "user-skills") args[k] = Array.isArray(v) ? v.join(",") : String(v);
   const stage2 = { stage: name, args, positional: p.positional, ...name === "where" ? { expr: p.positional.join(" ") } : {} };
   const needsInput = name !== "collect" && name !== "why" && name !== "signals";
   const input = needsInput || !process.stdin.isTTY ? parseJsonl(await io.stdin()) : { items: [], bad: 0 };
@@ -11864,17 +12311,17 @@ var COMMANDS = {
     usage: ["report [--since 7d] [--json]"],
     flags: { since: { type: "string", desc: "\u0432\u0456\u043A\u043D\u043E (7d, 24h \u0430\u0431\u043E \u0434\u0430\u0442\u0430)", arg: "<dur>" }, json: { type: "bool", desc: "JSON" } },
     async run(p, root, io) {
-      const r = reportCommand(root, { ...str3(p, "since") ? { since: str3(p, "since") } : {}, json: bool3(p, "json") });
+      const r = await reportCommand(root, { ...str3(p, "since") ? { since: str3(p, "since") } : {}, json: bool3(p, "json"), ...bool3(p, "trust-repo") ? { trustRepo: true } : {} });
       io.out(r.out);
       return r.code;
     }
   },
   bench: {
     summary: "\u0442\u043E\u043A\u0435\u043D\u0438 \u043F\u0440\u043E\u043C\u043F\u0442\u0443 \u0439 \u0435\u043B\u0435\u043C\u0435\u043D\u0442\u0456\u0432 \u0434\u043E/\u043F\u0456\u0441\u043B\u044F gate, unverified \u2014 \u043F\u043E bench/repos.json \u0430\u0431\u043E \u0437\u0430\u0434\u0430\u043D\u0438\u0445 \u0442\u0435\u043A\u0430\u0445",
-    usage: ["bench [--before] [--after] [dirs\u2026] [--profile p] [--tier t] [--json]"],
+    usage: ["bench [--before] [--after] [dirs\u2026] [--profile p] [--tier t] [--json] [--user-skills]"],
     flags: { before: { type: "bool", desc: "\u043A\u043E\u043B\u043E\u043D\u043A\u0430 \u0431\u0435\u0437 gate" }, after: { type: "bool", desc: "\u043A\u043E\u043B\u043E\u043D\u043A\u0430 \u0437 gate" }, json: { type: "bool", desc: "JSON" }, profile: ctxFlags.profile, tier: ctxFlags.tier, model: ctxFlags.model },
     async run(p, root, io) {
-      const r = await benchCommand(root, p.positional, { before: bool3(p, "before"), after: bool3(p, "after"), json: bool3(p, "json"), ...str3(p, "profile") ? { profile: str3(p, "profile") } : {}, ...str3(p, "tier") ? { tier: str3(p, "tier") } : {}, ...str3(p, "model") ? { model: str3(p, "model") } : {} });
+      const r = await withUserSkills(p.flags["user-skills"] === true, () => benchCommand(root, p.positional, { before: bool3(p, "before"), after: bool3(p, "after"), json: bool3(p, "json"), ...str3(p, "profile") ? { profile: str3(p, "profile") } : {}, ...str3(p, "tier") ? { tier: str3(p, "tier") } : {}, ...str3(p, "model") ? { model: str3(p, "model") } : {} }));
       io.out(r.out);
       return r.code;
     }
@@ -11933,20 +12380,41 @@ var COMMANDS = {
     }
   },
   tools: {
-    summary: "\u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0438 \u043C\u043E\u0434\u0435\u043B\u0456 \u0437\u0456 \u0441\u043A\u0440\u0438\u043F\u0442\u0456\u0432 .claude/prompt/scripts (\u0437\u0430\u0433\u043E\u043B\u043E\u0432\u043A\u0438 # gate-tool:)",
-    usage: ["tools [--json]"],
-    flags: { json: { type: "bool", desc: "JSON" } },
+    summary: "\u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0438 \u043C\u043E\u0434\u0435\u043B\u0456: # gate-tool: \u0443 .claude/prompt/scripts \u0456 \u043D\u0430\u0434 \u0435\u043A\u0441\u043F\u043E\u0440\u0442\u0430\u043C\u0438 \u043C\u043E\u0434\u0443\u043B\u0456\u0432 (lib, module-\u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440\u0438, use); --call \u0432\u0438\u043A\u043E\u043D\u0443\u0454 \u043E\u0434\u0438\u043D",
+    usage: ["tools [--json]", `tools --call <name> [--input '{"k":1}'] [--trust-repo]`],
+    flags: { json: { type: "bool", desc: "JSON" }, call: { type: "string", desc: "\u0432\u0438\u043A\u043E\u043D\u0430\u0442\u0438 \u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u044F\u043A mod (\u0433\u0435\u0439\u0442, tiers, \u0434\u043E\u0432\u0456\u0440\u0430)", arg: "<name>" }, input: { type: "string", desc: "\u0432\u0445\u0456\u0434 \u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430 (JSON-\u043E\u0431\u02BC\u0454\u043A\u0442)", arg: "<json>" }, ...ctxFlags },
     async run(p, root, io) {
-      const repo = loadRepo(root);
-      const tools = [];
-      let bad = 0;
-      for (const f of scriptFiles(repo)) {
-        const { header, diagnostics } = parseToolHeader(readText(join15(root, f)) ?? "");
-        printDiags(io, diagnostics.map((d) => ({ ...d, path: f })));
-        bad += diagnostics.filter((d) => d.severity === "error").length;
-        if (header) tools.push({ ...header, path: f });
+      const name = str3(p, "call");
+      if (name) {
+        let input = {};
+        const raw = str3(p, "input");
+        if (raw) {
+          try {
+            input = JSON.parse(raw);
+          } catch (e) {
+            io.err(`--input: \u043D\u0435 JSON (${e.message})
+`);
+            return 2;
+          }
+          if (!input || typeof input !== "object" || Array.isArray(input)) {
+            io.err("--input: \u043F\u043E\u0442\u0440\u0456\u0431\u0435\u043D JSON-\u043E\u0431\u02BC\u0454\u043A\u0442\n");
+            return 2;
+          }
+        }
+        const ctx = await buildContext(ctxOpts(p, root));
+        const r = await callScriptTool(ctx, name, input);
+        if ("deny" in r) {
+          io.err(r.deny + "\n");
+          return 1;
+        }
+        io.out(r.result.endsWith("\n") ? r.result : r.result + "\n");
+        return "isError" in r ? 1 : 0;
       }
-      io.out(bool3(p, "json") ? JSON.stringify(tools) + "\n" : tools.length ? tools.map((t) => `${t.name} \u2014 ${t.description ?? ""} (${t.path}${t.tiers ? `; tiers ${t.tiers.join(", ")}` : ""})`).join("\n") + "\n" : "\u043D\u0435\u043C\u0430\u0454 \u0441\u043A\u0440\u0438\u043F\u0442\u0456\u0432 \u0456\u0437 # gate-tool:\n");
+      const repo = loadRepo(root);
+      const { tools, diagnostics } = scriptTools(repo);
+      printDiags(io, diagnostics);
+      const bad = diagnostics.filter((d) => d.severity === "error").length;
+      io.out(bool3(p, "json") ? JSON.stringify(tools) + "\n" : tools.length ? tools.map((t) => `${t.name} \u2014 ${t.description ?? ""} (${t.path}${t.fn ? `#${t.fn}` : ""}${t.tiers ? `; tiers ${t.tiers.join(", ")}` : ""})`).join("\n") + "\n" : "\u043D\u0435\u043C\u0430\u0454 \u0456\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0456\u0432 \u0456\u0437 # gate-tool:\n");
       return bad ? 1 : 0;
     }
   },
@@ -12026,7 +12494,7 @@ context-gate ${name} --help \u2014 \u0434\u043E\u0432\u0456\u0434\u043A\u0430.
   }
   const root = str3(p, "root") ? resolve7(str3(p, "root")) : findRoot(process.cwd());
   try {
-    return await cmd.run(p, root, io);
+    return await withUserSkills(p.flags["user-skills"] !== false, () => cmd.run(p, root, io));
   } catch (e) {
     io.err(`context-gate ${name}: ${e?.stack ?? String(e)}
 `);

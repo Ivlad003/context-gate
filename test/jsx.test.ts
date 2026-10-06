@@ -231,3 +231,21 @@ test('compilePrompt: skill prompt and invalid default export', () => {
   const bad = compilePrompt(h('p', null, 'x'), { file: 'a.prompt.tsx' })
   assert.deepEqual(bad.diagnostics.map((d) => [d.code, d.path]), [['G001', 'a.prompt.tsx']])
 })
+
+test('compilePrompt: canonical nodes only (store= → Store with key, scripts let → Call, skill body too); Store to=', () => {
+  assert.deepEqual(h(Store, { name: 'api', to: 'api-endpoints' }), { t: 'store', name: 'api', key: 'api-endpoints' })
+  const p = h(Prompt, { id: 'p' },
+    h(Section, { id: 's', scope: 'volatile' },
+      h(Run, { lang: 'python', as: 'api', store: 'api-endpoints', cache: '1h' }, 'print(1)'),
+      h(Let, { name: 'todos', value: 'scripts.open_todos("src")' })))
+  const c = compilePrompt(p, { root: '/nowhere' })
+  assert.deepEqual(c.sections[0]!.children, [
+    { t: 'run', lang: 'python', code: 'print(1)', as: 'api', cache: '1h' },
+    { t: 'store', name: 'api', key: 'api-endpoints' },
+    { t: 'call', fn: 'scripts.open_todos', args: ['"src"'], as: 'todos' },
+  ])
+  assert.deepEqual(c.diagnostics.map((d) => d.code), ['G180'])
+  const sk = h(Prompt, { as: 'skill', name: 'x', description: 'd' }, h(Call, { fn: 'u.f', as: 'r', store: 'r' }))
+  const cs = compilePrompt(sk, { root: '/nowhere' })
+  assert.deepEqual(cs.skill!.body, [{ t: 'call', fn: 'u.f', args: [], as: 'r' }, { t: 'store', name: 'r' }])
+})

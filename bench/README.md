@@ -8,7 +8,11 @@ npm run build                                      # dist/cli.js
 node --experimental-strip-types bench/run.ts       # Markdown table
 node --experimental-strip-types bench/run.ts --json
 node --experimental-strip-types bench/run.ts --repos path/to/other-repos.json
+node --experimental-strip-types bench/run.ts --user-skills   # also count ~/.claude/skills
 ```
+
+The harness runs the CLI with `CONTEXT_GATE_NO_USER_SKILLS=1` (the env form of `--no-user-skills`), so skills in the
+user's `~/.claude/skills` never enter the item counts and the table is the same on every machine.
 
 ## repos.json
 

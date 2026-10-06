@@ -4,6 +4,7 @@
 
 import type { CompiledPrompt, Diagnostic, Node, SectionNode } from '../../core/src/types.ts'
 import { isMarker, takeDiagnostics, type PromptMarker } from './core.ts'
+import { canonicalNodes } from '../../core/src/canonical.ts'
 
 export type CompiledPart = Pick<CompiledPrompt, 'sections' | 'skill' | 'uses' | 'diagnostics'> & { id?: string }
 
@@ -28,9 +29,13 @@ export function compilePrompt(value: unknown, opts: CompileOptions = {}): Compil
   const out: CompiledPart = { sections: [], diagnostics }
   if (marker) {
     if (marker.id) out.id = marker.id
-    out.sections = marker.sections.map((s): SectionNode => (s.source ? { ...s, source: { ...s.source, path: rel(s.source.path, opts.root) } } : s))
+    // Р5: only canonical nodes reach `.compiled` (core `canonicalNodes`: `store=` → `Store`, `scripts.f()` lets → `Call`).
+    out.sections = marker.sections.map((s): SectionNode => {
+      const c = { ...s, children: canonicalNodes(s.children) }
+      return c.source ? { ...c, source: { ...c.source, path: rel(c.source.path, opts.root) } } : c
+    })
     if (Object.keys(marker.uses).length) out.uses = marker.uses
-    if (marker.skill) out.skill = marker.skill
+    if (marker.skill) out.skill = { ...marker.skill, body: canonicalNodes(marker.skill.body) }
   }
   for (const d of diagnostics) {
     if (d.path) d.path = rel(d.path, opts.root)

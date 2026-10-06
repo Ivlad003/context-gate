@@ -101,9 +101,9 @@ JSON Schema — [`schema/context-gate.schema.json`](schema/context-gate.schema.j
 | `budgets`, `onExceed` | `softContextPct` / `hardContextPct` по tiers; дії `section`, `notice`, `compact` |
 | `escalation` | `order` tiers і `after: { verifyFailed, stallTurns }` → `escalation-suggested` у журналі |
 | `brief` | бриф задачі сильною моделлю, раз на задачу, для слабших tiers |
-| `providers` | іменовані джерела даних для DSL: `cli` (JSON зі stdout), `file`, `mcp`, `module`; `schema`, `cache`, `onError`, `functions` |
+| `providers` | іменовані джерела даних для DSL: `cli` (JSON зі stdout), `file`, `mcp`, `module`; `schema`, `cache`, `onError`, `functions`; для `cli`: `okExitCodes`, `parseOnError` (`eslint -f json` виходить з 1) |
 | `executors` | як `Run`/`Call` запускають мову (`python3`, `node`, `bash`, `deno`, …) |
-| `itemSources` | джерела елементів: `cursor-mdc`, `markdown-dir`, `provider` (`field`, `as`, `template`), `claude-skills`, `claude-tools` |
+| `itemSources` | джерела елементів: `cursor-mdc`, `markdown-dir`, `provider` (`field`, `as`, `template`), `prompt-dir` (додаткова тека секцій, `as: "section"`), `claude-skills`, `claude-tools` |
 | `gates` | детерміновані перевірки: `on: write \| commit \| turn \| prompt`, `run` або `provider`, вираз `pass`, шаблон `message`, `onlyNew` + `baseline`, `tiers`; вбудований `read-before-write` |
 | `cursorRules` | `enabled`, `nested`, `maxCharsPerInjection`, `strictWrite` |
 | `prompt` | `dir`, `runCacheDefault`, `build: auto \| never`, `commitCompiled`, `persist` |
@@ -118,7 +118,8 @@ JSON Schema — [`schema/context-gate.schema.json`](schema/context-gate.schema.j
 ## Довідник CLI
 
 `context-gate <команда> [прапорці]`; `context-gate <команда> --help` — довідка команди. Глобальні прапорці:
-`--root <dir>`, `--trust-repo`. Коди виходу: 0 успіх, 1 помилка, 2 невірні аргументи.
+`--root <dir>`, `--trust-repo`, `--no-user-skills` (не читати `~/.claude/skills`, або `CONTEXT_GATE_NO_USER_SKILLS=1`;
+`bench` робить так за замовчуванням). Коди виходу: 0 успіх, 1 помилка, 2 невірні аргументи.
 
 | Команда | Що робить |
 | --- | --- |
@@ -139,7 +140,7 @@ JSON Schema — [`schema/context-gate.schema.json`](schema/context-gate.schema.j
 | `trust` | довіра до репозиторію (Р2): процеси, cli/module-провайдери, `@run`/`@call` |
 | `data` | сховище даних скриптів `data.*` |
 | `schema infer <провайдер>` | чернетка JSON Schema провайдера з реального запуску |
-| `tools` | інструменти моделі зі скриптів `.claude/prompt/scripts` (`# gate-tool:`) |
+| `tools` | інструменти моделі: `# gate-tool:` у `.claude/prompt/scripts` і над експортами `lib/*`, `module`-провайдерів і `use`-шляхів; `--call <name> --input '{…}'` виконує один, як mod |
 | **Конвеєр (JSONL)** | |
 | `pipe "<стадії>"` | увесь конвеєр одним рядком, граматика `/gate`: `collect \| decide --profile x \| tokens` |
 | `collect`, `normalize`, `signals`, `decide`, `budget`, `deliver --dry-run`, `observe` | стадії конвеєра |

@@ -188,7 +188,12 @@ export const Let = builtin('Let', (props: { name: string; value: Expr | number |
 export const Set = builtin('Set', (props: { name: string; value: Expr | number | boolean | object | null }): Node => ({ t: 'set', name: req(props.name, 'Set', 'name'), value: req(exprOf(props.value, '<Set> value'), 'Set', 'value') }))
 
 /** Persist a section variable to `data.<name>`. */
-export const Store = builtin('Store', (props: { name: string }): Node => ({ t: 'store', name: req(props.name, 'Store', 'name') }))
+/** `<Store name="api" />` persists `api` to `data.api`; `to="api-endpoints"` picks another data key. After a
+ * `Run`/`Call` it keeps that result's `fetchedAt` and `cache` (the renderer carries the metadata). */
+export const Store = builtin('Store', (props: { name: string; to?: string }): Node => {
+  const name = req(props.name, 'Store', 'name')
+  return { t: 'store', name, ...(props.to && props.to !== name ? { key: props.to } : {}) }
+})
 
 export const Repeat = builtin('Repeat', (props: { n: Expr | number; children?: Child }): Node => {
   if (typeof props.n === 'number' && props.n > 1000) report('G152', 'error', `<Repeat n={${props.n}}>: понад 1 000 ітерацій.`, 'провайдер повертає готовий список')
@@ -222,11 +227,12 @@ export const Run = builtin('Run', (props: RunProps): Node => {
 })
 
 /**
- * Р5: `store=` on `Run`/`Call` is the legacy form of `<Store>`; accepted until 1.0 with G180. The field stays
- * on the node (the renderer keeps the run's cache metadata for `data.*` freshness).
+ * Р5: `store=` on `Run`/`Call` is the legacy form of `<Store>`; accepted until 1.0 with G180. `compilePrompt`
+ * (core `canonicalNodes`) splits it into the node plus `{ t: 'store', name, key }`; the store node carries the
+ * run's `fetchedAt` / `cache` metadata, so `data.*` freshness is unchanged.
  */
 function legacyStore(comp: string, key: string, as: string | undefined): void {
-  report('G180', 'warning', `<${comp} store="${key}"> — застаріла форма збереження.`, `використай <${comp} as="${as ?? key}" … /> і <Store name="${as ?? key}" />`)
+  report('G180', 'warning', `<${comp} store="${key}"> — застаріла форма збереження.`, `використай <${comp} as="${as ?? key}" … /> і <Store name="${as ?? key}"${as && as !== key ? ` to="${key}"` : ''} />`)
 }
 
 /** Bind a script module to a namespace (`gitx` → `scripts/git-extra.js`). */

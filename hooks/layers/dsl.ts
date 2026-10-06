@@ -10,17 +10,18 @@ import type { CompiledPrompt, Diagnostic, Gate, RenderedSection, Scope_, Section
 import { DEBUG_LOG_FILE, DEBUG_LOG_MAX, capDebugLog, debugLogLines, renderPrompt, materializeData } from '../../packages/core/src/render.ts'
 import type { RenderHostExt, RenderOptionsExt, RenderResultExt } from '../../packages/core/src/render.ts'
 import { argsToJsonSchema } from '../../packages/core/src/argparse.ts'
-import { tierForModel } from '../../packages/core/src/config.ts'
+import { maskSecrets, tierForModel } from '../../packages/core/src/config.ts'
 import { denyText } from '../../packages/core/src/decide.ts'
-import { assemblePrompts, buildScope as coreBuildScope, defaultGate, skillArgs, type MarkdownFile, type PromptSet as AssembledSet } from '../../packages/core/src/assemble.ts'
+import { assemblePrompts, buildScope as coreBuildScope, defaultGate, isMarkdownSectionFile, promptSectionDirs, skillArgs, type MarkdownFile, type PromptSet as AssembledSet } from '../../packages/core/src/assemble.ts'
 import { parseToolHeader, parseToolHeaders } from '../../packages/core/src/toolheader.ts'
 import { missingExports, scriptArgv, scriptLang, shimLang, usedFunctions } from '../../packages/core/src/shims.ts'
 import { repoCacheName } from '../../packages/core/src/sha256.ts'
 import type { RunJson } from '../../packages/core/src/runjson.ts'
 import { computeHealth } from '../../packages/core/src/health.ts'
+import { parseSkillListing } from '../../packages/core/src/items.ts'
 import { isApplied, json } from '../state.ts'
 import { type Io, OWN_TOOL_PREFIX, type PromptSet, type Runtime, type ScriptTool, debug, hash, insideRoot, join, now, stableJson } from '../ctx.ts'
-import { ensureEnv, ensureSession } from './config.ts'
+import { ensureEnv, ensureSession, envMask } from './config.ts'
 import { ensureRules } from './cursor-rules.ts'
 import { journal, pushFileEntry } from './journal.ts'
 import { snapshotData, snapshotEntry } from '../../packages/core/src/journal.ts'
@@ -126,17 +127,27 @@ export async function loadPrompts(io: Io, rt: Runtime, opts: { force?: boolean }
   for (const src of rt.prompts?.sources ?? []) {
     if (!src.includes('/') || src.slice(0, src.lastIndexOf('/')) !== dir) sourceKey.push(`s/${src}:${(await mtimeOf(io, rt, src, lists)) ?? 'missing'}`)
   }
-  const key = [`from:${compiledFrom}`, ...entries.map((e) => `${e.name}:${e.mtimeMs}`), ...compiledEntries.map((e) => `c/${e.name}:${e.mtimeMs}`), ...sourceKey].sort().join('|')
+  // Markdown section dirs beyond `prompt.dir`: `itemSources` `{ kind: "prompt-dir", as: "section" }` (core, as the CLI).
+  const extraDirs: { rel: string; entries: ListEntry[] }[] = []
+  for (const rel of promptSectionDirs({ ...rt.cfg, prompt: { ...rt.cfg.prompt, dir } }).slice(1)) {
+    extraDirs.push({ rel, entries: [...(await io.fs.list(join(rt.root, rel)).catch(() => []))] })
+  }
+  const key = [`from:${compiledFrom}`, ...entries.map((e) => `${e.name}:${e.mtimeMs}`), ...compiledEntries.map((e) => `c/${e.name}:${e.mtimeMs}`), ...sourceKey,
+    ...extraDirs.flatMap((d) => d.entries.map((e) => `d/${d.rel}/${e.name}:${e.mtimeMs}`))].sort().join('|')
   if (rt.prompts && rt.prompts.key === key && !rt.promptsDirty && !opts.force) return rt.prompts
   const diagnostics: Diagnostic[] = []
   const loaded = await readCompiledDir(io, compiledDir, compiledLabel, compiledEntries, diagnostics)
   const compiled = loaded.map((l) => l.prompt)
   // Markdown sources as files; tier variants and parsing are core `assemblePrompts` (same as the CLI).
   const markdown: MarkdownFile[] = []
-  for (const e of entries) {
-    if (e.kind !== 'file' || !e.name.endsWith('.md') || /^readme\.md$/i.test(e.name)) continue
-    const t = await io.fs.read(`${absDir}/${e.name}`).catch(() => undefined)
-    if (typeof t === 'string') markdown.push({ path: `${dir}/${e.name}`, text: t })
+  for (const d of [{ rel: dir, entries }, ...extraDirs]) {
+    for (const e of d.entries) {
+      if (e.kind !== 'file' || !isMarkdownSectionFile(e.name)) continue
+      const path = `${d.rel}/${e.name}`
+      if (markdown.some((m) => m.path === path)) continue
+      const t = await io.fs.read(join(rt.root, path)).catch(() => undefined)
+      if (typeof t === 'string') markdown.push({ path, text: t })
+    }
   }
   markdown.sort((x, y) => x.path.localeCompare(y.path))
   diagnostics.push(...assemblePrompts([], markdown, '', Object.keys(rt.cfg.tiers ?? {})).diagnostics)
@@ -165,7 +176,8 @@ export async function loadPrompts(io: Io, rt: Runtime, opts: { force?: boolean }
       if (m === undefined ? s.path !== entry : m > l.mtimeMs) stale.add(entry)
     }
   }
-  const watch = [absDir, `${absDir}/.compiled`, ...entries.filter((e) => e.kind === 'file').map((e) => `${absDir}/${e.name}`), ...[...sources].filter((p) => insideRoot(p)).map((p) => join(rt.root, p))]
+  const watch = [absDir, `${absDir}/.compiled`, ...entries.filter((e) => e.kind === 'file').map((e) => `${absDir}/${e.name}`), ...[...sources].filter((p) => insideRoot(p)).map((p) => join(rt.root, p)),
+    ...extraDirs.flatMap((d) => [join(rt.root, d.rel), ...d.entries.filter((e) => e.kind === 'file' && isMarkdownSectionFile(e.name)).map((e) => join(rt.root, `${d.rel}/${e.name}`))])]
   rt.prompts = { key, compiled, markdown, stale: [...stale].sort(), diagnostics, watch: [...new Set(watch)], sources: [...sources].sort(), compiledFrom }
   rt.promptsDirty = false
   return rt.prompts
@@ -298,26 +310,22 @@ async function persistData(io: Io, rt: Runtime, dataKey: string, res: RenderResu
 
 // ───────────────────────── compose ─────────────────────────
 
-/** Sections to render: core `assemblePrompts` (compiled system prompts, then Markdown resolved for the tier; skills apart). */
-export function sectionsFor(rt: Runtime, set: PromptSet, tier: string): AssembledSet {
-  return assemblePrompts(set.compiled, set.markdown, tier, Object.keys(rt.cfg.tiers ?? {}))
+/** Sections to render: core `assemblePrompts` (compiled system prompts, then Markdown resolved for the tier; skills
+ *  apart). `preload` (the applied gate's `skills.preload`, see `preloadOf`) adds core's generated `preload` section. */
+export function sectionsFor(rt: Runtime, set: PromptSet, tier: string, preload: readonly string[] = []): AssembledSet {
+  return assemblePrompts(set.compiled, set.markdown, tier, Object.keys(rt.cfg.tiers ?? {}), { preload })
+}
+
+/** Р5: the skills `tiers[*].preload` inlines for the applied gate (none in shadow mode or with the gate off). */
+export async function preloadOf(io: Io): Promise<string[]> {
+  const gate = await io.read('gate')
+  return isApplied(gate) ? gate.skills.preload : []
 }
 
 /** Render options shared with `context-gate run` (`renderWith`), plus the mod's 2 s script budget. */
 export function renderOptions(rt: Runtime, tier: string): RenderOptionsExt {
-  return { tier, runBudgetMs: 2000, ...(rt.cfg.prompt?.runCacheDefault ? { runCacheDefault: rt.cfg.prompt.runCacheDefault } : {}), ...(rt.cfg.debug ? { debug: true } : {}), ...(rt.cfg.assertFail ? { assertFail: rt.cfg.assertFail } : {}) }
-}
-
-async function preloadSection(io: Io, rt: Runtime): Promise<{ id: string; text: string } | undefined> {
-  const gate = await io.read('gate')
-  if (!isApplied(gate) || !gate.skills.preload.length) return undefined
-  const parts: string[] = []
-  for (const name of gate.skills.preload) {
-    const it = await itemBodyOf(io, rt, 'skill', name)
-    if (it?.body) parts.push(`## ${name}\n\n${it.body}`)
-  }
-  if (!parts.length) return undefined
-  return { id: 'preload', text: `Skills, вбудовані для tier ${gate.tier} (не викликай їх окремо):\n\n${parts.join('\n\n')}` }
+  const secrets = envMask(rt) // G-03: whitelisted env values never reach the trace or diagnostics
+  return { tier, runBudgetMs: 2000, ...(secrets.length ? { secrets } : {}), ...(rt.cfg.prompt?.runCacheDefault ? { runCacheDefault: rt.cfg.prompt.runCacheDefault } : {}), ...(rt.cfg.debug ? { debug: true } : {}), ...(rt.cfg.assertFail ? { assertFail: rt.cfg.assertFail } : {}) }
 }
 
 /** Sync rebuild of stale files when it fits in 2 s; once per source mtime. */
@@ -339,16 +347,16 @@ export async function composeSections(io: Io, rt: Runtime, model: string | undef
   let set = await loadPrompts(io, rt)
   set = await syncBuild(io, rt, set)
   const out: { id: string; text: string; scope: 'session' }[] = []
-  const preload = await preloadSection(io, rt)
-  const hasSections = set.compiled.some((p) => !p.skill && p.sections.length) || set.markdown.length > 0
+  const preload = await preloadOf(io)
+  const hasSections = set.compiled.some((p) => !p.skill && p.sections.length) || set.markdown.length > 0 || preload.length > 0
   if (!hasSections) {
-    if (preload) out.push({ id: SECTION_PREFIX + preload.id, text: preload.text, scope: 'session' })
     rt.lastSections = out
     return { sections: out }
   }
   const host = await hostFor(io, rt)
   const { scope, tier, dataKey } = await buildScope(io, rt, host, model)
-  const tiered = sectionsFor(rt, set, tier)
+  // The preload section (Р5) is core's: `assemblePrompts` generates it from the gate's `skills.preload`, as the CLI.
+  const tiered = sectionsFor(rt, set, tier, preload)
   const g158 = await checkExports(io, rt, host, [...tiered.system, ...Object.values(tiered.skills)])
   const res = await renderPrompt(tiered.system, scope, host, renderOptions(rt, tier))
   res.diagnostics.push(...g158)
@@ -356,18 +364,12 @@ export async function composeSections(io: Io, rt: Runtime, model: string | undef
   // Budget-owned sections appear only while their threshold is crossed.
   const owned = budgetSections(rt)
   const fired = await io.read('budgetsFired')
-  let staticDone = false
   for (const s of res.sections) {
     if (!s.included || !s.text) continue
     const k = owned.get(s.id)
     if (k && !fired.includes(k)) continue
-    if (s.scope !== 'static' && !staticDone) {
-      staticDone = true
-      if (preload) out.push({ id: SECTION_PREFIX + preload.id, text: preload.text, scope: 'session' })
-    }
     out.push({ id: SECTION_PREFIX + s.id, text: staticText(rt, s, tier), scope: 'session' })
   }
-  if (!staticDone && preload) out.push({ id: SECTION_PREFIX + preload.id, text: preload.text, scope: 'session' })
   await recordHealth(io, rt, res, set)
   await writeSnapshot(io, rt, scope, tier, out)
   await recordDebug(io, rt, res, tier)
@@ -408,7 +410,8 @@ async function recordDebug(io: Io, rt: Runtime, res: RenderResultExt, tier: stri
     const key = hash(stableJson([entries.map((t) => [t.section, t.kind, t.detail]), asserts.map((d) => d.message)]))
     if (rt.lastDebug === key) return
     rt.lastDebug = key
-    for (const t of entries) debug(io, `${t.kind} ${t.section}: ${t.detail}`)
+    const secrets = envMask(rt)
+    for (const t of entries) debug(io, maskSecrets(`${t.kind} ${t.section}: ${t.detail}`, secrets))
     const lines = entries.slice(0, 20).map((t) => ({ section: t.section, kind: t.kind, detail: t.detail.slice(0, 500) }))
     if (lines.length) await journal(io, rt, { kind: 'debug', trigger: 'render', tier, data: { entries: lines, count: entries.length } })
     if (asserts.length) await journal(io, rt, { kind: 'debug', trigger: 'assert', tier, data: { code: 'D001', assertFail: rt.cfg.assertFail ?? 'skip', messages: asserts.slice(0, 10).map((d) => d.message) } })
@@ -421,7 +424,7 @@ async function recordDebug(io: Io, rt: Runtime, res: RenderResultExt, tier: stri
 /** `.claude/gate.debug.log` (only with `debug: true`): core `debugLogLines` / `capDebugLog`, as `context-gate run --debug`. */
 async function writeDebugLog(io: Io, rt: Runtime, res: RenderResultExt, tier: string): Promise<void> {
   const turn = (await io.read('gateState').catch(() => ({ turn: 0 }))).turn
-  const add = debugLogLines(res, now(), { turn, tier })
+  const add = debugLogLines(res, now(), { turn, tier, secrets: envMask(rt) })
   if (!add) return
   const rel = rt.cfg.debugLog?.path ?? DEBUG_LOG_FILE
   if (!insideRoot(rel)) return
@@ -466,7 +469,8 @@ async function writeLastTrace(io: Io, rt: Runtime, res: RenderResultExt, scope: 
         at: t,
       },
     }
-    await io.fs.write(join(rt.root, `${promptDir(rt)}/.trace/last.json`), JSON.stringify(j, null, 2) + '\n')
+    // The scope carries `env.*` values: mask them in the file (the LSP shows `***`).
+    await io.fs.write(join(rt.root, `${promptDir(rt)}/.trace/last.json`), maskSecrets(JSON.stringify(j, null, 2), envMask(rt)) + '\n')
   } catch (err) {
     debug(io, `trace: ${String((err as Error)?.message ?? err)}`)
   }
@@ -485,7 +489,9 @@ async function writeSnapshot(io: Io, rt: Runtime, scope: Scope_, tier: string, s
   try {
     const meta = await snapshotMeta(io, rt)
     const gate = await io.read('gate')
-    const data = snapshotData({ ...meta, tier, profile: gate?.profile ?? null, scope: scope as Record<string, Value>, text: sections.map((s) => s.text).join('\n\n') })
+    const secrets = envMask(rt)
+    const raw = snapshotData({ ...meta, tier, profile: gate?.profile ?? null, scope: scope as Record<string, Value>, text: sections.map((s) => s.text).join('\n\n') })
+    const data = secrets.length ? (JSON.parse(maskSecrets(JSON.stringify(raw), secrets)) as typeof raw) : raw
     const key = hash(stableJson(data))
     if (rt.lastSnapshot === key) return
     rt.lastSnapshot = key
@@ -510,7 +516,15 @@ function staticText(rt: Runtime, s: RenderedSection, tier: string): string {
 async function recordHealth(io: Io, rt: Runtime, res: RenderResultExt, set: PromptSet): Promise<void> {
   try {
     const usage = await io.session.usage().catch(() => undefined)
+    // G-43 / G-44: the session's gate decision, compactions and skills listed without a description.
+    const gate = await io.read('gate')
+    const log = await io.read('log')
+    const manualOverrides = log.filter((e) => e.trigger === 'manual').length
+    const noDesc = rt.listingText ? parseSkillListing(rt.listingText).lines.filter((l) => l.type === 'skill' && !l.description.trim()).length : undefined
     const report = computeHealth(res, rt.lastRender, {
+      compactions: rt.compactions,
+      decision: { profile: gate?.profile ?? null, ...(gate?.proposed ? { confidence: gate.proposed.confidence } : {}), ...(manualOverrides ? { manualOverrides } : {}) },
+      ...(noDesc !== undefined ? { skillsNoDescription: noDesc } : {}),
       unverified: res.sections.filter((s) => s.included && s.status === 'unverified').length,
       ...(usage?.context.percent !== undefined ? { contextPct: usage.context.percent } : {}),
       ...(rt.listingText ? { skillListingChars: rt.listingText.length } : {}),
@@ -661,7 +675,7 @@ async function lazyText(io: Io, rt: Runtime, ref: string): Promise<string> {
     const set = await loadPrompts(io, rt)
     const host = await hostFor(io, rt)
     const { scope, tier } = await buildScope(io, rt, host, undefined)
-    const res = await renderPrompt(sectionsFor(rt, set, tier).system, scope, host, { ...renderOptions(rt, tier), only: id })
+    const res = await renderPrompt(sectionsFor(rt, set, tier, await preloadOf(io)).system, scope, host, { ...renderOptions(rt, tier), only: id })
     return res.sections.find((s) => s.id === id)?.text || `Секцію ${id} не знайдено`
   }
   const m = /^(skill|rule):(.+)$/.exec(ref)
@@ -800,7 +814,13 @@ export function classifyChange(rt: Runtime, path: string): DslChange {
   const dir = promptDir(rt)
   // Sources outside the prompt dir count when a compiled prompt imports them.
   const importers = (rt.prompts?.compiled ?? []).filter((cp) => (cp.sources ?? []).slice(1).some((s) => s.path === rel)).map((cp) => cp.sources[0].path)
-  if (!rel.startsWith(dir + '/')) return importers.length ? { kind: 'import', rel, entries: importers } : { kind: 'none' }
+  if (!rel.startsWith(dir + '/')) {
+    if (importers.length) return { kind: 'import', rel, entries: importers }
+    // A Markdown section of a `prompt-dir` item source: re-read on the next compose (no build).
+    const slash = rel.lastIndexOf('/')
+    if (slash > 0 && isMarkdownSectionFile(rel.slice(slash + 1)) && promptSectionDirs(rt.cfg).slice(1).includes(rel.slice(0, slash))) return { kind: 'other', rel }
+    return { kind: 'none' }
+  }
   const inner = rel.slice(dir.length + 1)
   if (inner.startsWith('.compiled/')) return { kind: 'compiled' }
   if (inner.startsWith('.trace/') || inner.startsWith('data/') || inner.startsWith('proposals/') || inner.startsWith('.types/')) return { kind: 'none' }

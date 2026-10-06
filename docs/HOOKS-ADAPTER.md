@@ -20,10 +20,19 @@ Don't run it next to the mod in the same session: both would deliver the same ru
 | file | role |
 | --- | --- |
 | `src/handle.ts` | pure: hook event + repo data + session state → hook JSON, new state, journal entries |
-| `src/node.ts` | loads `gate.json`, `.cursor/rules/**/*.mdc`, `.claude/skills/*/SKILL.md` (project, then `~/.claude/skills`), the branch from `.git/HEAD`; state and journal I/O |
+| `src/node.ts` | loads `gate.json`, the rules of every source (core `loadRuleSources`, see «Rule sources»), `.claude/skills/*/SKILL.md` (project, then `~/.claude/skills`), the branch from `.git/HEAD`; state and journal I/O |
 | `src/install.ts` | pure: hooks block, `skillOverrides` from a gate, idempotent merge into settings |
 | `src/shiftwork.ts` | pure: shiftwork contract (see `docs/SHIFTWORK.md`) |
 | `src/main.ts` | entry: hook mode (stdin), `install`, `plan` |
+
+## Rule sources
+
+`loadRules` (`src/node.ts`) uses core `loadRuleSources` (`packages/core/src/mdc.ts`), so the adapter sees the same
+rules as the mod: `.cursor/rules` and every `cursor-mdc` `dir`, nested `*/.cursor/rules` (`cursorRules.nested` or a
+source's `nested: true`), `markdown-dir` sources, and `provider` sources over `file` providers (core
+`staticProviderValue`). A `provider` source over a `cli`, `module` or `mcp` provider is skipped with `G208`: a
+settings hook has no trust store, so it never starts repo processes. When `.claude/rules/cursor/` exists (the
+`sync` output, delivered natively by Claude Code), nothing is loaded (edge case 7).
 
 ## Events
 
@@ -78,6 +87,16 @@ The model comes from the `SessionStart` input, else `CONTEXT_GATE_MODEL`, else `
 This builtin gate is active when `gates[]` has `{ "name": "read-before-write", "on": "write", "builtin": true }` and
 the model's tier is in its `tiers` (no `tiers` means every tier). An `Edit`, `NotebookEdit` or `Write` of an existing
 file that this session hasn't read is denied. Writing a new file is allowed. A denial is logged as `gate-failed`.
+Every evaluation of the gate is also a `gate-attempt` entry (`outcome: "pass" | "block"`, core
+`journal.ts gateAttemptEntry`), which `context-gate health` and `report` turn into `H011`.
+
+### Command gates
+
+Command gates (`gates[]` with `run`) are not run by this adapter: a settings hook has no trust-on-first-use (Р2) and
+must not start commands from repo config. The mod and any future runner decide with core
+`commandGateDecision({ trusted, whitelist, scriptsAllowed }, argv)`: an untrusted repo, disabled scripts, or a binary
+outside the whitelist (`commandAllowed(argv, whitelist)`, user `allowBinaries` narrowed by the repo) skips the gate
+instead of blocking.
 
 ### strictWrite
 
@@ -102,7 +121,7 @@ Reading a `.mdc` file in full counts as delivering that rule. A partial read (`o
 
 When `gate.json` has `"log": { "file": true }`, entries are appended to `.claude/gate.log.jsonl`: `decision` (on
 `SessionStart` and when the profile, tier or off flag changes), `rule-delivered` (`data.rules`), `deny`
-(`data.tool`, `data.shadow`) and `gate-failed` (read-before-write). They carry metadata only, never prompt or rule
+(`data.tool`, `data.shadow`), `gate-failed` and `gate-attempt` (read-before-write). They carry metadata only, never prompt or rule
 text. `data.adapter` is `"claude-code-hooks"`.
 
 ## install

@@ -324,3 +324,15 @@ test('main.ts: stdin hook and install --print / install + backup', () => {
     rmSync(cache, { recursive: true, force: true })
   }
 })
+
+test('read-before-write journals gate-attempt entries (core contract) → H011 counters', async () => {
+  const { gateStatsFromJournal } = await import('../packages/core/src/journal.ts')
+  const edit = ev({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/repo/src/a.ts', old_string: 'a', new_string: 'b' } })
+  const readA = ev({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: '/repo/src/a.ts' } })
+  const r = run([edit, readA, edit], ctx({ env: { CONTEXT_GATE_MODEL: 'claude-haiku-4-5' } }))
+  const attempts = r.logs.filter((l) => l.kind === 'gate-attempt')
+  assert.deepEqual(attempts.map((l) => [l.data!.gate, l.data!.outcome, l.data!.adapter, l.data!.sessionId]), [['read-before-write', 'block', 'claude-code-hooks', 's'], ['read-before-write', 'pass', 'claude-code-hooks', 's']])
+  assert.deepEqual(gateStatsFromJournal(r.logs), { 'read-before-write': { attempts: 2, blocks: 1, ms: 0, overrides: 0 } })
+  // Premium: the gate is inactive, nothing is journaled.
+  assert.equal(run([edit], ctx({ env: { CONTEXT_GATE_MODEL: 'claude-opus-4-7' } })).logs.filter((l) => l.kind === 'gate-attempt').length, 0)
+})

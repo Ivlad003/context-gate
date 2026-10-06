@@ -1,8 +1,9 @@
 // Lifecycle events through `claude plugin test` (SPEC "Тести": one test per event of the map):
 // classic.SessionStart, session.end {clear}, session.compact, classic.FileChanged, turn.step.
-import { describe, expect, test, type Engine } from 'claude-code/testing'
+import { describe, expect, type Engine } from 'claude-code/testing'
 
-import { ROOT, RULES, RUN, mountRepo } from './testkit.ts'
+import { ROOT, RULES, RUN, mountRepo, test } from './testkit.ts'
+import { gateStatsFromJournal } from '../packages/core/src/journal.ts'
 
 const CONFIG = {
   groups: { frontend: ['skill:react-*', 'tool:mcp__figma__*'], backend: ['skill:prisma', 'tool:mcp__postgres__*'] },
@@ -66,6 +67,48 @@ describe('lifecycle', () => {
     expect((await readAts($, 't3')).join()).toContain('TypeScript: strict')
     const rules = await $.command.run({ command: 'gate', args: 'rules', ...RUN })
     expect(rules.text).toContain('ts')
+  })
+
+  test('/clear resets the gate counters (H011): session.end {clear} and classic.SessionStart {clear}', SLOW, async ($, on) => {
+    const cfg = { ...CONFIG, gates: [{ name: 'read-before-write', on: 'write', builtin: true }] }
+    mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg), '.claude/prompt/main.md': '---\nid: main\n---\nhi' } })
+    on('tool.call', () => ({ result: 'ok' }) as never)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }) as never)
+    on('classic.SessionStart', () => ({}) as never)
+    on('prompt.compose', () => ({ sections: [] }))
+    const compose = { model: 'claude-sonnet-4-5', promptModel: 'claude-sonnet-4-5', surfaces: [], tools: [], outputStyle: null, traits: [] } as never
+    const edit = (id: string) => $.tool.call({ tool: 'Edit', tool_use_id: id, file_path: `${ROOT}/src/a.ts`, old_string: 'x', new_string: 'y' } as never)
+    const health = async (): Promise<string> => {
+      await $.prompt.compose(compose)
+      return (await $.command.run({ command: 'gate', args: 'health', ...RUN })).text ?? ''
+    }
+    expect((await edit('e1')).deny).toContain('read-before-write')
+    expect(await health()).toContain('Гейт read-before-write')
+    await $.session.end({ reason: 'clear', sessionId: 's', resume: false } as never)
+    expect(await health()).not.toContain('Гейт read-before-write')
+    expect((await edit('e2')).deny).toContain('read-before-write')
+    expect(await health()).toContain('1/1 заблоковано')
+    await $.classic.SessionStart({ source: 'clear' } as never)
+    expect(await health()).not.toContain('Гейт read-before-write')
+  })
+
+  test('gate attempts go to gate.log.jsonl as `gate-attempt` (core contract): CLI health reads the same counts', SLOW, async ($, on) => {
+    const cfg = { ...CONFIG, log: { file: true }, gates: [{ name: 'read-before-write', on: 'write', builtin: true }] }
+    const repo = mountRepo(on, { files: { ...FILES, '.claude/gate.json': JSON.stringify(cfg) } })
+    on('tool.call', () => ({ result: 'ok' }) as never)
+    on('turn.complete', ($, e) => ({ text: e.answer }))
+    const edit = (id: string) => $.tool.call({ tool: 'Edit', tool_use_id: id, file_path: `${ROOT}/src/a.ts`, old_string: 'x', new_string: 'y' } as never)
+    expect((await edit('e1')).deny).toContain('read-before-write')
+    await readAts($, 'r1')
+    expect((await edit('e2')).deny).toBeUndefined()
+    await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 'x', reason: 'answer' } as never)
+    const entries = (repo.files.get('.claude/gate.log.jsonl')?.text ?? '').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { kind: string; data?: { outcome?: string; sessionId?: string } })
+    const attempts = entries.filter((e) => e.kind === 'gate-attempt')
+    expect(attempts.map((e) => e.data?.outcome)).toEqual(['block', 'pass'])
+    expect(attempts[0]?.data?.sessionId).toBe('test-session')
+    expect(gateStatsFromJournal(entries, { sessionId: 'test-session' })['read-before-write']).toEqual({ attempts: 2, blocks: 1, ms: 0, overrides: 0 })
+    // The 200-entry state ring (/gate why) keeps decisions, not attempts.
+    expect((await $.command.run({ command: 'gate', args: 'why', ...RUN })).text).not.toContain('gate-attempt')
   })
 
   test('session.end with another reason keeps the dedup', SLOW, async ($, on) => {

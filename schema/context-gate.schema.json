@@ -568,6 +568,17 @@
               "fail"
             ]
           },
+          "okExitCodes": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "cli: exit codes that count as success (default [0])."
+          },
+          "parseOnError": {
+            "type": "boolean",
+            "description": "cli: another exit code with JSON on stdout still yields data (eslint -f json exits 1)."
+          },
           "schema": {},
           "exposes": {
             "type": "array",

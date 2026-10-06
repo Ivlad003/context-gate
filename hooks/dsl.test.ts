@@ -1,7 +1,7 @@
 // Layer 3 (prompt DSL): prompt.compose sections, Markdown tier variants, budget sections, prompt skills.
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect } from 'claude-code/testing'
 
-import { RUN, mountRepo } from './testkit.ts'
+import { RUN, mountRepo, test } from './testkit.ts'
 
 const compiled = (id: string, extra: Record<string, unknown>) => JSON.stringify({ version: 1, compiler: 'test', id, sourceHash: `h-${id}`, sources: [], diagnostics: [], sections: [], ...extra })
 
@@ -167,5 +167,80 @@ describe('prompt DSL: build state, builtins, function tools (WP1)', () => {
     expect(repo.tools).toContain('next_version')
     const r = await $.tool.call({ tool: 'mcp__context-gate__next_version', tool_use_id: 't1', bump: 'major' } as never)
     expect(r.result).toBe('2.0.0')
+  })
+
+  test('tiers[*].preload: core generates the `preload` section from the applied gate (Р5), after the static sections', async ($, on) => {
+    const cfg = {
+      groups: { core: ['skill:tdd', 'skill:prisma'] },
+      tiers: { premium: { groups: ['core'] }, standard: { groups: ['core'] }, quick: { groups: ['core'], preload: ['tdd'] } },
+      models: { 'claude-haiku-*': 'quick' },
+      profiles: { backend: { groups: ['core'] } },
+    }
+    mountRepo(on, { model: 'claude-haiku-4-5', files: {
+      '.claude/gate.json': JSON.stringify(cfg),
+      '.claude/skills/tdd/SKILL.md': '---\nname: tdd\ndescription: TDD\n---\nЧервоний, зелений, рефакторинг.',
+      '.claude/prompt/.compiled/main.json': compiled('main', { sections: [{ id: 'identity', scope: 'static', children: [{ t: 'text', value: 'Ти інженер.' }] }, { id: 'state', scope: 'volatile', children: [{ t: 'text', value: 'Стан.' }] }] }),
+    } })
+    on('prompt.compose', () => ({ sections: [] }))
+    on('prompt.attachment', ($, e) => ({ text: e.text }))
+    await $.prompt.attachment({ type: 'skill_listing', text: 'The following skills are available:\n- prisma: Prisma ORM\n- tdd: Test-driven development', origin: { kind: 'engine' } } as never)
+    const shadow = await $.prompt.compose(COMPOSE('claude-haiku-4-5'))
+    expect(shadow.sections.map((s) => s.id)).not.toContain('context-gate:preload')
+    await $.command.run({ command: 'gate', args: 'backend', ...RUN })
+    const r = await $.prompt.compose(COMPOSE('claude-haiku-4-5'))
+    const ids = r.sections.map((s) => s.id).filter((id) => id !== 'context-gate:plan-then-act') // builtin below premium
+    expect(ids).toEqual(['context-gate:identity', 'context-gate:preload', 'context-gate:state'])
+    const text = r.sections.find((s) => s.id === 'context-gate:preload')?.text ?? ''
+    expect(text).toContain('Skills, вбудовані для tier quick')
+    expect(text).toContain('## tdd')
+    expect(text).toContain('Червоний, зелений, рефакторинг.')
+  })
+
+  test('itemSources prompt-dir (as section): its Markdown files are sections too, re-read on FileChanged', async ($, on) => {
+    const cfg = { ...CONFIG, itemSources: [{ kind: 'prompt-dir', dir: 'docs/prompts', as: 'section' }, { kind: 'prompt-dir', dir: 'docs/other', as: 'skill' }] }
+    const repo = mountRepo(on, { files: {
+      '.claude/gate.json': JSON.stringify(cfg),
+      '.claude/prompt/a.md': '---\nid: a\n---\nСекція A.',
+      'docs/prompts/team.md': '---\nid: team\n---\nКоманда: бекенд.',
+      'docs/prompts/README.md': 'не секція',
+      'docs/other/x.md': '---\nid: x\n---\nНе секція.',
+    } })
+    on('prompt.compose', () => ({ sections: [] }))
+    on('classic.FileChanged', () => ({}) as never)
+    const r = await $.prompt.compose(COMPOSE('claude-sonnet-4-5'))
+    const ids = r.sections.map((s) => s.id)
+    expect(ids).toContain('context-gate:a')
+    expect(ids).toContain('context-gate:team')
+    expect(ids).not.toContain('context-gate:x')
+    repo.files.set('docs/prompts/team.md', { text: '---\nid: team\n---\nКоманда: фронтенд.', mtimeMs: 8000 })
+    await $.classic.FileChanged({ file_path: '/repo/docs/prompts/team.md', event: 'change' } as never)
+    const after = await $.prompt.compose(COMPOSE('claude-sonnet-4-5'))
+    expect(after.sections.find((s) => s.id === 'context-gate:team')?.text).toContain('Команда: фронтенд.')
+  })
+
+  test('G-03: whitelisted env values are masked in .trace/last.json; G-43/G-44: health lists compactions, the decision and skills without a description', async ($, on) => {
+    const cfg = { ...CONFIG, env: ['API_TOKEN'], debug: true }
+    const repo = mountRepo(on, { settingsEnv: { API_TOKEN: 'sekret-token-123', OTHER: 'x' }, files: {
+      '.claude/gate.json': JSON.stringify(cfg),
+      '.claude/prompt/env.md': '---\nid: env\n---\nТокен: {{ env.API_TOKEN }}\n@debug env.API_TOKEN',
+    } })
+    on('prompt.compose', () => ({ sections: [] }))
+    on('prompt.attachment', ($, e) => ({ text: e.text }))
+    on('session.compact', ($, e) => ({ messages: e.messages }) as never)
+    await $.prompt.attachment({ type: 'skill_listing', text: 'The following skills are available:\n- tdd: Test-driven development\n- bare', origin: { kind: 'engine' } } as never)
+    await $.command.run({ command: 'gate', args: 'frontend', ...RUN })
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'привіт', toolUses: [] }] } as never)
+    const r = await $.prompt.compose(COMPOSE('claude-sonnet-4-5'))
+    expect(r.sections.find((s) => s.id === 'context-gate:env')?.text).toContain('sekret-token-123') // the model gets the value
+    const trace = repo.files.get('.claude/prompt/.trace/last.json')?.text ?? ''
+    expect(trace).not.toBe('')
+    expect(trace).not.toContain('sekret-token-123')
+    expect(trace).toContain('***')
+    expect(repo.files.get('.claude/gate.debug.log')?.text ?? '').not.toContain('sekret-token-123')
+    const h = await $.command.run({ command: 'gate', args: 'health', ...RUN })
+    expect(h.text).toContain('Компакції за сесію')
+    expect(h.text).toContain('профіль frontend')
+    expect(h.text).toContain('ручних перевизначень 1')
+    expect(h.text).toContain('Skills без опису в листингу')
   })
 })

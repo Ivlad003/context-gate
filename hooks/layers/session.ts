@@ -12,6 +12,7 @@ import { recompute } from './skill-gate.ts'
 import { buildStale, loadPrompts, promptDir, registerScriptTools, registerSkillTools } from './dsl.ts'
 import { trustState } from './trust.ts'
 import { refreshStatus } from './ui.ts'
+import { resetGateStats } from './gates.ts'
 import { registerCommands } from './commands.ts'
 
 /** Per-conversation state; manual, gate, trust and the log survive. */
@@ -31,6 +32,8 @@ export async function resetConversation(io: Io, rt: Runtime, trigger: string): P
   rt.staticCache.clear()
   rt.lastRender = undefined
   rt.stepUsage = undefined
+  resetGateStats(rt) // H011 counts per conversation
+  rt.compactions = 0
   await journal(io, rt, { kind: 'debug', trigger })
 }
 
@@ -100,6 +103,7 @@ export async function compactAfter(io: Io, rt: Runtime): Promise<void> {
     rt.recheckReason = 'compact'
   }
   rt.staticCache.clear()
+  rt.compactions++
   await journal(io, rt, { kind: 'debug', trigger: 'compact' })
 }
 

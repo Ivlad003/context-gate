@@ -6,13 +6,12 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import type { DecisionLogEntry, Diagnostic, GateConfig, Item, MdcRule } from '../../core/src/types.ts'
 import { defaultConfig, loadConfig } from '../../core/src/config.ts'
-import { parseMdc, ruleIdFromPath } from '../../core/src/mdc.ts'
+import { loadRuleSources, type RuleSourceFs } from '../../core/src/mdc.ts'
+import { staticProviderValue } from '../../core/src/providers.ts'
 import { makeItem } from '../../core/src/items.ts'
 import { toJsonl } from '../../core/src/journal.ts'
 import { reviveState, type SessionState } from './handle.ts'
 import { GATE_LOG } from './shiftwork.ts'
-
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', 'target', 'vendor', '.venv'])
 
 function readText(p: string): string | undefined {
   try { return readFileSync(p, 'utf8') } catch { return undefined }
@@ -32,59 +31,34 @@ export function loadGateConfig(root: string): { config: GateConfig; diagnostics:
   return { config: r.config ?? defaultConfig(), diagnostics: r.diagnostics, present: text !== undefined }
 }
 
-function walkMdc(dir: string, out: string[], depth = 0): void {
-  if (depth > 6) return
-  let entries: Dirent[]
-  try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
-  for (const e of entries) {
-    const p = join(dir, e.name)
-    if (e.isDirectory()) walkMdc(p, out, depth + 1)
-    else if (e.isFile() && e.name.endsWith('.mdc')) out.push(p)
-  }
-}
-
-/** `.cursor/rules` dirs: the root one and, with `nested`, `*\/.cursor/rules` below (bounded depth). */
-function ruleDirs(root: string, nested: boolean): string[] {
-  const dirs: string[] = []
-  const top = join(root, '.cursor', 'rules')
-  if (existsSync(top)) dirs.push(top)
-  if (!nested) return dirs
-  const visit = (dir: string, depth: number) => {
-    if (depth > 4) return
-    let entries: Dirent[]
-    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
-    for (const e of entries) {
-      if (!e.isDirectory() || SKIP_DIRS.has(e.name) || (e.name.startsWith('.') && e.name !== '.cursor')) continue
-      const p = join(dir, e.name)
-      if (e.name === '.cursor') {
-        if (dir !== root && existsSync(join(p, 'rules'))) dirs.push(join(p, 'rules'))
-        continue
+/** Sync repo port for core `loadRuleSources` (repo-relative POSIX paths; links are not followed). */
+export function nodeRuleFs(root: string): RuleSourceFs {
+  return {
+    list(dir) {
+      let entries: Dirent[]
+      try { entries = readdirSync(dir ? join(root, dir) : root, { withFileTypes: true }) } catch { return [] }
+      const out: { name: string; kind: 'file' | 'dir' }[] = []
+      for (const e of entries) {
+        if (e.isFile()) out.push({ name: e.name, kind: 'file' })
+        else if (e.isDirectory()) out.push({ name: e.name, kind: 'dir' })
       }
-      visit(p, depth + 1)
-    }
+      return out
+    },
+    read: (path) => readText(join(root, path)),
   }
-  visit(root, 0)
-  return dirs
 }
 
-/** Parsed `.mdc` rules. Empty when the cursor layer is off or transpiled `.claude/rules/cursor/` exists (edge case 7). */
+/**
+ * Rules of every source, as the mod (core `loadRuleSources`): `.cursor/rules`, `cursor-mdc` dirs (and nested
+ * `*\/.cursor/rules`), `markdown-dir`, and `provider` sources over `file` providers (core `staticProviderValue`;
+ * cli/module/mcp providers need trust and are skipped with G208). Empty when the cursor layer is off or
+ * transpiled `.claude/rules/cursor/` exists (edge case 7).
+ */
 export function loadRules(root: string, config: GateConfig): { rules: MdcRule[]; diagnostics: Diagnostic[]; skipped?: string } {
   if (config.cursorRules?.enabled === false) return { rules: [], diagnostics: [], skipped: 'cursorRules.enabled: false' }
   if (existsSync(join(root, '.claude', 'rules', 'cursor'))) return { rules: [], diagnostics: [], skipped: '.claude/rules/cursor/ є: правила доставляє Claude Code нативно' }
-  const files: string[] = []
-  for (const d of ruleDirs(root, !!config.cursorRules?.nested)) walkMdc(d, files)
-  const rules: MdcRule[] = []
-  const diagnostics: Diagnostic[] = []
-  for (const f of files.sort()) {
-    const rel = toPosix(relative(root, f))
-    const text = readText(f)
-    if (text === undefined) continue
-    const { id, dirPrefix } = ruleIdFromPath(rel)
-    const r = parseMdc(text, { path: rel, id, dirPrefix })
-    rules.push(r.rule)
-    diagnostics.push(...r.diagnostics)
-  }
-  return { rules, diagnostics }
+  const fs = nodeRuleFs(root)
+  return loadRuleSources(config, fs, { providerValue: (name) => staticProviderValue(config, name, fs.read) })
 }
 
 function frontmatter(text: string): { fm: Record<string, string>; body: string } {

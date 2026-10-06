@@ -1,562 +1,117 @@
 # SPEC coverage: `context-gate` vs `docs/SPEC.md`
 
-Audit date: 2026-10-06, commit `bc3e5ec` plus the integration pass still in the working tree. The audit read the code
-and ran things:
+Final audit: 2026-10-06, commit `30f4b3c` plus the cleanup pass and the mod wiring in the working tree. The first
+audit (at `bc3e5ec`) listed 65 gaps; each was re-checked against the code (table below). Checks at this state:
 
-- `npm test`: 311/311 pass.
-- `npm run test:mod`: 42/42 pass.
-- `claude plugin validate --strict .` passes on Claude Code 2.1.291.
-- CLI runs on a temp copy of `examples/basic`: `build`, `run` (with `--trace`, `--only`, `--json`, `--dry-scripts`,
-  `--ctx-from session:latest`, `--diff`), `health`, `collect | decide | tokens`, `render`, `preview`,
-  `deliver --dry-run`, `observe`, `signals`, `budget`, `sync`, `migrate`, `init`, `report`, `bench`, `expand --dry-run`,
-  `fmt`, `example skills`, `data`, `tools`, `schema infer`, `trust`, `index`, `explain`.
+- `npm test`: 465/465 pass. `npx tsc -p tsconfig.json`: clean.
+- `npm run test:mod` (`claude plugin test`): 90/90 pass, three runs in a row. `npm run typecheck:mod`: clean.
+- `claude plugin validate --strict .` passes on Claude Code 2.1.291. `scripts/validate-calls.sh`: ok.
+- `npm run build:all`: builds `dist/cli.js` and `dist/hooks-adapter.js`.
+- Live (`claude -p`, haiku): `scripts/e2e.sh` on `examples/reference` and `examples/basic` passes every check (Always
+  rule, Auto Attached after Read, `@id` Manual rule, Markdown and compiled DSL sections, `[gate:x]` stripped, journal
+  profile). Details and the probe points in docs/PROBE.md «LIVE results».
 
 Rules applied:
 
 - The Р1–Р7 decisions override earlier sections.
 - Where `docs/PROBE.md` records a mods-API difference, the PROBE way counts as DONE.
-- **Excluded** because the concurrent integration pass owns them:
-  - diagnostic-code renumbering and the `explain` table (G1xx/G2xx/G4xx entries)
-  - moving `assemble.ts` and `parseToolHeader` into core, which also covers render-scope shape parity between the
-    mod and the CLI (`git.dirty`, `cursor.*`)
-  - glob helper unification
-  - journal snapshots / `--ctx-from session:*` replay
-  - the `run --json` shape
-  - `cursor.match`
-  - bench defaults
-
-  Those items appear below only when they are part of something larger.
-
-Effort: **S** < ½ day · **M** ½–2 days · **L** > 2 days.
 
 ## Summary
 
 | Status | Count |
 | --- | --- |
-| DONE | 197 (171 numbered + 26 grouped bullets at the end of the DONE list) |
-| PARTIAL | 42 |
-| MISSING | 23 (G-52 `pi`/`opencode` is deferred and not assigned to a package) |
+| DONE | 262 (197 from the first audit + the 65 former gaps) |
+| PARTIAL | 0 |
+| MISSING | 0 |
 | N/A (out of scope, superseded by a Р-decision or PROBE, or operational) | 14 |
 | **Total items** | **276** |
 
-The biggest themes:
-
-1. **Mod ↔ CLI parity in layer 3.** The CLI host is richer than the mod host: shims, `scripts.*`, `fs.glob`, `module`
-   providers, the whitelist key, persisted data. The spec requires byte-identical preview and `prompt.compose`.
-2. **Mod-side surfaces.** These are missing: `/gate edit`, the pipe grammar inside `/gate`, the section pane, the health
-   pane, mod-written `gate.index.json` and `.trace/last.json`, and the `prompt ⚠ build` status.
-3. **Unified-model breadth.** These exist only in the schema: `itemSources` `markdown-dir` and `provider`, `models`
-   attributes, and the classify/brief providers.
-4. **Observability.** Gaps: H011 and H012, session-context and gate-decision metrics, the debug log file, journaling of
-   Always/Auto rule deliveries, and report suggestions.
-5. **Release.** No README, `dist/` is not shipped, no live probe plugin, no e2e reference repo, and bench has 1 repo
-   instead of 5–8.
-
-## Gaps (PARTIAL / MISSING)
-
-Format: **ID · status · effort · package**. Then the spec section and quote, what exists, what is missing, and the
-files to change. Some IDs are skipped: G-07 was folded into G-04, G-37 into G-29/G-31, G-17 moved to N/A, and G-68
-was dropped as unverified.
-
-### Configuration and unified model
-
-**G-01 · PARTIAL · M · WP3**
-- Spec: "Єдина модель / Що ще стало абстрактним": «`models` приймає glob і атрибути (`contextWindow`, `costPer1k`), tier виводиться з порогів, якщо імені немає в мапі».
-- Exists: a glob → tier map (`core/config.ts tierForModel`).
-- Missing: the attribute form (`{ match, contextWindow?, costPer1k? }`) and tier inference from thresholds when no glob matches.
-- Files: `packages/core/src/config.ts`, `types.ts`, `schema/context-gate.schema.json`.
-
-**G-02 · MISSING · M · WP3**
-- Spec: "Провайдери — Сигнали профілю": «`"classify": { "provider": "builtin" | "jev" | { "kind": "cli", ... } }`»; «бриф може писати й зовнішній CLI (`kind: cli`)»; «провайдери з контрактами `classify`, `brief`, `expand`».
-- Exists: the builtin classifier (`$.model.complete` with JSON, `$.model.classify` as fallback) and the builtin brief in `hooks/layers/skill-gate.ts`. `classify.provider` is typed but never read.
-- Missing:
-  - a provider dispatch for classify and brief (`cli`: argv with stdin JSON → `{profile, confidence}` or text)
-  - running the provider under trust
-  - schema entries for `brief.provider`
-- Files: `hooks/layers/skill-gate.ts`, `packages/core/src/types.ts`, `config.ts`.
-
-**G-03 · MISSING · M · WP3** (needs a port addition by WP2)
-- Spec: "Налагодження": «Секретні змінні з `env` (білий список у `gate.json`) у debug-виводі маскуються». PROBE #9 says to read `(await $.settings.read()).env` or a fixed literal set.
-- Exists: `GateConfig.env?: string[]` (typed, in the schema). Nothing uses it.
-- Missing: `env.*` in the render scope (CLI: `process.env` filtered; mod: settings env through the port), plus a mask list for WP5's debug output.
-- Files: `packages/core/src/assemble.ts` (after the integration lands), `packages/cli/src/context.ts`, `hooks/layers/config.ts`. WP2 adds `$.settings.read` to the `port` in `hooks/register.ts`.
-
-**G-51 · MISSING · L · WP3** (post-MVP per Р7)
-- Spec: "Провайдери — Джерела правил" and "Єдина модель — Джерела": `markdown-dir` (`frontmatter: { paths: "globs" }`, `as: "rule"`), `provider` (`field`/`pick`, `as: "always"|"rule"|"datum"`, `template: "{{ item.from }} не імпортує {{ item.to }}"`), `prompt-dir`, `claude-tools {match}`.
-- Exists: only the kinds enum in the schema (`core/config.ts:53`). The CLI turns providers into bare `datum` items (`cli/context.ts:261`).
-- Missing:
-  - pure adapters in core (`collect` per source)
-  - CLI `collectItems` wiring
-  - mod delivery of markdown-dir and provider rules through layer 1, with the same dedup and statuses
-- Files: `packages/core/src/items.ts`, `mdc.ts`, `packages/cli/src/context.ts`, `hooks/layers/cursor-rules.ts`, `hooks/layers/skill-gate.ts`.
-
-### Layer 1: cursor-rules
-
-**G-04 · PARTIAL · S · WP3**
-- Spec: config `ruleSources: [{ kind: "cursor-mdc", dir: ".cursor/rules" }]` and `itemSources`.
-- Exists: the CLI honours custom dirs (`cli/context.ts findMdcFiles:55`).
-- Missing:
-  - the mod hard-codes `RULES_DIR = '.cursor/rules'` (`hooks/layers/cursor-rules.ts:17`) and ignores `dir` and per-source `nested`
-  - edge case 6: no cache drop when `$.session.root()` changes
-- Files: `hooks/layers/cursor-rules.ts`.
-
-**G-05 · PARTIAL · S · WP3**
-- Spec: scenario 5: «якщо файл був згаданий через `@`, правило йде з `prompt.submit`, і журнал це показує окремим тригером»; report «Правила, які жодного разу не доставлено».
-- Exists: the mod journals `rule-delivered` only for `@id` mentions and `/rule` (`cursor-rules.ts:146,161`). The hooks adapter journals every delivery.
-- Missing: journaling of Always deliveries (`prompt.context`) and Auto Attached deliveries (`tool.call`, `@file`), with the trigger and agent. Without it, `report` and `observe --status never` mark delivered rules as "never".
-- Files: `hooks/layers/cursor-rules.ts`.
-
-**G-06 · PARTIAL · S · WP3**
-- Spec: scenario 5: «`/gate rules` → правило є, тип Auto Attached, globs `src/api/**/*.ts`, доставлено: ні».
-- Exists: `rulesReport` lists ids by type and the delivered ids by agent.
-- Missing: one row per rule with its globs and a delivered yes/no per agent.
-- Files: `hooks/layers/cursor-rules.ts rulesReport`.
-
-### Layer 2: skill-gate
-
-**G-08 · PARTIAL · M · WP3**
-- Spec: "Сигнали 3": «`e.agentId` → субагент отримує tier своєї моделі»; MOD-ADAPTER: «A listing for a subagent (`e.agentId`) uses that agent's tier».
-- Exists: `agentTiers` is recorded on `turn.step` and used by gates (`gates.ts tierOf`).
-- Missing: the `skill_listing` rewrite for `e.agentId`, MCP deny/describe and `skill.prompt` all use the main gate. There is no per-agent `decideGate`.
-- Files: `hooks/layers/skill-gate.ts` (`listingAfter`, `mcpGate`).
-
-**G-09 · PARTIAL · M · WP5**
-- Spec: "Ескалація": «У `/gate why` видно, скільки спроб і токенів коштував кожен tier на задачі».
-- Exists: `escalation-suggested` and `gate-failed` events.
-- Missing: an aggregate of attempts and tokens per tier per task. Build it in `report`, and in `formatWhy` once the journal snapshot work lands.
-- Files: `packages/cli/src/cmd-report.ts` (later `packages/core/src/journal.ts`).
-
-**G-10 · PARTIAL · S · WP2**
-- Spec: scenario 4: «`/gate` показує, звідки кожен елемент: `manual`, `when:paths`, `tier`».
-- Exists: `/gate` prints one global trigger plus the reasons (`hooks/layers/commands.ts statusText`).
-- Missing: a per-item source, computed at display time from `gate.groups`, `manual.add` and the tier groups with `items.ts groupsOf`.
-- Files: `hooks/layers/commands.ts`.
-
-**G-35 · PARTIAL · S · WP3**
-- Spec: "Скрипти як інструменти моделі": «`kind: tool` робить його елементом `Item` і підпорядковує групам і профілям».
-- Exists: the CLI `collect` adds `# gate-tool:` items. The mod enforces only `tiers`.
-- Missing: script tools as items in the mod's `ensureItems`, and a deny for `off` in `serveOwnTool`.
-- Files: `hooks/layers/skill-gate.ts ensureItems`. WP1 adds the `off` check in `dsl.ts serveOwnTool`.
-
-### Layer 3: build through the mod
-
-**G-11 · PARTIAL · S · WP1**
-- Spec: "Життєвий цикл": «перевіряє `.compiled/*.json` проти `.prompt.tsx` за `source-hash`»; «Зміна будь-якого з них [імпортів] інвалідовує збірку (`H013`)».
-- Exists: the mod compares the mtime of top-level `*.prompt.tsx` only (`hooks/layers/dsl.ts loadPrompts`).
-- Missing: staleness on imported sources. Edits to `shared/*.prompt.tsx`, `.md` or `.json` imports are never detected in the mod. Use `compiled.sources[]` with `$.fs.stat` mtimes, or a hash.
-- Files: `hooks/layers/dsl.ts`.
-
-**G-12 · PARTIAL · S · WP1**
-- Spec: «`classic.FileChanged` для `.claude/prompt/**/*.tsx`, `gate.json`, `scripts/**` — інкрементальна збірка».
-- Exists: only a `.prompt.tsx` change starts a build (`dsl.ts dslFileChanged`).
-- Missing:
-  - a rebuild when `gate.json` changes (ctx types, `when`) or a `scripts/**` file changes
-  - path filtering for files outside the prompt dir
-- Files: `hooks/layers/dsl.ts`.
-
-**G-13 · PARTIAL · S · WP1** (wiring by WP2)
-- Spec: «`prompt.context` (після compaction, `/clear`) — те саме, що `prompt.compose`».
-- Exists: `prompt.context` only resets the rules.
-- Missing: export `dslContextBefore` (the stat check) from `dsl.ts`; WP2 calls it in the `prompt.context` hook.
-- Files: `hooks/layers/dsl.ts`, `hooks/register.ts`.
-
-**G-14 · MISSING · S · WP2** (flag set by WP1)
-- Spec: "Помилки збірки": «пише `H013`/`G*` у журнал і рядок стану (`prompt ⚠ build`)».
-- Exists: the journal entry and the toast.
-- Missing: the status-line marker. WP1 sets `rt.buildError` in `hooks/ctx.ts`; WP2 renders it in `healthLine` and the band.
-- Files: `hooks/layers/ui.ts`, `hooks/ctx.ts`.
-
-**G-15 · PARTIAL · S · WP1**
-- Spec: Р3: «`claude -p` без збірки отримує промпт лише з CI-артефакту або попередньо зібраного кешу `~/.cache/context-gate/<repo>/`».
-- Exists: the CLI falls back to the cache (`cli/context.ts loadCompiled`).
-- Missing: the mod reads only `<prompt>/.compiled/`; it should fall back to the cache dir (home via `io.env.home()`).
-- Files: `hooks/layers/dsl.ts loadPrompts`.
-
-**G-16 · PARTIAL · S · WP3**
-- Spec: Р3: «Коміт `.compiled` допускається як опція `commitCompiled: true`».
-- Exists: the field is in the schema.
-- Missing: nothing reads it. `init` always gitignores `.compiled/` (`cmd-init.ts:10`).
-- Files: `packages/cli/src/cmd-init.ts`.
-
-### Layer 3: compiler, imports, language
-
-**G-18 · PARTIAL · M · WP4**
-- Spec: "Імпорти": «`.json`, `.yaml`, `.toml` — парсяться на збірці».
-- Exists: `.json` works. `.yaml` and `.toml` fail on purpose (`build.ts:140`).
-- Missing: YAML and TOML loaders. The CLI may add dependencies, for example `yaml` and `smol-toml`.
-- Files: `packages/cli/src/build.ts`, `package.json`.
-
-**G-19 · PARTIAL · M · WP4**
-- Spec: "Спільні бібліотеки промптів": «Пакет може експортувати і skills (`as="skill"`): `context-gate build` збирає їх у `.claude/skills/` … з позначкою походження в frontmatter».
-- Exists: only local `*.prompt.tsx` entries are built.
-- Missing: declaring package skills (for example `prompt.packages: ["@acme/prompts"]`) and building their exported skill prompts with a `source:` / `generated-by` package mark.
-- Files: `packages/cli/src/build.ts` (needs a config field from WP3).
-
-**G-20 · PARTIAL · S · WP5**
-- Spec: «у `--trace` воно підписане `build-time`».
-- Exists: `TraceEntry.source` allows `'build-time'`.
-- Missing: nothing emits it. Label text/constant nodes in the trace.
-- Files: `packages/core/src/render.ts`.
-
-**G-21 · PARTIAL · S · WP4**
-- Spec: "Межі мови": G153 «Константа, яку перевизначають після `@let`», G156 «Глибина вкладення понад ліміт» (`If` ≤ 3, `Each` ≤ 2).
-- Exists: both are checked for the Markdown form only (`mddsl.ts:297,337,365`).
-- Missing: `validatePrompt` for TSX ASTs (`<Let>` redefined, `<If>`/`<Each>` nesting).
-- Files: `packages/cli/src/build.ts validatePrompt`.
-
-**G-22 · PARTIAL · S · WP4**
-- Spec: Р4: «без схеми тип `unknown`, і доступ до полів у виразах дає попередження `G170`».
-- Exists: only the LSP emits G170. `context-gate build` validates syntax only (`defaultValidateExpr`).
-- Missing: pass the LSP `checkExpr` model (or a core equivalent) into `buildPrompts` from `build-main`/`main`.
-- Files: `packages/cli/src/build.ts`, `build-main.ts`.
-
-**G-23 · PARTIAL · S · WP4**
-- Spec: Р4: «поле `schema` у провайдері — JSON Schema інлайном, шлях до `.schema.json` або до `.d.ts`».
-- Exists: inline objects only (`generateCtxTypes`). A string path becomes `unknown`.
-- Missing: resolving `schema: "path.schema.json"` and `schema: "x.d.ts"` (re-export the type) in both the generator and the LSP model.
-- Files: `packages/cli/src/build.ts generateCtxTypes`, `packages/lsp/src/model.ts`.
-
-**G-24 · MISSING · L · WP4** (post-bench, increment 3)
-- Spec: Р1 level 2: «TS-трансформер на ts-morph, який переписує вирази в позиціях `when/test/of/children` у AST-вузли … компілятор відмовляє всьому, що не входить у підмножину (`G160`)».
-- Exists: level 1 (string expressions, `V`, the `` e`…` `` tag).
-- Missing: the transformer.
-- Files: new `packages/jsx/src/transform.ts`, `packages/cli/src/build.ts`.
-
-**G-25 · PARTIAL · S · WP4**
-- Spec: Р5: «Провайдер `scripts` — цукор, який компілюється в `Use`+`Call`; … `tiers[*].preload` — у `<Skill mode="inline" />` в автоматично згенерованій секції `preload`; `store=` на `Run` — у `Store`. У AST лишаються лише канонічні вузли; старі записи приймаються … з попередженням `G180`».
-- Exists: `Lazy` → `include lazy` with G180.
-- Missing:
-  - `store=` on `Run`/`Call` stays in the AST without G180 (JSX and Markdown)
-  - `scripts.*` is resolved at runtime, not desugared
-  - preload is a hand-built text section in the mod, not `Skill inline` nodes
-- Files: `packages/jsx/src/components.ts`, `packages/core/src/mddsl.ts`.
-
-### Skills as prompts
-
-**G-26 · PARTIAL · M · WP4**
-- Spec: Р6 and "Що генерує збірка": «fallback — попередньо відрендерене тіло з дефолтними аргументами і позначкою, що воно статичне».
-- Exists: SKILL.md holds the `` !`…` `` line plus an HTML-comment hint (`build.ts renderSkillMd:252`).
-- Missing: an optional pre-rendered body with default args, marked `static`, for example `prompt.skillBody: "live" | "static" | "both"`.
-- Files: `packages/cli/src/build.ts`.
-
-**G-27 · PARTIAL · S · WP1**
-- Spec: `tiers={['standard','premium']}` on `<Prompt as="skill">`; «`path` (перевіряється існування відносно кореня)».
-- Exists: the CLI enforces `skill.tiers` (`render.ts:1072`).
-- Missing:
-  - the mod's `renderSkill` builds the section without `tier`, so skill tiers are ignored
-  - `parseArgs` runs without `pathExists`
-- Files: `hooks/layers/dsl.ts renderSkill`.
-
-**G-28 · PARTIAL · S · WP5**
-- Spec: «`/gate why` показує, скільки разів його викликали, з якими аргументами і скільки коштував рендер (`H*`)».
-- Exists: `skill-render` events, and `report` counts renders.
-- Missing: args samples and the render cost (ms, chars) in `report`.
-- Files: `packages/cli/src/cmd-report.ts`.
-
-### Script executors, function calls, data
-
-**G-29 · PARTIAL (bug) · S · WP1**
-- Spec: Р2: «Білий список бінарників — лише в user-settings (`~/.claude/context-gate.json`), репозиторій може його тільки звужувати».
-- Exists: the CLI reads `allowBinaries` and narrows it by `gate.json allowBinaries` (`cli/settings.ts:36`, `cli/context.ts:49`).
-- Missing:
-  - **the mod reads key `binaries`** (`hooks/layers/host.ts:47`), so one settings file means different things to the mod and the CLI
-  - the mod's default list differs (adds `uv` and `jq`, and `deno` is missing from the default executors)
-  - the mod ignores repo narrowing
-- Files: `hooks/layers/host.ts`.
-
-**G-30 · PARTIAL · M · WP1**
-- Spec: "Автономний інтерпретатор": «тим самим кодом ядра, що й хук `prompt.compose`, тому результат збігається байт у байт»; "Скрипти як провайдер": `{{ scripts.changed_files() }}`; `fs.glob(...)`.
-- Exists: the CLI callables are `git.log`, `fs.examples`, `fs.glob`, `fs.exists`, `cursor.match` and `scripts.*` (`cli/context.ts:344`). The mod has `fs.examples`, `git.log` and cli `functions`.
-- Missing: `scripts.*`, `fs.glob` and `fs.exists` in the mod host. Today they give G157 in Claude Code but work in the CLI. `cursor.match` is excluded (integration).
-- Files: `hooks/layers/host.ts`.
-
-**G-31 · PARTIAL · M · WP1**
-- Spec: "Виклик функцій" shim table (JS/TS, Python with `dataclass`/`Pydantic → __dict__`, bash `source file; fn`, `callTemplate`); G158 «валідатор один раз на сесію питає у shim-а список експортів».
-- Exists: full shims in the CLI (`packages/cli/src/shims.ts`, `__exports__`). The mod has inline node and python shims only.
-- Missing: the bash shim, `callTemplate`, dataclass conversion and `__exports__`/G158 in the mod. Move the shim sources (pure strings) to `packages/core/src/shims.ts` and use them from both hosts.
-- Files: `hooks/layers/host.ts`, `packages/cli/src/shims.ts` → `packages/core/src/shims.ts`, `packages/cli/src/host-node.ts` (import only).
-
-**G-32 · PARTIAL · M · WP1**
-- Spec: «`module`-провайдер — TypeScript-файл у каталозі плагіна або `.claude/prompt/lib/*.ts`».
-- Exists: the CLI runs repo `module` providers (`moduleCall`).
-- Missing: the mod skips non-builtin `module` providers (`host.ts providerData` → `continue`). Run them through the node shim when trusted.
-- Files: `hooks/layers/host.ts`.
-
-**G-33 · PARTIAL · S · WP1**
-- Spec: «`store=<ключ>` записує результат у `$.store` … і дублює у `.claude/prompt/data/<ключ>.json`, якщо `persist: true`».
-- Exists: the CLI writes both. The mod writes only `$.store` (`dsl.ts persistData`).
-- Missing: the data file when `prompt.persist` is set (`io.fs.write`).
-- Files: `hooks/layers/dsl.ts`.
-
-**G-34 · PARTIAL · S · WP5**
-- Spec: «Результат кешується за хешем файлу, імені функції і аргументів».
-- Exists: the call cache key is `call:<module path>:<fn>:<args>` (`render.ts:550,884`).
-- Missing: the file content hash. Today an edited module serves stale results until the cache expires. Add `host.fileHash?` or include it in the key.
-- Files: `packages/core/src/render.ts`, plus both hosts (one line each).
-
-**G-36 · MISSING · M · WP1** (after `toolheader.ts` lands)
-- Spec: "Функції як інструменти моделі": «`# gate-tool: next_version` … функція доступна і DSL під час рендера, і моделі».
-- Exists: `# gate-tool:` makes the whole script a tool.
-- Missing: function-level tools, a header naming an export that is served through the module shim.
-- Files: `packages/core/src/toolheader.ts`, `hooks/layers/dsl.ts`, `packages/cli/src/context.ts` (`tools`).
-
-### Includes and lazy
-
-**G-69 · PARTIAL · S · WP1**
-- Spec: «`@lazy`-інструменти і `ref`-рядки використовують його ж, тож у журналі видно, яку секцію модель запросила і скільки разів».
-- Exists: lazy tools are served (`dsl.ts serveOwnTool`).
-- Missing: a journal event (`kind: 'debug', trigger: 'lazy'`, ref, count) when the model calls `get_<name>`.
-- Files: `hooks/layers/dsl.ts`.
-
-### Debugging
-
-**G-38 · MISSING · S · WP5**
-- Spec: «Файл `.claude/gate.debug.log` пишеться лише при `debug: true` у `gate.json` або `--debug` у CLI, обрізається до 1 МБ».
-- Exists: `.gitignore` lines only.
-- Missing: the writer and the CLI `--debug` flag. The mod part goes through `io.fs.write` (WP1).
-- Files: `packages/cli/src/cmd-run.ts` (WP5); `hooks/layers/dsl.ts` (WP1).
-
-**G-39 · MISSING · S · WP5** (needs G-03)
-- Spec: «Секретні змінні з `env` … у debug-виводі маскуються».
-- Missing: masking in the `debug` trace entries.
-- Files: `packages/core/src/render.ts`.
-
-**G-40 · PARTIAL · S · WP1**
-- Spec: «У Claude Code — у pane `/gate why` з фільтром `| where kind=debug`, і в `$.ui.log` з `to: "debug"`».
-- Exists: the mod never passes `debug: cfg.debug` to `renderPrompt`, so `@debug` is never evaluated in the mod.
-- Missing: forwarding debug trace entries to `io.ui.log(…, { to: 'debug' })` and to the journal (`kind: 'debug'`).
-- Files: `hooks/layers/dsl.ts`.
-
-**G-41 · PARTIAL · S · WP5** (+ WP1 and WP3)
-- Spec: debug table: `@assert` → «`D001` і, за `assertFail`, … `skip` / `fail` — trace, журнал, `/gate health`»; `@log level=…` → trace and journal.
-- Exists: `D001` diagnostics and trace. `RenderOptions.assertFail` exists.
-- Missing:
-  - `assertFail` in `GateConfig` and the schema (WP3)
-  - the CLI passes it through (WP5, `cmd-run.ts`)
-  - the mod journals D001 and `@log` entries (WP1)
-  - D001 is listed in health (WP5, `health.ts`)
-
-### Prompt health
-
-**G-42 · MISSING · M · WP5**
-- Spec: health table: «Гейти — скільки разів спрацювали, середній час, false positives за ручними «все одно» — `H011` гейт блокує > 30 % спроб».
-- Exists: H011 is only in the code table.
-- Missing:
-  - per-gate attempts, blocks and ms counters
-  - a manual-override signal (for example `/gate off` after a deny)
-  - the metric itself
-- Files: `hooks/layers/gates.ts`, `packages/core/src/health.ts`.
-
-**G-43 · MISSING · M · WP5** (wiring by WP2)
-- Spec: health table rows «Контекст сесії — `ctx.percent`, компакції за сесію, токени кешу з `result.usage` на `turn.step`», «Рішення gate — профіль, confidence, ручні перевизначення, deny», «Вартість — `H012` промпт > 40 % вхідних токенів»; PROBE turn.step: «`usage.cache_read_input_tokens` measures prompt-cache hits (health H002)».
-- Exists: H002 is estimated from section hashes.
-- Missing:
-  - the three metrics and H012
-  - H002 from real usage
-  - WP2 captures `res.usage` after `yield* next(e)` in the `turn.step` hook
-- Files: `packages/core/src/health.ts`, `hooks/register.ts`.
-
-**G-44 · PARTIAL · S · WP5**
-- Spec: H004 «найдовші `@run` і провайдери; cache hit rate»; H009 «скільки skills без опису».
-- Exists: totals only.
-- Missing: top-N slow runs from the trace, the cache hit ratio, and the count of nameOnly / description-less skills.
-- Files: `packages/core/src/health.ts`.
-
-**G-45 · PARTIAL · S · WP2**
-- Spec: «Pane `/gate health` — повну таблицю з колонкою «що зробити»».
-- Exists: `/gate health` returns Markdown text.
-- Missing: a pane (`$.ui.open({ id: 'gate-health' })` and a `ui.render` Pane hook).
-- Files: `hooks/layers/commands.ts`, `hooks/layers/ui.ts`, `hooks/register.ts`.
-
-### User interface and editor
-
-**G-46 · MISSING · M · WP2**
-- Spec: "Клієнти": «Браузерний редактор (`/gate edit <id>` → `$.process.spawn` локального сервера …)».
-- Exists: `packages/editor-web` (standalone, `--json` prints `{url}`).
-- Missing:
-  - the `/gate edit` subcommand in `gatecmd` and the mod
-  - `$.process.spawn` in the port
-  - reading the URL line and showing it
-- Files: `hooks/layers/commands.ts`, `hooks/register.ts`, `packages/core/src/gatecmd.ts`.
-
-**G-47 · MISSING · M · WP2**
-- Spec: «Pane у Claude Code — перегляд секції, її рендер, токени, кнопки «відкрити в редакторі» і «перерендерити»».
-- Missing: a section pane (for example `/gate render prompt://<id>` opens it) with the two buttons.
-- Files: `hooks/layers/ui.ts`, `commands.ts`, `register.ts`.
-
-**G-48 · MISSING · M · WP2**
-- Spec: «Всередині Claude Code та сама граматика через `/gate`: `/gate collect kind=skill | where group=frontend | off` або `/gate why | where status=unverified`. Парсер команди один для CLI і для `/gate`».
-- Exists: `gatecmd` parses pipes, but the mod answers «Pipe-команди … виконує CLI» (`commands.ts:142`).
-- Missing: pure stage executors in core (`packages/cli/src/cmd-pipe.ts runStage` → `packages/core/src/pipeline.ts`) over the mod's items, gate and journal.
-- Files: `packages/core/src/pipeline.ts`, `packages/cli/src/cmd-pipe.ts`, `hooks/layers/commands.ts`.
-
-**G-49 · MISSING · M · WP2**
-- Spec: «Індекс `.claude/gate.index.json`. Mod перезаписує його на `session.start`, після `/gate`, при `classic.FileChanged` …»; the table rows «Інструменти — `$.tool.list()`», «Skills … листинг skills», «Змінні контексту рендера … останній `prompt.compose`».
-- Exists: the CLI `context-gate index` (config, sections, rules, symbols).
-- Missing:
-  - the mod writer
-  - the session-only fields (tools, MCP servers, listing skills, last-compose values)
-  - share the index builder with `cmd-index.ts` through core
-- Files: new `hooks/layers/index.ts`, `packages/cli/src/cmd-index.ts`, `hooks/register.ts`.
-
-**G-50 · MISSING · S · WP1**
-- Spec: EDITOR/LSP hover «значення з останнього trace» (`.trace/last.json` from «останній `run --json` / `prompt.compose`»).
-- Missing: the mod writes `.claude/prompt/.trace/last.json` (scope and trace) after `prompt.compose`, throttled.
-- Files: `hooks/layers/dsl.ts`.
-
-**G-67 · PARTIAL · M · WP4**
-- Spec: "Шар 3а — expand" and the LSP code action «згенерувати quick-варіант».
-- Exists: `expand` works on canonical Markdown sections only. `expand --only <tsx-section>` prints «Канонічних Markdown-секцій … немає», so the TSX code action does nothing.
-- Missing: TSX sections (render to Markdown, and propose `<Tier is="quick">` or `<id>.quick.md`).
-- Files: `packages/cli/src/cmd-expand.ts`.
-
-### Providers and gates
-
-**G-53 · PARTIAL · S · WP5**
-- Spec: `{ "name": "architecture", "on": "commit", "provider": "arch", "run": [...], "pass": "len(result.violations) == 0" }`.
-- Exists: `run`, `pass`, `message`, `onlyNew` and `baseline` (`hooks/layers/gates.ts`).
-- Missing: `gates[].provider` is ignored. Expose the provider's data in the `pass`/`message` scope, or allow a gate without `run` that reads the provider.
-- Files: `hooks/layers/gates.ts`.
-
-**G-54 · MISSING · S · WP1**
-- Spec: "Контракти виходу і гейти": «Для tier нижче `premium` вмикається секція `plan-then-act` (план → правка → перевірка)».
-- Missing: a builtin section, toggled off when the repo defines its own section with that id.
-- Files: `hooks/layers/dsl.ts`. The CLI parity part goes in `packages/core/src/assemble.ts` after the integration.
-
-### Report and escalation
-
-**G-55 · PARTIAL · S · WP5**
-- Spec: scenario 8: «Якщо такі deny повторюються для одного профілю, `report` пропонує додати групу в профіль»; scenario 11: «`report` порівнює рішення обох за `ticketId` у журналі».
-- Exists: deny counts and shadow agreement.
-- Missing:
-  - a "suggest `+group` for profile X" line (with `enablingGroup`)
-  - a runner (`data.adapter: shiftwork`) vs mod comparison per `data.ticket`
-- Files: `packages/cli/src/cmd-report.ts`.
-
-### Run modes and transpiler
-
-**G-56 · MISSING · S · WP4**
-- Spec: "Транспілятор": «із watch-режимом через `fs.watch` і запуском із `SessionStart` settings-hook (`reloadSkills: true`)».
-- Exists: `sync --watch`.
-- Missing: `sync --install-hook`, which writes a SessionStart hook running `context-gate sync` with `reloadSkills: true` into `settings.local.json`. Reuse the hooks-adapter `mergeSettings`.
-- Files: `packages/cli/src/cmd-sync.ts`.
-
-**G-52 · MISSING · L · deferred**
-- Spec: harness adapters `pi`, `opencode` («через shiftwork, пізніше»); Р7 increment 3.
-- Missing: everything. Not in any package below.
-
-### Tests, validation, release, plan
-
-**G-57 · PARTIAL · M · WP2**
-- Spec: "Тести": «хуки — `claude plugin test` … по тесту на кожну подію з карти».
-- Exists: 42 mod tests.
-- Missing: tests for these events:
-  - `classic.SessionStart` (watchPaths, `source: clear` reset, `compact` recheck)
-  - `session.end {clear}`
-  - `session.compact` (instructions keep the profile and rules)
-  - `classic.FileChanged` (`.mdc`, `gate.json`)
-  - `turn.step` (model change → tier quick → recompute; subagent tier)
-- Files: new `hooks/lifecycle.test.ts`.
-
-**G-58 · MISSING · M · WP5**
-- Spec: «наскрізна перевірка — `claude --plugin-dir ./context-gate` на еталонному репозиторії з `.cursor/rules`, 20+ skills і 3 MCP, де `context-report`-подібний хук на `prompt.context` підтверджує, що правила справді дійшли».
-- Missing: the reference repo fixture and a script (`scripts/e2e.sh`) running `claude -p` with a probe hook.
-- Files: new `examples/reference/`, `scripts/e2e.sh`.
-
-**G-59 · PARTIAL · S · WP5**
-- Spec: "Валідація перед релізом": the expected call list.
-- Exists: validate passes. The actual list adds these, all PROBE-sanctioned: `$.clock.after`, `$.env.get`, `$.fs.write`, `$.mcp.call`, `$.model.complete`, `$.session.append`, `$.session.compact`, `$.store.delete`, `$.tool.list`.
-- Missing:
-  - a committed expected list
-  - a CI diff against the `validate` output, so regressions are caught
-  - the spec list itself needs updating
-- Files: `.github/workflows/ci.yml`, new `scripts/validate-calls.sh`, `docs/SPEC.md`.
-
-**G-60 · MISSING · S · WP5**
-- Spec: plan stage 8: «README з таблицею `hooks:`/`calls:`».
-- Missing: there is no `README.md` at all.
-- Files: new `README.md`.
-
-**G-61 · PARTIAL · M · WP5**
-- Spec: «CLI збірки лежить у самому плагіні (`$.plugin.root()` + `dist/cli.js`)»; SKILL.md runs `node "${CLAUDE_PLUGIN_ROOT}/dist/cli.js"`.
-- Exists: `dist/` is gitignored and the marketplace `source: "./"`.
-- Missing: a release path that ships the built `dist/cli.js` and `dist/hooks-adapter.js` (a release branch or tag with the build, or a `postinstall`). Today an installed plugin can't build prompts or render SKILL.md.
-- Files: `package.json`, `.github/workflows/`, `.claude-plugin/marketplace.json`.
-
-**G-62 · MISSING · M · WP5**
-- Spec: Р6 stage 0: «окремий плагін-spike `context-gate-probe` з одним хуком на кожну точку, який пише результат у `probe.json` … кожна функція, що залежить від точки, отримує `requires: [probe:<name>]`»; checklist "Що перевірити в `.d.ts`".
-- Exists: PROBE.md resolves the static items. 8 LIVE items remain open (skill_listing fixture, deferred `tool.describe`, `` !`…` `` timing, `$.state` after `/clear`, watchPaths dirs, subagent `prompt.context`, classify cost, compose under `-p`).
-- Missing: the probe plugin, `probe.json` → PROBE.md, and `requires:` flags.
-- Files: new `probe/` (its own `.claude-plugin`), `docs/PROBE.md`.
-
-**G-63 · MISSING · S · WP5**
-- Spec: Р7: «наступна правка документа — консолідація: шар 3 як один розділ … Priompt і POML — у таблицю «Хто вже зробив»».
-- Files: `docs/SPEC.md`.
-
-**G-64 · PARTIAL · M · WP5**
-- Spec: «`bench/` на 5–8 репозиторіях».
-- Exists: `bench/run.ts` and `context-gate bench`. `repos.json` has 1 repo. Bench defaults are excluded.
-- Missing: 4–7 more reference repos (fixtures or pinned clones).
-- Files: `bench/repos.json`, `examples/*`.
-
-**G-65 · MISSING · M · WP5**
-- Spec: stage 7a: «провайдери … `ruleSources` і декларативні `gates[]` — з keylang, tsc і eslint як першими адаптерами в `examples/`».
-- Missing: example `gate.json` setups (and fixtures) for tsc (`typecheck` gate with `onlyNew`), eslint (a `cli` provider with `schema`) and keylang (an `arch` provider plus provider rule sources once G-51 lands).
-- Files: new `examples/adapters/`.
-
-**G-66 · PARTIAL · S · WP5**
-- Spec: "Продуктивність": «Ціль: без `@run` жоден хук не перевищує 5 мс».
-- Exists: caches in closures.
-- Missing: any measurement. Add a timing test over the testkit (or a bench mode) for `tool.call`, `prompt.compose` and `prompt.attachment`.
-- Files: `test/` or `bench/`.
-
-## Work packages (parallel, disjoint file ownership)
-
-All packages start **after the integration pass lands**. It currently touches `render.ts`, `codes.ts`, `assemble.ts`,
-`journal.ts`, `cursor-rules.ts`, `mddsl.ts`, `context.ts`, `cmd-run.ts`, `main.ts`, `examples.ts`, `decide.ts`,
-`mdc.ts`, `types.ts` and `toolheader.ts`. Rebase on it first.
-
-Shared files have a single owner:
-
-- `types.ts`, `config.ts` and the schema: WP3
-- `hooks/register.ts` (the `port`, hook wiring): WP2
-- `hooks/ctx.ts` (`Runtime`): WP1
-- `render.ts`: WP5
-
-Others request changes from the owner through the "needs" line.
-
-### WP1: Mod prompt runtime parity (layer 3 in Claude Code)
-
-- **Owns:** `hooks/layers/dsl.ts`, `hooks/layers/host.ts`, `hooks/ctx.ts`, new `packages/core/src/shims.ts` (moved from `packages/cli/src/shims.ts`; `packages/cli/src/host-node.ts` gets the import change only), `hooks/dsl.test.ts`.
-- **Gaps:** G-11, G-12, G-13 (dsl side), G-15, G-27, G-29, G-30, G-31, G-32, G-33, G-36, G-40, G-41 (mod journal), G-50, G-54, G-69. It also sets `rt.buildError` for G-14 and the `off` check for G-35.
-- **Needs:** WP2 to wire `dslContextBefore` into `prompt.context` (one line). WP3 for the `assertFail` and `env` config fields.
-- **Effort:** about 4–5 days.
-
-### WP2: Mod UI, commands, index, lifecycle tests
-
-- **Owns:** `hooks/register.ts`, `hooks/layers/commands.ts`, `hooks/layers/ui.ts`, `hooks/layers/session.ts`, new `hooks/layers/index.ts`, `packages/core/src/gatecmd.ts`, `packages/core/src/pipeline.ts`, `packages/cli/src/cmd-pipe.ts`, `packages/cli/src/cmd-index.ts`, `types/index.d.ts` (new state keys), new `hooks/lifecycle.test.ts`, `hooks/register.test.ts`, `test/cli-pipe.test.ts`.
-- **Gaps:** G-10, G-14, G-45, G-46, G-47, G-48, G-49, G-57.
-- **Plumbing for others:** `$.settings.read` and `$.process.spawn` in the port (G-03, G-46), `turn.step` usage capture (G-43), `dslContextBefore` wiring (G-13).
-- **Effort:** about 4–5 days.
-
-### WP3: Config, item sources, rules, gate decisions
-
-- **Owns:** `packages/core/src/types.ts`, `config.ts`, `decide.ts`, `items.ts`, `mdc.ts`, `schema/context-gate.schema.json`, `hooks/layers/skill-gate.ts`, `hooks/layers/cursor-rules.ts`, `hooks/layers/config.ts`, `packages/cli/src/context.ts` (`collectItems` / source adapters only), `packages/cli/src/cmd-init.ts`, `hooks/gate.test.ts`, `hooks/rules.test.ts`, `test/config.test.ts`, `test/items.test.ts`, `test/decide.test.ts`.
-- **Gaps:** G-01, G-02, G-03, G-04, G-05, G-06, G-08, G-16, G-35, G-51.
-- **Lands first (small):** the config fields other packages need: `assertFail`, `debugLog`, `prompt.packages` (G-19), `models` attributes, `classify.provider`, `brief.provider`.
-- **Effort:** about 5–6 days (G-51 alone is about 2–3).
-
-### WP4: Compiler, build and authoring tooling
-
-- **Owns:** `packages/cli/src/build.ts`, `build-main.ts`, `packages/jsx/src/**`, `packages/core/src/mddsl.ts`, `packages/cli/src/cmd-expand.ts`, `packages/cli/src/cmd-sync.ts`, `packages/lsp/src/model.ts`, `test/build.test.ts`, `test/jsx.test.ts`, `test/mddsl.test.ts`, `test/cli-sync.test.ts`.
-- **Gaps:** G-18, G-19, G-21, G-22, G-23, G-25, G-26, G-56, G-67. G-24 (the level 2 transformer, L) is optional and post-bench.
-- **Effort:** about 4 days, plus about 5 for G-24.
-
-### WP5: Render core, observability, release
-
-- **Owns:** `packages/core/src/render.ts`, `packages/core/src/health.ts`, `packages/cli/src/cmd-run.ts`, `packages/cli/src/cmd-report.ts`, `hooks/layers/gates.ts`, `bench/**`, new `examples/adapters/` and `examples/reference/`, new `probe/`, new `README.md`, `docs/SPEC.md`, `docs/PROBE.md`, `.github/workflows/ci.yml`, `package.json` (scripts/release), new `scripts/e2e.sh` and `scripts/validate-calls.sh`, `test/render.test.ts`, `test/health.test.ts`.
-- **Gaps:** G-09, G-20, G-28, G-34, G-38, G-39, G-41 (render/CLI/health), G-42, G-43 (core), G-44, G-53, G-55, G-58, G-59, G-60, G-61, G-62, G-63, G-64, G-65, G-66.
-- **Effort:** about 6–8 days. It can split into WP5a (code: render, health, report, gates, debug) and WP5b (release, docs, probe, e2e, examples, bench); those two share no files.
+What is still open is operational, not code:
+
+- **Interactive-only probe points** (G-62): whether `` !`…` `` has run before `skill.prompt`, `$.state` after
+  `/clear` (the mod resets explicitly either way), `$.model.complete` latency/cost, `prompt.context` in subagents, and
+  whether the model sees the rewritten skill listing. The mod lists the features resting on them under «Не перевірено
+  наживо» in `/gate health` and `/gate why` (`hooks/layers/probe.ts`); flip `PROBE_POINTS` after a probe session.
+- Markdown `file` providers: the CLI parses them into `{ meta, body, headings }`, the mod keeps the text.
+
+## Re-audit of the former gaps (final)
+
+Every item that was PARTIAL or MISSING at `bc3e5ec` was re-checked against the working tree after the WP1–WP6 commit
+(`30f4b3c`), the cleanup pass (core `providers.ts`, `canonical.ts`, preload, `promptSectionDirs`, `commandGateDecision`,
+the `gate-attempt` journal contract) and the mod wiring. "Was" is the old status; "Where" points at the implementation.
+
+| ID | Area | Was | Now | Where |
+| --- | --- | --- | --- | --- |
+| G-01 | Configuration and unified model | PARTIAL | DONE | `packages/core/src/config.ts`, `types.ts`, `schema/context-gate.schema.json`. |
+| G-02 | Configuration and unified model | MISSING | DONE | `hooks/layers/skill-gate.ts`, `packages/core/src/types.ts`, `config.ts`. |
+| G-03 | Configuration and unified model | MISSING | DONE | env whitelist via `$.settings.read` (`hooks/layers/config.ts ensureEnv`); `envMask` masks the render trace (`renderOptions.secrets`), `$.ui.log` debug lines, `.claude/gate.debug.log`, `.trace/last.json` and journal snapshots (`hooks/layers/dsl.ts`); test `hooks/dsl.test.ts` «G-03 …» |
+| G-51 | Configuration and unified model | MISSING | DONE | `packages/core/src/items.ts`, `mdc.ts`, `packages/cli/src/context.ts`, `hooks/layers/cursor-rules.ts`, `hooks/layers/skill-gate.ts`. |
+| G-04 | Layer 1: cursor-rules | PARTIAL | DONE | custom `cursor-mdc` dirs and `nested`; edge case 6: `cursor-rules.ts checkRoot` drops the rule/config/prompt caches when `$.session.root()` moves; test `hooks/rules.test.ts` «a moved session root …» |
+| G-05 | Layer 1: cursor-rules | PARTIAL | DONE | `hooks/layers/cursor-rules.ts`. |
+| G-06 | Layer 1: cursor-rules | PARTIAL | DONE | `hooks/layers/cursor-rules.ts rulesReport`. |
+| G-08 | Layer 2: skill-gate | PARTIAL | DONE | `hooks/layers/skill-gate.ts` (`listingAfter`, `mcpGate`). |
+| G-09 | Layer 2: skill-gate | PARTIAL | DONE | `packages/cli/src/cmd-report.ts`, core `report.ts tierCosts`. |
+| G-10 | Layer 2: skill-gate | PARTIAL | DONE | `hooks/layers/commands.ts`. |
+| G-35 | Layer 2: skill-gate | PARTIAL | DONE | `hooks/layers/skill-gate.ts ensureItems`. `dsl.ts serveOwnTool` denies `off`. |
+| G-11 | Layer 3: build through the mod | PARTIAL | DONE | compose-time build (2 s) and H013 in `hooks/layers/dsl.ts` |
+| G-12 | Layer 3: build through the mod | PARTIAL | DONE | `hooks/layers/dsl.ts`. |
+| G-13 | Layer 3: build through the mod | PARTIAL | DONE | `hooks/layers/dsl.ts`, `hooks/register.ts`. |
+| G-14 | Layer 3: build through the mod | MISSING | DONE | `hooks/layers/ui.ts`, `hooks/ctx.ts`. |
+| G-15 | Layer 3: build through the mod | PARTIAL | DONE | `hooks/layers/dsl.ts loadPrompts`. |
+| G-16 | Layer 3: build through the mod | PARTIAL | DONE | `packages/cli/src/cmd-init.ts`. |
+| G-18 | Layer 3: compiler, imports, language | PARTIAL | DONE | `packages/cli/src/build.ts`, `package.json`. |
+| G-19 | Layer 3: compiler, imports, language | PARTIAL | DONE | `packages/cli/src/build.ts`. |
+| G-20 | Layer 3: compiler, imports, language | PARTIAL | DONE | `packages/core/src/render.ts`. |
+| G-21 | Layer 3: compiler, imports, language | PARTIAL | DONE | `packages/cli/src/build.ts validatePrompt`. |
+| G-22 | Layer 3: compiler, imports, language | PARTIAL | DONE | `packages/cli/src/build.ts`, `build-main.ts`. |
+| G-23 | Layer 3: compiler, imports, language | PARTIAL | DONE | `packages/cli/src/build.ts generateCtxTypes`, `packages/lsp/src/model.ts`. |
+| G-24 | Layer 3: compiler, imports, language | MISSING | DONE | new `packages/jsx/src/transform.ts`, `packages/cli/src/build.ts`. |
+| G-25 | Layer 3: compiler, imports, language | PARTIAL | DONE | `packages/jsx/src/components.ts`, `packages/core/src/mddsl.ts`. |
+| G-26 | Skills as prompts | PARTIAL | DONE | `packages/cli/src/build.ts`. |
+| G-27 | Skills as prompts | PARTIAL | DONE | `hooks/layers/dsl.ts renderSkill`. |
+| G-28 | Skills as prompts | PARTIAL | DONE | `packages/cli/src/cmd-report.ts`. |
+| G-29 | Script executors, function calls, data | PARTIAL (bug) | DONE | `hooks/layers/host.ts`. |
+| G-30 | Script executors, function calls, data | PARTIAL | DONE | `hooks/layers/host.ts`. |
+| G-31 | Script executors, function calls, data | PARTIAL | DONE | `hooks/layers/host.ts`, `packages/cli/src/shims.ts` → `packages/core/src/shims.ts`, `packages/cli/src/host-node.ts` (import only). |
+| G-32 | Script executors, function calls, data | PARTIAL | DONE | `hooks/layers/host.ts`. |
+| G-33 | Script executors, function calls, data | PARTIAL | DONE | `hooks/layers/dsl.ts`. |
+| G-34 | Script executors, function calls, data | PARTIAL | DONE | `packages/core/src/render.ts`, plus both hosts (one line each). |
+| G-36 | Script executors, function calls, data | MISSING | DONE | `packages/core/src/toolheader.ts`, `hooks/layers/dsl.ts`, `packages/cli/src/context.ts` (`tools`). |
+| G-69 | Includes and lazy | PARTIAL | DONE | `hooks/layers/dsl.ts`. |
+| G-38 | Debugging | MISSING | DONE | `packages/cli/src/cmd-run.ts`; `hooks/layers/dsl.ts`. |
+| G-39 | Debugging | MISSING | DONE | `packages/core/src/render.ts`. |
+| G-40 | Debugging | PARTIAL | DONE | `hooks/layers/dsl.ts`. |
+| G-41 | Debugging | PARTIAL | DONE |  |
+| G-42 | Prompt health | MISSING | DONE | `hooks/layers/gates.ts`, `packages/core/src/health.ts`. |
+| G-43 | Prompt health | MISSING | DONE | mod `dsl.ts recordHealth` passes `compactions` (`rt.compactions`, reset on `/clear`) and `decision` (profile, classifier confidence, manual overrides); CLI `cmd-run.ts healthCommand` reads both from the journal since the last `clear` |
+| G-44 | Prompt health | PARTIAL | DONE | `skillsNoDescription` from the captured skill listing (`parseSkillListing`) in `dsl.ts recordHealth` |
+| G-45 | Prompt health | PARTIAL | DONE | `/gate` «звідки» lines (core `pipeline.ts itemProvenance`) |
+| G-46 | User interface and editor | MISSING | DONE | `hooks/layers/commands.ts`, `hooks/register.ts`, `packages/core/src/gatecmd.ts`. |
+| G-47 | User interface and editor | MISSING | DONE | `hooks/layers/ui.ts`, `commands.ts`, `register.ts`. |
+| G-48 | User interface and editor | MISSING | DONE | `packages/core/src/pipeline.ts`, `packages/cli/src/cmd-pipe.ts`, `hooks/layers/commands.ts`. |
+| G-49 | User interface and editor | MISSING | DONE | new `hooks/layers/index.ts`, `packages/cli/src/cmd-index.ts`, `hooks/register.ts`. |
+| G-50 | User interface and editor | MISSING | DONE | `hooks/layers/dsl.ts`. |
+| G-67 | User interface and editor | PARTIAL | DONE | `packages/cli/src/cmd-expand.ts`. |
+| G-53 | Providers and gates | PARTIAL | DONE | `hooks/layers/gates.ts`. |
+| G-54 | Providers and gates | MISSING | DONE | `hooks/layers/dsl.ts`. The CLI parity part goes in `packages/core/src/assemble.ts` after the integration. |
+| G-55 | Report and escalation | PARTIAL | DONE | `packages/cli/src/cmd-report.ts`. |
+| G-56 | Run modes and transpiler | MISSING | DONE | `packages/cli/src/cmd-sync.ts`. |
+| G-52 | Run modes and transpiler | MISSING | DONE | `packages/adapters/pi`, `packages/adapters/opencode` |
+| G-57 | Tests, validation, release, plan | PARTIAL | DONE | new `hooks/lifecycle.test.ts`. |
+| G-58 | Tests, validation, release, plan | MISSING | DONE | new `examples/reference/`, `scripts/e2e.sh`. |
+| G-59 | Tests, validation, release, plan | PARTIAL | DONE | the call list in SPEC.md stays as written (the user's spec); the allow-list is `scripts/expected-calls.txt`, checked by `scripts/validate-calls.sh`; CI skips the live part without the `claude` CLI |
+| G-60 | Tests, validation, release, plan | MISSING | DONE | new `README.md`. |
+| G-61 | Tests, validation, release, plan | PARTIAL | DONE | `scripts/e2e.sh` (live, 2026-10-06: Always, Auto after Read, @mention Manual, Markdown + compiled DSL sections, `[gate:x]` stripped, journal profile — all pass on `examples/reference` and `examples/basic`) |
+| G-62 | Tests, validation, release, plan | MISSING | DONE | `hooks/layers/probe.ts` `PROBE_POINTS` / `PROBE_REQUIREMENTS` (`requires: [probe:<point>]`), listed under «Не перевірено наживо» in `/gate health` and `/gate why` (test `hooks/probe.test.ts`); LIVE results in docs/PROBE.md. Still interactive-only: skill.prompt `` !`…` ``, `$.state` after `/clear`, `$.model.complete` cost, subagent `prompt.context`, the listing rewrite seen by the model |
+| G-63 | Tests, validation, release, plan | MISSING | DONE | Priompt/POML rows in the SPEC.md comparison table; Р7 note points to docs/ARCHITECTURE.md for the layer-3 order |
+| G-64 | Tests, validation, release, plan | PARTIAL | DONE | `bench/repos.json`, `examples/*`. |
+| G-65 | Tests, validation, release, plan | MISSING | DONE | `test/provider-examples.test.ts` (keylang provider trusted/untrusted, tsc gate + baseline, example gate.json validate); mod `onlyNew` in `hooks/gate.test.ts` |
+| G-66 | Tests, validation, release, plan | PARTIAL | DONE | `test/` or `bench/`. |
+
+## Work packages
+
+The WP1–WP6 plan that used to be here is done (commit `30f4b3c` and the cleanup pass); see git history for the
+package split.
 
 ## DONE (compact)
 
@@ -806,7 +361,7 @@ All are DONE, counted in the totals above:
 
 All are DONE:
 
-- Table-driven unit tests: 311 pass. Mod tests via `claude plugin test`: 42 pass.
+- Table-driven unit tests: 465 pass. Mod tests via `claude plugin test`: 90 pass.
 - `claude plugin validate --strict` passes. The name `context-gate` isn't reserved. The marketplace manifest exists.
 - No `$.http`. `.mdc` and DSL text stay data. The classifier gets only the prompt text and paths. The journal holds metadata only.
 - Rules and DSL parse once and cache in the module closure. `tool.call` matches globs over the cache. The classifier runs at most once per task. `@run` caches for 5 min by default with a 2 s total budget.
@@ -835,8 +390,8 @@ All are DONE:
 - Stage 6a: tier-adaptive prompts.
 - Stage 7: the shiftwork contract.
 - Stage 7a: index, LSP, VS Code, browser editor, and the four provider kinds.
-- Stage 8: marketplace and validate. The README is missing (G-60).
-- Checklist "Що перевірити": items 1, 2, 5 and 6 resolved via the d.ts. 3, 4, 7 and 8 are LIVE (G-62).
+- Stage 8: marketplace, validate and the README (G-60).
+- Checklist "Що перевірити": items 1, 2, 5 and 6 resolved via the d.ts; 2, 5 and 8 confirmed live, 3, 4, 6 (subagents) and 7 are interactive-only (G-62, docs/PROBE.md).
 
 ## N/A
 

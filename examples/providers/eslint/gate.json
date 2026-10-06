@@ -3,7 +3,9 @@
   "providers": {
     "eslint": {
       "kind": "cli",
-      "command": ["sh", "-c", "eslint -f json . || [ $? -eq 1 ]"],
+      "command": ["eslint", "-f", "json", "."],
+      "okExitCodes": [0, 1],
+      "parseOnError": true,
       "cache": "10m",
       "onError": "unverified",
       "schema": {

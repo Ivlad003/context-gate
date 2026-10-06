@@ -102,9 +102,9 @@ JSON Schema: [`schema/context-gate.schema.json`](schema/context-gate.schema.json
 | `budgets`, `onExceed` | `softContextPct` / `hardContextPct` per tier; actions `section`, `notice`, `compact` |
 | `escalation` | `order` of tiers and `after: { verifyFailed, stallTurns }` → `escalation-suggested` in the journal |
 | `brief` | a task brief written once per task by a strong model for weaker tiers |
-| `providers` | named data sources for the DSL: `cli` (JSON stdout), `file`, `mcp`, `module`; `schema`, `cache`, `onError`, `functions` |
+| `providers` | named data sources for the DSL: `cli` (JSON stdout), `file`, `mcp`, `module`; `schema`, `cache`, `onError`, `functions`; `cli`: `okExitCodes`, `parseOnError` (`eslint -f json` exits 1) |
 | `executors` | how `Run`/`Call` start a language (`python3`, `node`, `bash`, `deno`, …) |
-| `itemSources` | item sources: `cursor-mdc`, `markdown-dir`, `provider` (`field`, `as`, `template`), `claude-skills`, `claude-tools` |
+| `itemSources` | item sources: `cursor-mdc`, `markdown-dir`, `provider` (`field`, `as`, `template`), `prompt-dir` (extra section dir, `as: "section"`), `claude-skills`, `claude-tools` |
 | `gates` | deterministic checks: `on: write \| commit \| turn \| prompt`, `run` or `provider`, `pass` expression, `message` template, `onlyNew` + `baseline`, `tiers`; builtin `read-before-write` |
 | `cursorRules` | `enabled`, `nested` (rules in sub-package `.cursor/rules`), `maxCharsPerInjection`, `strictWrite` |
 | `prompt` | `dir`, `runCacheDefault`, `build: auto \| never`, `commitCompiled`, `persist` |
@@ -119,7 +119,8 @@ Provider and gate adapters for keylang, `tsc` and eslint: [`examples/providers/`
 ## CLI reference
 
 `context-gate <command> [flags]`; `context-gate <command> --help` for each one. Global flags: `--root <dir>`,
-`--trust-repo`. Exit codes: 0 ok, 1 failure, 2 bad arguments.
+`--trust-repo`, `--no-user-skills` (ignore `~/.claude/skills`, also `CONTEXT_GATE_NO_USER_SKILLS=1`; `bench` does
+this by default). Exit codes: 0 ok, 1 failure, 2 bad arguments.
 
 | Command | What it does |
 | --- | --- |
@@ -140,7 +141,7 @@ Provider and gate adapters for keylang, `tsc` and eslint: [`examples/providers/`
 | `trust` | trust for the repository (Р2): processes, cli/module providers, `@run`/`@call` |
 | `data` | the script data store `data.*` |
 | `schema infer <provider>` | draft a provider JSON Schema from a real run |
-| `tools` | model tools from `.claude/prompt/scripts` (`# gate-tool:` headers) |
+| `tools` | model tools: `# gate-tool:` headers of `.claude/prompt/scripts` and over exports of `lib/*`, `module` providers and `use` paths; `--call <name> --input '{…}'` runs one like the mod |
 | **Pipeline (JSONL)** | |
 | `pipe "<stages>"` | the whole pipeline in one line, the `/gate` grammar: `collect \| decide --profile x \| tokens` |
 | `collect`, `normalize`, `signals`, `decide`, `budget`, `deliver --dry-run`, `observe` | pipeline stages |

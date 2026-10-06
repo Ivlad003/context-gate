@@ -2,7 +2,7 @@
 // render the same prompts with the same scope: Markdown tier variants, the skill split, the render scope
 // (`gate`, `git`, `cursor`, `session`, `ctx`, `budgets`, `args`, `data`, providers) and the usage text.
 
-import type { CompiledPrompt, Diagnostic, Gate, GateConfig, MdcRule, SectionNode, Tier, Value } from './types.ts'
+import type { CompiledPrompt, Diagnostic, Gate, GateConfig, MdcRule, Node, SectionNode, Tier, Value } from './types.ts'
 import { parseMarkdownPrompt, resolveTierVariant, tierVariantOf } from './mddsl.ts'
 import { budgetFor } from './config.ts'
 import { autoRulesFor, type RuleMatchOptions } from './mdc.ts'
@@ -14,6 +14,8 @@ export interface MarkdownFile { path: string; text: string }
 export interface AssembleOptions {
   /** Builtin sections (`plan-then-act` below premium, see `planThenAct`); on unless `false`. */
   builtins?: boolean
+  /** `gate.skills.preload` (from `tiers[*].preload`): compiled into the generated `preload` section (Р5, `preloadPrompt`). */
+  preload?: readonly string[]
 }
 
 export interface PromptSet {
@@ -22,6 +24,32 @@ export interface PromptSet {
   /** Compiled skill prompts by skill name. */
   skills: Record<string, CompiledPrompt>
   diagnostics: Diagnostic[]
+}
+
+/** Default `prompt.dir`. */
+export const DEFAULT_PROMPT_DIR = '.claude/prompt'
+
+/**
+ * Directories whose Markdown files are prompt sections: `prompt.dir` first, then every `itemSources` entry
+ * `{ kind: "prompt-dir", dir, as: "section" }` (`as` may be omitted; any other `as` is not a section source).
+ * Repo-relative, without `./` or a trailing `/`, deduplicated. Callers (CLI `loadMarkdown`, the mod's
+ * `loadPrompts`) list `*.md` of each dir non-recursively (see `isMarkdownSectionFile`) and pass them to
+ * `assemblePrompts`. TSX entry points are built from `prompt.dir` only.
+ */
+export function promptSectionDirs(cfg: Pick<GateConfig, 'prompt' | 'itemSources' | 'ruleSources'>): string[] {
+  const norm = (d: string) => d.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+  const out = [norm(cfg.prompt?.dir ?? DEFAULT_PROMPT_DIR)]
+  for (const s of [...(cfg.itemSources ?? []), ...(cfg.ruleSources ?? [])]) {
+    if (s.kind !== 'prompt-dir' || !s.dir || (s.as !== undefined && s.as !== 'section')) continue
+    const d = norm(s.dir)
+    if (d && !d.split('/').includes('..') && !d.startsWith('/') && !out.includes(d)) out.push(d)
+  }
+  return out
+}
+
+/** A Markdown prompt section file name (`*.md`, not `README.md`). */
+export function isMarkdownSectionFile(name: string): boolean {
+  return name.endsWith('.md') && !/^readme\.md$/i.test(name)
 }
 
 function wrapSection(section: SectionNode, uses: Record<string, string>, path: string): CompiledPrompt {
@@ -68,7 +96,30 @@ export function assemblePrompts(compiled: readonly CompiledPrompt[], markdown: r
   }
   const builtin = opts.builtins !== false ? planThenAct(system, tier) : undefined
   if (builtin) system.push(builtin)
+  const preload = opts.preload?.length ? preloadPrompt(system, opts.preload, tier) : undefined
+  if (preload) system.unshift(preload)
   return { system, skills, diagnostics }
+}
+
+// ───────────────────────── preload (Р5) ─────────────────────────
+
+export const PRELOAD_ID = 'preload'
+
+/**
+ * Р5: `tiers[*].preload` compiles into an auto-generated `preload` section of canonical nodes — a heading line
+ * and `{ t: 'include', source: 'skill', mode: 'inline' }` per skill — so the CLI and the mod render it the same
+ * way (bodies through `RenderHost.itemBody`). `scope: profile` (SPEC «Preload для слабких tiers»): it changes with
+ * the tier, so it renders after the static sections. A repo section with id `preload` replaces it. It comes first
+ * in the returned prompts (the first profile-scope section), even when the repo has no prompts of its own.
+ */
+export function preloadPrompt(system: readonly CompiledPrompt[], skills: readonly string[], tier: Tier): CompiledPrompt | undefined {
+  const names = [...new Set(skills)].filter(Boolean)
+  if (!names.length) return undefined
+  if (system.some((cp) => cp.id === PRELOAD_ID || cp.sections.some((s) => s.id === PRELOAD_ID))) return undefined
+  const children: Node[] = [{ t: 'text', value: `Skills, вбудовані для tier ${tier} (не викликай їх окремо):\n\n` }]
+  for (const name of names) children.push({ t: 'text', value: `## ${name}\n\n` }, { t: 'include', source: 'skill', ref: name, mode: 'inline' })
+  const section: SectionNode = { id: PRELOAD_ID, scope: 'profile', children, source: { path: 'builtin:preload' } }
+  return { version: 1, compiler: 'builtin', id: PRELOAD_ID, sourceHash: '', sources: [], sections: [section], diagnostics: [] }
 }
 
 // ───────────────────────── builtin sections ─────────────────────────

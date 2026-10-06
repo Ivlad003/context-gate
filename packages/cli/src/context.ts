@@ -16,13 +16,15 @@ import { makeItem, normalizeItems } from '../../core/src/items.ts'
 import { parseDuration } from '../../core/src/duration.ts'
 import { findSnapshot, fromJsonl, type Snapshot } from '../../core/src/journal.ts'
 import { splitFrontmatter } from './build.ts'
-import { assemblePrompts, buildScope, cursorMatch, dataScope, type DataEntry, type MarkdownFile, type PromptSet } from '../../core/src/assemble.ts'
+import { assemblePrompts, buildScope, cursorMatch, dataScope, isMarkdownSectionFile, promptSectionDirs, type DataEntry, type MarkdownFile, type PromptSet } from '../../core/src/assemble.ts'
 import { NodeHost, listSkills } from './host-node.ts'
-import { parseToolHeader } from '../../core/src/toolheader.ts'
+import { parseToolHeader, parseToolHeaders, type ToolHeader } from '../../core/src/toolheader.ts'
+import { scriptArgv, shimLang, usedFunctions } from '../../core/src/shims.ts'
 import { scriptFnName, scriptLang } from './scripts.ts'
 import { NODE_SHIM } from './shims.ts'
 import { repoCacheDir, trustState, type TrustState } from './settings.ts'
 import { posix, readJson, readText, runProcess, sha256, walkFiles, writeJson } from './util.ts'
+import { fileProviderValue, parseLoose, pickFields, providerResultOk } from '../../core/src/providers.ts'
 
 export const BUILTIN_PROVIDERS = new Set(['git', 'fs', 'cursor', 'session', 'gate', 'ctx', 'scripts', 'data', 'args', 'budgets'])
 
@@ -78,18 +80,30 @@ export function loadMarkdownRules(root: string, config: GateConfig): { rules: Md
   return { rules, diagnostics }
 }
 
-/** `provider` rule sources (G-51): values come from the providers (trusted CLI / file / module). */
-export async function loadProviderRules(config: GateConfig, value: (name: string) => Promise<Value>): Promise<{ rules: MdcRule[]; diagnostics: Diagnostic[] }> {
+/** `provider` rule sources (G-51): values come from the providers (trusted CLI / file / module). `missing` names the
+ * sources whose provider gave no data (untrusted, failed, unverified, a missing field): their rules are unknown. */
+export async function loadProviderRules(config: GateConfig, value: (name: string) => Promise<Value>): Promise<{ rules: MdcRule[]; diagnostics: Diagnostic[]; missing: string[] }> {
   const rules: MdcRule[] = []
   const diagnostics: Diagnostic[] = []
-  if (config.cursorRules?.enabled === false) return { rules, diagnostics }
+  const missing: string[] = []
+  if (config.cursorRules?.enabled === false) return { rules, diagnostics, missing }
   for (const src of ruleSourcesOf(config)) {
     if (src.kind !== 'provider' || !src.name) continue
-    const r = providerRules(await value(src.name), src)
+    const v = await value(src.name)
+    const r = providerRules(v, src)
+    if (v === null || v === undefined || r.diagnostics.some((d) => d.code === 'G203' || d.code === 'G313')) missing.push(src.name)
     rules.push(...r.rules)
     diagnostics.push(...r.diagnostics)
   }
-  return { rules, diagnostics }
+  return { rules, diagnostics, missing }
+}
+
+/**
+ * Items for provider rule sources without data: one `rule` item per source, `status: unverified`, so `collect`,
+ * `report` and `decide` show that its rules exist but are unknown (instead of silently dropping them).
+ */
+export function unverifiedProviderRuleItems(names: readonly string[], why: (name: string) => string): Item[] {
+  return names.map((name) => makeItem('rule', `${name}/*`, { status: 'unverified', description: `правила провайдера ${name} не отримано: ${why(name)}`, provenance: { source: `provider:${name}` }, attach: { when: 'manual' } }))
 }
 
 export function loadRules(root: string, config: GateConfig): { rules: MdcRule[]; diagnostics: Diagnostic[] } {
@@ -228,18 +242,25 @@ export function loadCompiled(repo: Repo): { compiled: CompiledPrompt[]; from: 'r
   return cached.length ? { compiled: cached, from: 'cache' } : { compiled: [], from: 'none' }
 }
 
+/** Markdown sections of `prompt.dir` and of every `prompt-dir` item source (core `promptSectionDirs`). */
 export function loadMarkdown(repo: Repo): MarkdownFile[] {
-  const dir = join(repo.root, repo.promptDir)
-  if (!existsSync(dir)) return []
-  return readdirSync(dir, { withFileTypes: true })
-    .filter((d) => d.isFile() && d.name.endsWith('.md') && !/^readme\.md$/i.test(d.name))
-    .map((d) => ({ path: posix(join(repo.promptDir, d.name)), text: readFileSync(join(dir, d.name), 'utf8') }))
-    .sort((a, b) => a.path.localeCompare(b.path))
+  const out = new Map<string, MarkdownFile>()
+  for (const rel of promptSectionDirs({ ...repo.config, prompt: { ...repo.config.prompt, dir: repo.promptDir } })) {
+    const dir = join(repo.root, rel)
+    if (!existsSync(dir)) continue
+    for (const d of readdirSync(dir, { withFileTypes: true })) {
+      if (!d.isFile() || !isMarkdownSectionFile(d.name)) continue
+      const path = posix(join(rel, d.name))
+      if (!out.has(path)) out.set(path, { path, text: readFileSync(join(dir, d.name), 'utf8') })
+    }
+  }
+  return [...out.values()].sort((a, b) => a.path.localeCompare(b.path))
 }
 
-export function loadPrompts(repo: Repo, tier: Tier): PromptSet & { compiledFrom: string } {
+/** The prompts for `tier`; `preload` (the gate's `skills.preload`) adds the generated `preload` section (Р5). */
+export function loadPrompts(repo: Repo, tier: Tier, preload?: readonly string[]): PromptSet & { compiledFrom: string } {
   const { compiled, from } = loadCompiled(repo)
-  const set = assemblePrompts(compiled, loadMarkdown(repo), tier, Object.keys(repo.config.tiers ?? {}))
+  const set = assemblePrompts(compiled, loadMarkdown(repo), tier, Object.keys(repo.config.tiers ?? {}), preload?.length ? { preload } : {})
   return { ...set, compiledFrom: from }
 }
 
@@ -250,8 +271,58 @@ export function scriptFiles(repo: Repo): string[] {
   return existsSync(join(repo.root, dir)) ? walkFiles(repo.root, { under: dir }) : []
 }
 
-export function collectItems(repo: Repo, rules?: MdcRule[]): Item[] {
-  const items: Item[] = []
+export interface ScriptToolInfo {
+  name: string
+  description?: string
+  inputSchema: Record<string, unknown>
+  tiers?: string[]
+  /** Repo-relative script (whole-script tool) or module (function tool). */
+  path: string
+  /** Function tools: the export served through the language shim with the tool input as kwargs. */
+  fn?: string
+  line: number
+}
+
+/** Modules whose exports may be tools, as the mod (`hooks/layers/dsl.ts toolModules`): `<prompt dir>/lib/*`,
+ * gate.json `module` providers and the `use` paths of the prompts. Repo-relative, inside the root. */
+export function toolModules(repo: Repo, prompts: readonly CompiledPrompt[]): string[] {
+  const out = new Set<string>()
+  const lib = join(repo.root, repo.promptDir, 'lib')
+  if (existsSync(lib)) for (const d of readdirSync(lib, { withFileTypes: true })) if (d.isFile() && shimLang(d.name)) out.add(posix(join(repo.promptDir, 'lib', d.name)))
+  for (const p of Object.values(repo.config.providers ?? {})) if (p.kind === 'module' && p.path) out.add(p.path.replace(/^\.\//, ''))
+  for (const path of usedFunctions(prompts).keys()) out.add(path.replace(/^\.\//, ''))
+  const inside = (p: string) => !p.startsWith('/') && !p.split('/').includes('..')
+  return [...out].filter(inside).sort()
+}
+
+/**
+ * Model tools of the repo (SPEC «Скрипти як інструменти моделі», «Функції як інструменти моделі»): `# gate-tool:`
+ * headers of `<prompt dir>/scripts/*` (core `parseToolHeader`) and function-level headers over exports of the
+ * tool modules (core `parseToolHeaders`). The first tool of a name wins, scripts first, as the mod registers them.
+ */
+export function scriptTools(repo: Repo, prompts?: readonly CompiledPrompt[]): { tools: ScriptToolInfo[]; diagnostics: Diagnostic[] } {
+  const tools: ScriptToolInfo[] = []
+  const diagnostics: Diagnostic[] = []
+  const add = (t: ScriptToolInfo) => { if (!tools.some((x) => x.name === t.name)) tools.push(t) }
+  const info = (h: ToolHeader, path: string, fn?: string): ScriptToolInfo => ({ name: h.name, ...(h.description ? { description: h.description } : {}), inputSchema: h.inputSchema, ...(h.tiers ? { tiers: h.tiers } : {}), path, ...(fn ? { fn } : {}), line: h.line })
+  for (const f of scriptFiles(repo)) {
+    const { header, diagnostics: d } = parseToolHeader(readText(join(repo.root, f)) ?? '')
+    diagnostics.push(...d.map((x) => ({ ...x, path: f })))
+    if (header) add(info(header, f))
+  }
+  const set = prompts ?? (() => { const p = loadPrompts(repo, 'standard'); return [...p.system, ...Object.values(p.skills)] })()
+  for (const path of toolModules(repo, set)) {
+    const text = readText(join(repo.root, path))
+    if (!text?.includes('gate-tool')) continue
+    const r = parseToolHeaders(text)
+    diagnostics.push(...r.diagnostics.map((x) => ({ ...x, path })))
+    for (const h of r.headers) add(info(h, path, h.name))
+  }
+  return { tools, diagnostics }
+}
+
+export function collectItems(repo: Repo, rules?: MdcRule[], extra: readonly Item[] = []): Item[] {
+  const items: Item[] = [...extra]
   for (const r of rules ?? loadRules(repo.root, repo.config).rules) items.push(ruleToItem(r))
   for (const s of listSkills(repo.root)) {
     // Skills transpiled from .mdc by `sync` are the same rules: don't count them twice.
@@ -267,11 +338,10 @@ export function collectItems(repo: Repo, rules?: MdcRule[]): Item[] {
       items.push(makeItem('agent', name, { body, provenance: { source: 'claude-agents', path: `.claude/agents/${f}` }, ...(typeof meta.description === 'string' ? { description: meta.description } : {}) }))
     }
   }
-  for (const f of scriptFiles(repo)) {
-    const { header } = parseToolHeader(readText(join(repo.root, f)) ?? '')
-    if (header) items.push(makeItem('tool', header.name, { provenance: { source: 'gate-tool', path: f }, ...(header.description ? { description: header.description } : {}), ...(header.tiers ? { tags: header.tiers.map((t) => `tier:${t}`) } : {}) }))
-  }
   const prompts = loadPrompts(repo, 'standard')
+  for (const t of scriptTools(repo, [...prompts.system, ...Object.values(prompts.skills)]).tools) {
+    items.push(makeItem('tool', t.name, { provenance: { source: 'gate-tool', path: t.path }, ...(t.description ? { description: t.description } : {}), ...(t.tiers ? { tags: t.tiers.map((x) => `tier:${x}`) } : {}) }))
+  }
   for (const cp of prompts.system) {
     for (const s of cp.sections) {
       const chars = JSON.stringify(s.children).length
@@ -307,27 +377,6 @@ export function decide(config: GateConfig, items: readonly Item[], flags: GateFl
 }
 
 // ───────────────────────── providers ─────────────────────────
-
-function pickFields(v: Value, pick: string[] | undefined): Value {
-  if (!pick?.length || !v || typeof v !== 'object' || Array.isArray(v)) return v
-  const out: Record<string, Value> = {}
-  for (const p of pick) {
-    const parts = p.split('.')
-    let cur: Value | undefined = v
-    for (const k of parts) cur = cur && typeof cur === 'object' && !Array.isArray(cur) ? (cur as Record<string, Value>)[k] : undefined
-    if (cur === undefined) continue
-    let o = out
-    for (const k of parts.slice(0, -1)) o = (o[k] ??= {}) as Record<string, Value>
-    o[parts[parts.length - 1]!] = cur
-  }
-  return out
-}
-
-function parseLoose(stdout: string): Value {
-  const t = stdout.trim()
-  if (!t) return null
-  try { return JSON.parse(t) as Value } catch { return t }
-}
 
 /** Markdown file provider: `{ body, meta, headings }`. */
 function markdownValue(text: string): Value {
@@ -413,8 +462,9 @@ export class Providers {
       if (host.dryScripts) return undefined
       host.processes++
       const r = await runProcess(argv, { cwd: this.o.repo.root, timeoutMs: 10_000 })
-      if (r.exitCode !== 0) { this.fail(name, p, `exit ${r.exitCode}: ${r.stderr.trim().split('\n')[0]?.slice(0, 200) ?? ''}`); return undefined }
-      return parseLoose(r.stdout)
+      const res = providerResultOk(p, r.exitCode, r.stdout)
+      if (!res.ok) { this.fail(name, p, `${res.error}: ${r.stderr.trim().split('\n')[0]?.slice(0, 200) ?? ''}`); return undefined }
+      return res.value
     })
     return v === undefined ? null : pickFields(v, p.pick)
   }
@@ -466,9 +516,10 @@ export class Providers {
     else if (p.kind === 'file') {
       const text = p.path ? await this.o.host.readFile(p.path) : undefined
       if (text === undefined) v = this.fail(name, p, `файл ${p.path} не знайдено`)
-      else if (/\.json$/i.test(p.path!)) {
-        try { v = pickFields(JSON.parse(text) as Value, p.pick) } catch (e) { v = this.fail(name, p, `JSON: ${(e as Error).message}`) }
-      } else v = /\.mdx?$/i.test(p.path!) ? markdownValue(text) : text
+      else {
+        const f = fileProviderValue(p.path!, text, p.pick)
+        v = 'markdown' in f ? markdownValue(text) : 'error' in f ? this.fail(name, p, f.error) : f.value
+      }
     } else if (p.kind === 'cli') v = p.command?.length ? await this.cliRun(name, p, p.command) : null
     else if (p.kind === 'module') v = await this.moduleCall(name, p, '__default__', [], {})
     else if (p.kind === 'mcp') {
@@ -597,6 +648,36 @@ export function referencedNames(prompts: readonly CompiledPrompt[], candidates: 
   return out
 }
 
+function providerWhy(providers: Providers, host: NodeHost, name: string): string {
+  const f = providers.failed.find((x) => x.name === name)
+  if (f) return f.message
+  const p = providers.cfg[name]
+  if (!host.trusted && p && (p.kind === 'cli' || p.kind === 'module')) return 'репозиторій не довірений (trust grant або --trust-repo)'
+  if (p?.kind === 'mcp') return 'MCP працює лише в mod'
+  if (host.dryScripts) return 'немає кешованого значення (--dry-scripts)'
+  return 'немає даних'
+}
+
+/**
+ * Every item of the repo with the `provider` rule sources resolved (async): what `collect` and `report` use, so they
+ * see the same rules as `run` / `decide`. Provider data is loaded only when the repo is trusted (cli / module) —
+ * otherwise, and for any source without data, an `unverified` placeholder item stands for its rules.
+ */
+export async function collectRepoItems(repo: Repo, o: { trustRepo?: boolean; dryScripts?: boolean } = {}): Promise<{ items: Item[]; rules: MdcRule[]; diagnostics: Diagnostic[] }> {
+  const { rules, diagnostics } = loadRules(repo.root, repo.config)
+  let extra: Item[] = []
+  if (ruleSourcesOf(repo.config).some((s) => s.kind === 'provider' && s.name)) {
+    const trust = trustState(repo.root, repo.config, { flag: o.trustRepo })
+    const host = new NodeHost({ root: repo.root, config: repo.config, trusted: trust.trusted, dryScripts: o.dryScripts, cacheDir: repo.cacheDir, ...(repo.narrowBinaries ? { narrowBinaries: repo.narrowBinaries } : {}) })
+    const providers = new Providers({ repo, host, rules, liveGit: false })
+    const pr = await loadProviderRules(repo.config, (name) => providers.value(name))
+    rules.push(...pr.rules)
+    diagnostics.push(...pr.diagnostics, ...host.notes)
+    extra = unverifiedProviderRuleItems(pr.missing, (n) => providerWhy(providers, host, n))
+  }
+  return { items: collectItems(repo, rules, extra), rules, diagnostics }
+}
+
 export async function buildContext(o: ContextOptions): Promise<RenderContext> {
   const root = resolve(o.root)
   const repo = loadRepo(root)
@@ -627,16 +708,18 @@ export async function buildContext(o: ContextOptions): Promise<RenderContext> {
   host.provider = (req) => providers.call(req)
   host.callables = providers.callables()
   // `provider` rule sources (G-51) need provider values, so they join the rules before items and the gate.
+  let unverifiedRules: Item[] = []
   if (live) {
     const pr = await loadProviderRules(repo.config, (name) => providers.value(name))
     rules.push(...pr.rules)
     diagnostics.push(...pr.diagnostics)
+    unverifiedRules = unverifiedProviderRuleItems(pr.missing, (n) => providerWhy(providers, host, n))
   }
   host.rules = rules.map((r) => ({ id: r.id, path: r.path, body: r.body, ...(r.description ? { description: r.description } : {}) }))
-  const items = collectItems(repo, rules)
+  const items = collectItems(repo, rules, unverifiedRules)
   const gate = decide(repo.config, items, { ...flags, paths: o.paths ?? (live ? ((git?.changed as string[] | undefined) ?? []) : []), branch: o.branch ?? (typeof git?.branch === 'string' ? git.branch : undefined) }, {})
   const tier = gate.tier
-  const prompts = loadPrompts(repo, tier)
+  const prompts = loadPrompts(repo, tier, gate.skills.preload)
   diagnostics.push(...prompts.diagnostics)
   let scope: Record<string, Value>
   if (snapshot?.scope) {
@@ -665,4 +748,34 @@ export async function buildContext(o: ContextOptions): Promise<RenderContext> {
     }
   }
   return { repo, gate, tier, scope, host, providers, rules, diagnostics, trust, source, ...(snapshot ? { snapshot } : {}), prompts }
+}
+
+// ───────────────────────── serving model tools ─────────────────────────
+
+export type ToolCallResult = { result: string } | { deny: string } | { isError: true; result: string }
+
+/**
+ * Serve one model tool like the mod's `serveOwnTool`: gate (`tool:<name>` off → deny), `tiers`, trust, then a
+ * function tool through the language shim (input as kwargs) or a whole script with `{ args, ctx }` on stdin.
+ */
+export async function callScriptTool(ctx: RenderContext, name: string, input: Record<string, Value>): Promise<ToolCallResult> {
+  const all = [...ctx.prompts.system, ...Object.values(ctx.prompts.skills)]
+  const tool = scriptTools(ctx.repo, all).tools.find((t) => t.name === name)
+  if (!tool) return { isError: true, result: `Інструмент ${name} не знайдено (# gate-tool: у scripts/ або над експортом модуля)` }
+  if (ctx.gate.items[`tool:${name}`] === 'off') return { deny: `Інструмент ${name} вимкнено профілем ${ctx.gate.profile ?? '—'}` }
+  if (tool.tiers && !tool.tiers.includes(ctx.tier)) return { deny: `Інструмент ${name} недоступний для tier ${ctx.tier} (tiers: ${tool.tiers.join(', ')})` }
+  if (!ctx.host.trusted) return { deny: `Інструмент ${name}: репозиторій не довірений` }
+  if (tool.fn) {
+    const r = await ctx.host.shim(tool.path, [{ fn: tool.fn, args: [], kwargs: input }], 30_000)
+    if (r.errors[0]) return { isError: true, result: r.errors[0] }
+    const v = r.results[0]
+    return { result: typeof v === 'string' ? v : JSON.stringify(v ?? null) }
+  }
+  const abs = join(ctx.repo.root, tool.path)
+  const argv = scriptArgv(abs, scriptLang(tool.path, readText(abs) ?? ''))
+  if (!ctx.host.allowed(argv[0]!)) return { deny: `Інструмент ${name}: ${argv[0]} не в білому списку бінарників` }
+  ctx.host.processes++
+  const r = await runProcess(argv, { cwd: ctx.repo.root, stdin: JSON.stringify({ args: input, ctx: { tier: ctx.tier, profile: ctx.gate.profile ?? null } }), timeoutMs: 30_000 })
+  if (r.exitCode !== 0) return { isError: true, result: `exit ${r.exitCode}\n${r.stderr.slice(-2000)}` }
+  return { result: r.stdout }
 }

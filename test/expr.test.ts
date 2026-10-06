@@ -149,3 +149,18 @@ test('freeVars and callPaths', () => {
   assert.deepEqual(freeVars(p.ast!), ['data', 'gate', 'items', 'name'])
   assert.deepEqual(callPaths(p.ast!), ['util.fn'])
 })
+
+test('nested {{ }} inside a template string of an outer placeholder (SPEC example)', async () => {
+  const { parseTemplate, renderTemplate, splitTemplate, templateClose } = await import('../packages/core/src/expr.ts')
+  const src = 'Межі: {{ arch.deny | map("{{ item.from }} → {{ item.to }}") | join("; ") | truncate(400) }}.'
+  const parts = splitTemplate(src)
+  assert.equal(parts.length, 3)
+  assert.deepEqual(parts[1], { expr: 'arch.deny | map("{{ item.from }} → {{ item.to }}") | join("; ") | truncate(400)' })
+  const p = parseTemplate(src)
+  assert.deepEqual(p.diagnostics, [])
+  assert.equal(renderTemplate(p.parts, { arch: { deny: [{ from: 'ui', to: 'db' }, { from: 'api', to: 'web' }] } }, newBudget()), 'Межі: ui → db; api → web.')
+  const cases: [string, number][] = [['{{ a }}', 5], ["{{ 'x}}y' }}", 10], ['{{ a {{ b }} c }}', 15], ['{{ "unclosed }}', -1]]
+  for (const [s, want] of cases) assert.equal(templateClose(s, 2), want, s)
+  // An apostrophe in prose after a placeholder does not swallow the next one.
+  assert.deepEqual(splitTemplate("{{ a }} don't {{ b }}").filter((x) => 'expr' in x), [{ expr: 'a' }, { expr: 'b' }])
+})

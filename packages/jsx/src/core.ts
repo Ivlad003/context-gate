@@ -7,6 +7,7 @@
 // function components are inlined at the call site under a recursion guard (G151).
 
 import type { Code, Diagnostic, Node, SectionNode, ArgSpec, Tier } from '../../core/src/types.ts'
+import { splitTemplate } from '../../core/src/expr.ts'
 
 // ───────────────────────── Diagnostics collector ─────────────────────────
 
@@ -106,7 +107,10 @@ export function ref(path: string): any {
   })
 }
 
-const PLACEHOLDER = /\{\{\s*([\s\S]*?)\s*\}\}/g
+/** `{{ }}` placeholders: core `splitTemplate` (string literals and nested `{{ }}` inside a placeholder are skipped). */
+function unwrapPlaceholders(s: string): string {
+  return splitTemplate(s).map((p) => ('text' in p ? p.text : p.expr)).join('')
+}
 
 /**
  * Normalizes a value in an expression position (`when`, `test`, `of`, `value`, `expr`, `n`, ...)
@@ -116,7 +120,7 @@ const PLACEHOLDER = /\{\{\s*([\s\S]*?)\s*\}\}/g
  */
 export function exprOf(v: unknown, where: string): string | undefined {
   if (v === undefined) return undefined
-  if (typeof v === 'string') return v.replace(PLACEHOLDER, (_m, inner: string) => inner).trim()
+  if (typeof v === 'string') return unwrapPlaceholders(v).trim()
   if (isExprRef(v)) return v[EXPR]
   if (typeof v === 'number' || v === null) return String(v)
   if (typeof v === 'boolean') {
@@ -189,13 +193,10 @@ function flatten(children: unknown, out: Piece[], where: string): void {
 /** Splits a string into text and `{{ expr }}` nodes. */
 export function interpolate(s: string): Node[] {
   const out: Node[] = []
-  let last = 0
-  for (const m of s.matchAll(PLACEHOLDER)) {
-    if (m.index! > last) out.push({ t: 'text', value: s.slice(last, m.index) })
-    out.push({ t: 'expr', expr: m[1]!.trim() })
-    last = m.index! + m[0].length
+  for (const p of splitTemplate(s)) {
+    if ('text' in p) { if (p.text) out.push({ t: 'text', value: p.text }) }
+    else out.push({ t: 'expr', expr: p.expr })
   }
-  if (last < s.length) out.push({ t: 'text', value: s.slice(last) })
   return out
 }
 

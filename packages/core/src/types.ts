@@ -109,6 +109,10 @@ export interface ProviderConfig {
   args?: Record<string, unknown>
   cache?: string // duration like '5m'
   onError?: 'unverified' | 'skip' | 'fail'
+  /** `cli`: exit codes that count as success (default `[0]`); see core `providerResultOk`. */
+  okExitCodes?: number[]
+  /** `cli`: any other exit code with JSON on stdout still yields data (`eslint -f json` exits 1 on lint errors). */
+  parseOnError?: boolean
   schema?: unknown
   exposes?: string[]
 }
@@ -275,7 +279,7 @@ export interface DecisionLogEntry {
   enabled: string[]
   disabled: string[]
   reason: string[]
-  kind?: 'decision' | 'escalation-suggested' | 'gate-failed' | 'skill-render' | 'snapshot' | 'debug' | 'rule-delivered' | 'deny' | 'health'
+  kind?: 'decision' | 'escalation-suggested' | 'gate-failed' | 'gate-attempt' | 'skill-render' | 'snapshot' | 'debug' | 'rule-delivered' | 'deny' | 'health'
   data?: Record<string, unknown>
 }
 
@@ -299,7 +303,8 @@ export type Node =
   | { t: 'repeat'; n: string; children: Node[] } // counter `i`
   | { t: 'break' }
   | { t: 'continue' }
-  | { t: 'store'; name: string } // persist variable to data.*
+  /** Persist variable `name` to `data.<key ?? name>`; after a `run`/`call` it carries that value's fetchedAt/cache. */
+  | { t: 'store'; name: string; key?: string }
   | { t: 'run'; lang: string; code: string; as?: string; cache?: string; store?: string; needs?: string[] }
   | { t: 'use'; name: string; path: string }
   | { t: 'call'; fn: string; args: string[]; kwargs?: Record<string, string>; as: string; cache?: string; store?: string }

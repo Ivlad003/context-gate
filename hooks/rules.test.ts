@@ -1,7 +1,7 @@
 // Layer 1 (cursor-rules) through the engine's own host: `claude plugin test` (npm run test:mod).
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect } from 'claude-code/testing'
 
-import { ROOT, RULES, RUN, mountRepo } from './testkit.ts'
+import { ROOT, RULES, RUN, mountRepo, test } from './testkit.ts'
 
 const READ_RESULT = { type: 'text', file: { filePath: `${ROOT}/src/a.ts`, content: 'x', numLines: 1, startLine: 1, totalLines: 1 } }
 
@@ -51,6 +51,27 @@ describe('cursor-rules', () => {
     await $.tool.call({ tool: 'Read', tool_use_id: 't3', file_path: `${ROOT}/.cursor/rules/ts.mdc`, agentId: 'b' } as never)
     const afterFull = await $.tool.call({ tool: 'Read', tool_use_id: 't4', file_path: `${ROOT}/src/a.ts`, agentId: 'b' } as never)
     expect(afterFull.context ?? []).toEqual([])
+  })
+
+  test('a moved session root drops the rule and config caches on the next tool call (edge case 6)', async ($, on) => {
+    const WT = '/wt'
+    const cfg = { groups: { docs: ['skill:docs-*'] }, profiles: { docs: { groups: ['docs'] } } }
+    const repo = mountRepo(on, { files: {
+      ...RULES, 'src/a.ts': 'x',
+      [`${WT}/.cursor/rules/wt-ts.mdc`]: '---\nglobs: src/**/*.ts\n---\nWorktree: без default export.',
+      [`${WT}/src/a.ts`]: 'x',
+      [`${WT}/.claude/gate.json`]: JSON.stringify(cfg),
+    } })
+    on('tool.call', () => ({ result: READ_RESULT }) as never)
+    const first = await $.tool.call({ tool: 'Read', tool_use_id: 't1', file_path: `${ROOT}/src/a.ts` })
+    expect(first.context?.join('\n')).toContain('Cursor rule ts')
+    expect((await $.command.run({ command: 'gate', args: 'docs', ...RUN })).text).toContain('G502')
+    repo.root = WT
+    const moved = await $.tool.call({ tool: 'Read', tool_use_id: 't2', file_path: `${WT}/src/a.ts` })
+    const text = moved.context?.join('\n') ?? ''
+    expect(text).toContain('Worktree: без default export.')
+    expect(text).not.toContain('TypeScript: strict')
+    expect((await $.command.run({ command: 'gate', args: 'docs', ...RUN })).text).toContain('gate docs ·')
   })
 
   test('prompt.context resets the dedup so rules are delivered again', async ($, on) => {

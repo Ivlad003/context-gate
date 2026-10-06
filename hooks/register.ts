@@ -16,7 +16,7 @@ import { ensureSession } from './layers/config.ts'
 import { classicSessionStart, compactAfter, compactInstructions, configFileChanged, recordStepUsage, sessionEnd, sessionStart } from './layers/session.ts'
 import { editSection, gateCommand, rerenderHealth, rerenderSection } from './layers/commands.ts'
 import { bashAfter, bashBefore, gatesAfterFile, gatesBeforeFile, gatesMentioned, promptGates, turnAfter } from './layers/gates.ts'
-import { relPath, ruleCommand, rulesAfterFile, rulesBeforeFile, rulesContextAfter, rulesContextBefore, rulesFileChanged } from './layers/cursor-rules.ts'
+import { checkRoot, relPath, ruleCommand, rulesAfterFile, rulesBeforeFile, rulesContextAfter, rulesContextBefore, rulesFileChanged } from './layers/cursor-rules.ts'
 import { describeMcp, gatePromptSubmit, listingAfter, mcpGate, observeStep, offerAgent, recompute, skillCall } from './layers/skill-gate.ts'
 import { checkBudgets } from './layers/budgets.ts'
 import { captureSkillArgs, composeAfter, dslContextBefore, dslFileChanged, serveOwnTool, skillPrompt, trustOnPrompt } from './layers/dsl.ts'
@@ -212,6 +212,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     const io = port($)
     await ensureSession(io, rt)
+    await checkRoot(io, rt)
     await trustOnPrompt(io, rt, e.text)
     const g = await gatePromptSubmit(io, rt, { text: e.text })
     gatesMentioned(rt, g.mentioned)
@@ -239,6 +240,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: ['Read', 'Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
     const io = port($)
     await ensureSession(io, rt)
+    await checkRoot(io, rt) // a moved root before the path is made repo-relative
     const file = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
     if (typeof file !== 'string' || !file) return next(e)
     const c: FileCall = { tool: e.tool, file, rel: relPath(rt, file), agent: e.agentId ?? 'main', input: e as unknown as Record<string, unknown>, ...(e.agentId !== undefined ? { agentId: e.agentId } : {}) }
@@ -260,7 +262,9 @@ export const register: Register = (on, options) => {
   }).catch(pass)
 
   on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
-    const deny = await skillCall(port($), rt, e.skill, e.args, e.agentId)
+    // Without the engine's tool table laid beside the d.ts, Skill's arguments are `unknown`: narrow them.
+    if (typeof e.skill !== 'string' || !e.skill) return next(e)
+    const deny = await skillCall(port($), rt, e.skill, typeof e.args === 'string' ? e.args : undefined, e.agentId)
     return deny ? { deny } : next(e)
   }).catch(pass)
 

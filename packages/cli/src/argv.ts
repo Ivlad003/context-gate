@@ -8,6 +8,7 @@ export interface ParsedArgv { flags: Record<string, string | boolean | string[]>
 export const GLOBAL_FLAGS: Record<string, FlagSpec> = {
   root: { type: 'string', desc: 'корінь репозиторію (за замовчуванням — найближчий з .claude/ або .git від cwd)', arg: '<dir>' },
   'trust-repo': { type: 'bool', desc: 'довіряти репозиторію на цей запуск (CI, claude -p): дозволяє процеси й cli-провайдери' },
+  'user-skills': { type: 'bool', desc: '--no-user-skills: не читати ~/.claude/skills (відтворювані collect/report/bench; або CONTEXT_GATE_NO_USER_SKILLS=1)' },
   help: { type: 'bool', desc: 'довідка', short: 'h' },
 }
 

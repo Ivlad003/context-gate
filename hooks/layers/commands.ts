@@ -17,10 +17,11 @@ import { type Io, type Runtime, now } from '../ctx.ts'
 import { ensureSession } from './config.ts'
 import { rulesReport } from './cursor-rules.ts'
 import { effectiveMode, ensureItems, readBranch, recompute } from './skill-gate.ts'
-import { buildPrompts, buildScope, composeSections, hostFor, loadPrompts, renderOptions, sectionsFor } from './dsl.ts'
+import { buildPrompts, buildScope, composeSections, hostFor, loadPrompts, preloadOf, renderOptions, sectionsFor } from './dsl.ts'
 import { revokeTrust } from './trust.ts'
 import { HEALTH_PANE, SECTION_PANE, WHY_PANE, buildErrorOf, gateLine } from './ui.ts'
 import { openEditor } from './editor.ts'
+import { unverifiedLines } from './probe.ts'
 import { formatTierCosts, tierCosts } from '../../packages/core/src/report.ts'
 
 export const GATE_HINT = '[<profile>|+group|-group|off|auto|new|why [off]|shadow|apply|rules|health|build|render prompt://<id>|edit <id>|trust revoke|<stage> | <stage>…]'
@@ -133,7 +134,8 @@ export async function gateCommand(io: Io, rt: Runtime, args: string): Promise<{ 
         const disabled = Object.entries(status.disabled).map(([k, v]) => `- вимкнено ${k}: ${v}`)
         const log = (await io.read('log')) as DecisionLogEntry[]
         const costs = tierCosts(log) // SPEC «Ескалація»: attempts and tokens per tier (core report.ts)
-        const text = [...disabled, formatWhy(log, 50), ...(costs.length ? ['', formatTierCosts(costs)] : [])].join('\n')
+        const probe = unverifiedLines(rt) // G-62: features resting on probe points no live run confirmed
+        const text = [...disabled, formatWhy(log, 50), ...(costs.length ? ['', formatTierCosts(costs)] : []), ...(probe.length ? ['', ...probe] : [])].join('\n')
         return { text: opened.isPlaced ? `Відкрито pane «gate why».\n\n${text}` : text }
       }
       case 'rules':
@@ -144,7 +146,8 @@ export async function gateCommand(io: Io, rt: Runtime, args: string): Promise<{ 
         const body = rt.lastHealth ? formatHealth(rt.lastHealth) : 'Рендера промпту ще не було в цій сесії (секцій DSL немає або prompt.compose ще не спрацював).'
         const u = rt.stepUsage
         const cache = u && u.input + u.cacheRead + u.cacheCreation > 0 ? `turn.step: кроків ${u.steps}, кеш промпту ${Math.round((u.cacheRead / (u.input + u.cacheRead + u.cacheCreation)) * 100)}% вхідних токенів (read ${u.cacheRead}, write ${u.cacheCreation}, без кешу ${u.input})\n` : ''
-        return { text: [opened ? 'Відкрито pane «gate health».\n' : '', err ? `prompt ⚠ build: ${err.code} ${err.message}\n` : '', cache, body].join('') }
+        const probe = unverifiedLines(rt)
+        return { text: [opened ? 'Відкрито pane «gate health».\n' : '', err ? `prompt ⚠ build: ${err.code} ${err.message}\n` : '', cache, body, probe.length ? `\n\n${probe.join('\n')}` : ''].join('') }
       }
       case 'build': {
         const r = await buildPrompts(io, rt, { timeoutMs: 120_000, ask: true })
@@ -184,7 +187,7 @@ export async function renderSectionView(io: Io, rt: Runtime, id: string): Promis
   const set = await loadPrompts(io, rt)
   const host = await hostFor(io, rt)
   const { scope, tier } = await buildScope(io, rt, host, undefined)
-  const assembled = sectionsFor(rt, set, tier)
+  const assembled = sectionsFor(rt, set, tier, await preloadOf(io))
   const skill = set.compiled.find((p) => p.skill?.name === id)
   if (skill?.skill) {
     const parsed = skillArgs(skill, '')
@@ -272,7 +275,7 @@ export function modPipeHost(io: Io, rt: Runtime): PipeHost {
       const host = await hostFor(io, rt)
       const built = await buildScope(io, rt, host, a.model)
       const tier = a.tier ?? built.tier
-      const res = await renderPrompt(sectionsFor(rt, set, tier).system, built.scope, host, renderOptions(rt, tier))
+      const res = await renderPrompt(sectionsFor(rt, set, tier, await preloadOf(io)).system, built.scope, host, renderOptions(rt, tier))
       const sections = new Map<string, RenderedRecord>()
       for (const s of res.sections) if (ids.has(s.id)) sections.set(s.id, { text: s.text, tokens: s.tokens, included: s.included, ...(s.reason ? { reason: s.reason } : {}), status: s.status })
       return { tier, sections }

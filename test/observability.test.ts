@@ -204,3 +204,29 @@ test('a fence title is a template (Examples: title="{{ ex.path }}")', async () =
   const r = await renderPrompt([section([{ t: 'fence', lang: 'ts', title: '{{ p }}', children: [{ t: 'text', value: 'x' }] } as never])], { p: 'src/a.ts' }, host(), { tier: 'standard' })
   assert.match(r.text, /```ts title="src\/a\.ts"/)
 })
+
+test('CLI health / report: H011 from gate-attempt entries in .claude/gate.log.jsonl', async () => {
+  const { gateAttemptEntry, toJsonl } = await import('../packages/core/src/journal.ts')
+  const { cli, sandbox: box } = await import('./cli-helpers.ts')
+  const { mkdirSync: mk, writeFileSync: wf } = await import('node:fs')
+  const { join: j } = await import('node:path')
+  const root = j(box(), 'repo')
+  mk(j(root, '.claude', 'prompt'), { recursive: true })
+  wf(j(root, '.claude', 'gate.json'), '{}')
+  wf(j(root, '.claude', 'prompt', 'a.md'), '---\nid: a\nscope: static\n---\nHello.')
+  const at = { ts: Date.now(), turn: 1, tier: 'quick' }
+  const lines = [
+    ...Array.from({ length: 3 }, () => gateAttemptEntry({ gate: 'lint', on: 'commit', outcome: 'block', ms: 10 }, at)),
+    gateAttemptEntry({ gate: 'lint', on: 'commit', outcome: 'pass', ms: 10 }, at),
+    gateAttemptEntry({ gate: 'lint', outcome: 'override' }, at),
+  ]
+  wf(j(root, '.claude', 'gate.log.jsonl'), lines.map((l) => toJsonl(l)).join(''))
+  const h = JSON.parse((await cli(root, ['health', '--json'])).out)
+  const m = h.metrics.find((x: { code?: string }) => x.code === 'H011')
+  assert.equal(m.value, 75)
+  assert.equal(m.ok, false)
+  assert.match(m.advice, /ручних «все одно» 1/)
+  const rep = JSON.parse((await cli(root, ['report', '--json'])).out)
+  assert.deepEqual(rep.gates, { lint: { attempts: 4, blocks: 3, ms: 40, overrides: 1 } })
+  assert.match((await cli(root, ['report'])).out, /## Гейти \(H011\)\n\n\| гейт \| спроб[^\n]*\n[^\n]*\n\| lint \| 4 \| 3 \| 75 \| 10 \| 1 \|/)
+})

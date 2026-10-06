@@ -1,9 +1,22 @@
 // Test kit for hooks/*.test.ts (`claude plugin test`): an in-memory repository answering the $ ops the
 // plugin calls. The test's own `on` hooks sit beneath the plugin and stand for the engine.
 import type { On } from 'claude-code'
-import { mock } from 'claude-code/testing'
+import { mock, test as kitTest, type TestBody, type TestOptions } from 'claude-code/testing'
+
+/**
+ * Every mod test gets at least this long. `claude plugin test` runs each file in its own child, all at once, and
+ * every test pays a fresh plugin load (the core is compiled in): on a loaded machine that alone passes the kit's
+ * 5 s default. The kit has no global option, so the test files import `test` from here.
+ */
+export const TEST_TIMEOUT_MS = 60_000
+
+export function test(name: string, ...rest: readonly [TestBody] | readonly [TestOptions, TestBody]): void {
+  const [opts, body] = rest.length === 1 ? [{} as TestOptions, rest[0]] : rest
+  kitTest(name, { ...opts, timeoutMs: Math.max(opts.timeoutMs ?? 0, TEST_TIMEOUT_MS) }, body)
+}
 
 export const ROOT = '/repo'
+export const HOME = '/home/test'
 
 export interface RunResult { exitCode: number; stdout: string; stderr: string }
 
@@ -16,6 +29,10 @@ export interface RepoOptions {
   complete?: (req: { model: string; prompt: string; system?: string }) => string | undefined
   ask?: string
   percent?: number
+  /** The settings `env` block `$.settings.read()` answers (the gate.json `env` whitelist reads it). */
+  settingsEnv?: Record<string, string>
+  /** The user's `~/.claude/context-gate.json` `allowBinaries` (HOME is `/home/test`); unset → core DEFAULT_BINARIES. */
+  allowBinaries?: string[]
   /** Answers `fs.exists` first (paths outside the repo, e.g. the plugin folder); undefined → the repo. */
   exists?: (path: string) => boolean | undefined
 }
@@ -33,21 +50,25 @@ export interface Repo {
   completes: string[]
   /** Set the context percent session.usage answers. */
   percent: number | undefined
+  /** What `session.root` / `session.cwd` answer; set it to move the session (a `cd` into another worktree). Files
+   *  outside ROOT are keyed by their absolute path. */
+  root: string
 }
 
 const rel = (p: string): string => (p.startsWith(ROOT + '/') ? p.slice(ROOT.length + 1) : p === ROOT ? '' : p)
 
 export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
   const repo: Repo = {
-    files: new Map(Object.entries(opts.files ?? {}).map(([k, v], i) => [k, { text: v, mtimeMs: 1000 + i }])),
+    files: new Map(Object.entries({ ...(opts.files ?? {}), ...(opts.allowBinaries ? { [`${HOME}/.claude/context-gate.json`]: JSON.stringify({ allowBinaries: opts.allowBinaries }) } : {}) }).map(([k, v], i) => [k, { text: v, mtimeMs: 1000 + i }])),
     commands: [], tools: [], toasts: [], statuses: [], appended: [], invalidated: [], runs: [], asks: [], completes: [],
     percent: opts.percent,
+    root: ROOT,
   }
   mock.store(on, opts.store ?? {})
   const isDir = (r: string): boolean => r === '' || [...repo.files.keys()].some((f) => f.startsWith(r + '/'))
-  on('session.root', () => ({ value: ROOT }))
+  on('session.root', () => ({ value: repo.root }))
   on('session.id', () => ({ value: 'test-session' }))
-  on('session.cwd', () => ({ value: ROOT }))
+  on('session.cwd', () => ({ value: repo.root }))
   on('session.model', () => ({ value: opts.model ?? 'claude-sonnet-4-5' }))
   on('session.repo', () => ({ value: { root: ROOT, remote: null, internal: false, name: 'repo' } }))
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, ...(repo.percent !== undefined ? { percent: repo.percent } : {}) }, rateLimits: [] } }))
@@ -55,7 +76,7 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
     repo.appended.push(e.message.content.map((b) => ('text' in b ? String(b.text) : '')).join(''))
     return { message: e.message, uuid: `u${repo.appended.length}` } as never
   })
-  on('env.get', () => ({ value: undefined }))
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
   on('fs.read', ($, e) => {
     const f = repo.files.get(rel(e.path))
     return f ? { value: f.text } : { deny: `ENOENT: ${e.path}` }
@@ -121,6 +142,7 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
     return { value: (text === undefined ? { isAnswered: false, reason: 'empty-reply', usage } : { isAnswered: true, text, usage }) as never }
   })
   on('model.classify', () => ({ value: undefined }))
+  if (opts.settingsEnv) on('settings.read', () => ({ value: { env: opts.settingsEnv } }) as never)
   on('clock.after', () => ({ value: undefined }))
   return repo
 }

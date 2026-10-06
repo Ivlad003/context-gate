@@ -162,6 +162,64 @@ export function findSnapshot(entries: readonly unknown[], which: string): Snapsh
   return out
 }
 
+// ───────────────────────── gate attempts (health H011) ─────────────────────────
+// Contract between the writers (the mod's `hooks/layers/gates.ts`, the hooks adapter's read-before-write) and the
+// readers (CLI `health` / `report`, `computeHealth(…, { gates })`). One entry per gate evaluation:
+//   { kind: 'gate-attempt', trigger: 'gate:<on>', tier, data: { gate, on?, outcome, ms?, sessionId?, adapter? } }
+// `outcome`: `pass` and `block` are attempts (`block` also counts as a block); `override` is a manual «все одно»
+// right after a block of that gate (a likely false positive, not an attempt); `skip` (untrusted, binary not on the
+// whitelist, no `run`) is not an attempt. A block is journaled as `gate-failed` too (escalation reads that).
+
+export type GateOutcome = 'pass' | 'block' | 'override' | 'skip'
+
+export interface GateAttemptData {
+  gate: string
+  on?: string
+  outcome: GateOutcome
+  ms?: number
+  sessionId?: string
+  /** Writer: `claude-code-mod` (default) or `claude-code-hooks`. */
+  adapter?: string
+  /** Why a gate was skipped. */
+  skipped?: string
+}
+
+export interface GateCounts { attempts: number; blocks: number; ms?: number; overrides?: number }
+
+/** A `gate-attempt` journal entry (metadata only: names, outcome, milliseconds). */
+export function gateAttemptEntry(d: GateAttemptData, at: { ts: number; turn: number; tier: string; profile?: string }): DecisionLogEntry {
+  const data: Record<string, unknown> = { gate: d.gate, outcome: d.outcome }
+  if (d.on) data.on = d.on
+  if (d.ms !== undefined) data.ms = Math.round(d.ms)
+  if (d.sessionId) data.sessionId = d.sessionId
+  if (d.adapter) data.adapter = d.adapter
+  if (d.skipped) data.skipped = d.skipped
+  return { ts: at.ts, turn: at.turn, trigger: d.on ? `gate:${d.on}` : 'gate', ...(at.profile ? { profile: at.profile } : {}), tier: at.tier, enabled: [], disabled: [], reason: [], kind: 'gate-attempt', data }
+}
+
+/**
+ * Per-gate counters from journal entries (`gate-attempt` only), the `gates` input of `computeHealth` (H011).
+ * `sessionId` keeps one conversation (the mod counts per conversation); `from` drops older entries.
+ */
+export function gateStatsFromJournal(entries: readonly unknown[], opts: { sessionId?: string; from?: number } = {}): Record<string, GateCounts> {
+  const out: Record<string, GateCounts> = {}
+  for (const raw of entries) {
+    if (!raw || typeof raw !== 'object') continue
+    const e = raw as { kind?: unknown; ts?: unknown; data?: Record<string, unknown> }
+    if (e.kind !== 'gate-attempt' || !e.data || typeof e.data.gate !== 'string') continue
+    if (opts.from !== undefined && typeof e.ts === 'number' && e.ts < opts.from) continue
+    if (opts.sessionId && e.data.sessionId !== opts.sessionId) continue
+    const g = (out[e.data.gate] ??= { attempts: 0, blocks: 0, ms: 0, overrides: 0 })
+    const outcome = e.data.outcome
+    if (outcome === 'override') { g.overrides = (g.overrides ?? 0) + 1; continue }
+    if (outcome !== 'pass' && outcome !== 'block') continue
+    g.attempts++
+    if (outcome === 'block') g.blocks++
+    if (typeof e.data.ms === 'number') g.ms = (g.ms ?? 0) + e.data.ms
+  }
+  return out
+}
+
 // ───────────────────────── where filter ─────────────────────────
 
 export interface WhereCond { key: string; op: '=' | '!=' | '~' | '>' | '<' | '>=' | '<='; value: string }

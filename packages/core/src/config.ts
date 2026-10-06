@@ -82,6 +82,31 @@ export function binaryWhitelist(user: readonly string[] | undefined, repo: reado
   return repo ? base.filter((b) => repo.includes(b)) : [...base]
 }
 
+/** Basename of a command (`/usr/bin/node` → `node`, `C:\\x\\deno.exe` stays `deno.exe`). */
+export function binaryOf(cmd: string): string {
+  return cmd.split(/[\\/]/).pop() ?? ''
+}
+
+/** May repo config start `argv`? Its binary (basename of `argv[0]`) must be on the effective whitelist (Р2). Trust
+ * is a separate check; see `commandGateDecision` for both. */
+export function commandAllowed(argv: readonly string[], whitelist: readonly string[] | ReadonlySet<string>): boolean {
+  const bin = binaryOf(argv[0] ?? '')
+  if (!bin) return false
+  return Array.isArray(whitelist) ? whitelist.includes(bin) : (whitelist as ReadonlySet<string>).has(bin)
+}
+
+/**
+ * Whether a command gate (`gates[].run`) may start (SPEC Р2 «команди з білого списку бінарників»): the repo must be
+ * trusted, scripts allowed (`claude -p` needs `allowScripts`), and the binary on the whitelist. A refused gate is
+ * skipped (it passes) with the reason, never a block: the user did not consent to running it.
+ */
+export function commandGateDecision(o: { trusted: boolean; whitelist: readonly string[] | ReadonlySet<string>; scriptsAllowed?: boolean }, argv: readonly string[]): { run: true } | { run: false; skipped: string } {
+  if (!o.trusted) return { run: false, skipped: 'репозиторій не довірений' }
+  if (o.scriptsAllowed === false) return { run: false, skipped: 'скрипти вимкнено (allowScripts)' }
+  if (!commandAllowed(argv, o.whitelist)) return { run: false, skipped: `бінарник ${binaryOf(argv[0] ?? '') || '(порожній)'} поза білим списком (allowBinaries)` }
+  return { run: true }
+}
+
 export const gateJsonSchema = {
   $schema: 'http://json-schema.org/draft-07/schema#',
   $id: 'https://context-gate.dev/context-gate.schema.json',
@@ -143,6 +168,8 @@ export const gateJsonSchema = {
           functions: { anyOf: [strArr, { type: 'object', additionalProperties: strArr }] },
           path: str, pick: strArr, tool: str, args: { type: 'object' },
           cache: { type: 'string', format: 'duration' }, onError: { enum: ['unverified', 'skip', 'fail'] },
+          okExitCodes: { type: 'array', items: { type: 'integer' }, description: 'cli: exit codes that count as success (default [0]).' },
+          parseOnError: { type: 'boolean', description: 'cli: another exit code with JSON on stdout still yields data (eslint -f json exits 1).' },
           schema: {}, exposes: strArr,
         },
       },
@@ -302,12 +329,18 @@ function semanticChecks(raw: Record<string, unknown>, out: Diagnostic[]): void {
   sources.forEach((src, i) => {
     if (!isObj(src)) return
     const where = `$.itemSources[${i}] (${String(src.kind)})`
-    if (src.kind === 'markdown-dir' && typeof src.dir !== 'string') out.push(diag('G313', `${where}: потрібне поле dir`))
+    if ((src.kind === 'markdown-dir' || src.kind === 'prompt-dir') && typeof src.dir !== 'string') out.push(diag('G313', `${where}: потрібне поле dir`))
+    if (src.kind === 'prompt-dir' && src.as !== undefined && src.as !== 'section') out.push(diag('G313', `${where}: prompt-dir дає лише секції (as: "section")`))
     if (src.kind === 'provider') {
       if (typeof src.name !== 'string') out.push(diag('G313', `${where}: потрібне поле name`))
       else if (!providerNames.has(src.name)) out.push(diag('G313', `${where}: провайдер "${src.name}" не оголошено в providers`))
     }
   })
+  // `okExitCodes` / `parseOnError` only mean something for `cli` providers (core `providerResultOk`).
+  for (const [name, p] of Object.entries(isObj(raw.providers) ? raw.providers : {})) {
+    if (!isObj(p) || p.kind === 'cli') continue
+    for (const k of ['okExitCodes', 'parseOnError']) if (k in p) out.push(diag('G302', `$.providers.${name}.${k}: діє лише для kind "cli", ігнорується`))
+  }
   const esc = raw.escalation
   if (isObj(esc) && Array.isArray(esc.order)) {
     for (const t of esc.order) if (typeof t === 'string' && !tierNames.has(t)) out.push(diag('G305', `$.escalation.order: tier "${t}" не оголошено в tiers`))

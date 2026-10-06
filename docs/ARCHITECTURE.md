@@ -35,6 +35,36 @@ shared/*, *.json, *.md ──────┘  (Node, esbuild,           ├─ c
   що компілюється в канонічні вузли; старі записи живуть до 1.0 з `G180`.
 - **Пропси `Section`:** `id`, `scope` (`static`/`profile`/`volatile`), `when`, `budget`, `after`, `tier`.
 
+#### Канонічні вузли (Р5)
+
+Обидва компілятори (Markdown — `mddsl.ts`, TSX — `compilePrompt` у `packages/jsx/src/compile.ts`) пропускають
+дерево через `packages/core/src/canonical.ts canonicalNodes`, тож у `.compiled` потрапляють лише канонічні вузли.
+Рендер і далі виконує старий JSON (`.compiled` до цієї зміни) без змін.
+
+| Запис | Канонічна форма | `G180` |
+| --- | --- | --- |
+| `<Lazy name path>` / `@lazy` | `include` з `mode: "lazy"` | так |
+| `store=` на `Run` / `Call` (`@run … store=k`, `@call … store=k`) | вузол без `store`, за ним `{ t: "store", name: <as>, key: <k> }` (`@store x to=k`, `<Store name="x" to="k" />`) | так |
+| `tiers[*].preload` | автоматично згенерована секція `preload` (`scope: profile`): рядок-заголовок і `{ t: "include", source: "skill", mode: "inline" }` на кожен skill (`assemble.ts preloadPrompt`, опція `assemblePrompts(…, { preload })`) | ні |
+| `@let x = scripts.f(args)` на верхньому рівні секції чи тіла skill | `{ t: "call", fn: "scripts.f", args, as: "x" }` | ні |
+
+Вузол `store` несе метадані значення, яке зберігає: якщо змінну востаннє задав `run` чи `call`, `data.<key>`
+отримує його `fetchedAt` (час результату, зокрема з кешу) і `cache` (TTL `run`/`call`), тож `stale` і `| ago`
+працюють як раніше. Після `@let`/`@set` тієї ж змінної метаданих немає: `fetchedAt` — час рендера. Поки `run` чи
+`call` у цьому проході ще без результату, `store` нічого не пише.
+
+**`scripts.<name>()` — окрема канонічна форма «run з файлу».** Р5 називає провайдер `scripts` цукром над
+`Use`+`Call`. Семантика інша, ніж у `Call` функції модуля: виконується *увесь* скрипт
+`<prompt dir>/scripts/<name>.*` (інтерпретатор за розширенням чи shebang, `core/shims.ts scriptLang`), контекст і
+аргументи йдуть на stdin (`{ ctx, args }`, kwargs — останнім об'єктом), результат — stdout (JSON або текст), кеш
+— `runCacheDefault`. Функції всередині скрипта ніхто не викликає, тому `use`-прив'язки для `scripts` немає. Хост
+розв'язує простір імен `scripts` сам (CLI `Providers.script`, mod `hooks/layers/host.ts`). Тому компілятор
+нормалізує лише інструкцію: `@let x = scripts.f(…)` стає вузлом `call`, тобто тим самим, чим `Call` без `use`
+(виклик провайдера в проході даних). `scripts.f()` усередині виразу (`{{ scripts.count() | len }}`, умова `@if`)
+лишається викликом провайдера у виразі. Вкладені `@let` (у `@if`/`@each`) не нормалізуються: `call` зв'язує
+змінну в кадрі секції, а `let` — у своєму блоці. `G180` тут немає, бо це не застарілий запис, а задокументований
+синтаксис (SPEC «Дані скриптів у промпті»).
+
 ### 1.2 AST
 
 - Тип — `packages/core/src/types.ts` (`Node`, `SectionNode`, `CompiledPrompt`), серіалізується в JSON.
@@ -69,6 +99,9 @@ shared/*, *.json, *.md ──────┘  (Node, esbuild,           ├─ c
   даних, не від таймінгу.
 - Бюджети: ліміт кроків на секцію (10 000, `G155`), усі `@run` на рендер — 2 с, `@run` кешується на 5 хв
   (`runCacheDefault`), `@call` — за хешем файлу модуля, ім'ям функції й аргументами (ключ `call:<module>:<fn>:<args>#<hash>`).
+- Секції з тек: `prompt.dir` і кожне джерело `itemSources` `{ kind: "prompt-dir", dir, as: "section" }`
+  (`assemble.ts promptSectionDirs`). CLI читає `*.md` кожної теки (`context.ts loadMarkdown`) і віддає їх
+  `assemblePrompts`; варіанти `<id>.<tier>.md` працюють між теками. `.prompt.tsx` збираються лише з `prompt.dir`.
 - `scope`: `static` → `profile` → `volatile`, `after` у межах scope. У mod-і всі секції — `scope: 'session'`
   `prompt.compose` (PROBE), DSL-scope лише впорядковує їх.
 - Статуси секцій `ok` / `fail` / `unverified`; недовірений репозиторій → заглушки `[run: python, unverified]`;
@@ -110,7 +143,13 @@ shared/*, *.json, *.md ──────┘  (Node, esbuild,           ├─ c
 - Повна мова — у провайдерах (`module`: TS у каталозі плагіна або `.claude/prompt/lib/*.ts`; `cli`; `file`; `mcp`)
   і на збірці. Повідомлення `G151–G155` мають одну підказку: «ця логіка має жити в провайдері».
 - Безпека: виконавці лише з білого списку бінарників у user-settings (репозиторій тільки звужує), дані — через
-  stdin, жодної мережі з DSL, текст `.mdc` і DSL ніколи не стає командою.
+  stdin, жодної мережі з DSL, текст `.mdc` і DSL ніколи не стає командою. Одне рішення для всіх, хто запускає
+  команди з конфігурації: `core/config.ts commandAllowed(argv, whitelist)` (бінарник у білому списку) і
+  `commandGateDecision({ trusted, whitelist, scriptsAllowed }, argv)` для командних гейтів (`gates[].run`):
+  недовірений репозиторій, вимкнені скрипти чи бінарник поза списком — гейт пропускається з причиною, не блокує.
+- `cli`-провайдери: успіх — код виходу з `okExitCodes` (за замовчуванням `[0]`); з `parseOnError: true` інший код
+  з валідним JSON на stdout теж дає дані (`eslint -f json` виходить з 1, коли знайшов помилки). Рішення —
+  `core/providers.ts providerResultOk`, спільне для CLI і mod.
 
 ### 1.9 Prompt health (спільне для 1.4–1.8)
 
@@ -118,7 +157,9 @@ shared/*, *.json, *.md ──────┘  (Node, esbuild,           ├─ c
 `H001` розмір, `H002` стабільна частка (з хешів секцій або з реального `usage.cache_read_input_tokens`), `H003`
 дрейф, `H004`/`H005` час (з найдовшими `@run`/провайдерами й cache hit rate), `H006` вік даних, `H007` unverified,
 `H008` урізання static, `H009` листинг skills і skills без опису, `H010` deny, `H011` гейт блокує > 30 % спроб
-(лічильники `hooks/layers/gates.ts gateStats`, «все одно» після блоку — override), `H012` промпт > 40 % вхідних
+(лічильники `hooks/layers/gates.ts gateStats` у mod-і; CLI `health`/`report` рахують їх із записів журналу
+`kind: "gate-attempt"` — контракт у `core/journal.ts gateAttemptEntry` / `gateStatsFromJournal`: `outcome`
+`pass`/`block` — спроби, `override` («все одно» після блоку) — false positive, `skip` — не спроба), `H012` промпт > 40 % вхідних
 токенів, `H013` застарілий `.compiled`, `D001` assert. Інформаційні рядки «Сесія»: компакції, токени кешу,
 вартість, рішення gate.
 

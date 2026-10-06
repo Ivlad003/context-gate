@@ -27,11 +27,12 @@ export async function pushEntry(io: Io, rt: Runtime, entry: LogEntry): Promise<v
   }
 }
 
-/** File-only entry (`snapshot`): too large for the state ring; dropped without `log.file`. */
-export async function pushFileEntry(io: Io, rt: Runtime, entry: LogEntry): Promise<void> {
+/** File-only entry (`snapshot`, `gate-attempt`): too large or too frequent for the state ring; dropped without
+ *  `log.file`. `buffered` waits for the next flush (every FLUSH_EVERY entries, turn.complete, session.end). */
+export async function pushFileEntry(io: Io, rt: Runtime, entry: LogEntry, opts: { buffered?: boolean } = {}): Promise<void> {
   if (!rt.cfg?.log?.file) return
   rt.journalBuffer.push(toJsonl({ ...entry, event: entry.kind ?? 'decision' }))
-  await flushJournal(io, rt)
+  if (!opts.buffered || rt.journalBuffer.length >= FLUSH_EVERY) await flushJournal(io, rt)
 }
 
 /** No append API: keep the file's text in memory and write it whole. */

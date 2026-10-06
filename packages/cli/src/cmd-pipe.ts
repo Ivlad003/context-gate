@@ -8,7 +8,7 @@ import { observeCounts, runPipeStage, runPipeline, sinceMs, type PipeHost, type 
 import { parseGateCommand, PIPE_STAGES, type PipeStage } from '../../core/src/gatecmd.ts'
 import { fromJsonl } from '../../core/src/journal.ts'
 import { renderPrompt } from '../../core/src/render.ts'
-import { buildContext, collectItems, decide, loadRepo } from './context.ts'
+import { buildContext, collectRepoItems, decide, loadRepo } from './context.ts'
 import { readText } from './util.ts'
 
 export { observeCounts, sinceMs }
@@ -28,7 +28,8 @@ export function cliPipeHost(env: StageEnv): PipeHost {
     config: repo.config,
     now: env.now ?? Date.now(),
     deliverNeedsDryRun: true,
-    collect: () => collectItems(repo),
+    // Async: `provider` rule sources resolve when the repo is trusted, else they stay `unverified` items.
+    collect: async () => (await collectRepoItems(repo, { ...(env.trustRepo ? { trustRepo: true } : {}) })).items,
     decide: (items, f) => decide(repo.config, items, { ...(f.profile ? { profile: f.profile } : {}), ...(f.model ? { model: f.model } : {}), ...(f.tier ? { tier: f.tier } : {}), ...(f.branch ? { branch: f.branch } : {}), paths: f.paths }).items,
     signals: async (a) => {
       const ctx = await buildContext({ root: env.root, trustRepo: env.trustRepo, dryScripts: true, providerNames: new Set() })

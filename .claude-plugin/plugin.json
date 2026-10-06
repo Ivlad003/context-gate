@@ -38,7 +38,7 @@
     "allowScripts": {
       "type": "boolean",
       "title": "Allow scripts",
-      "description": "Allow Run/Call executors and cli providers from trusted repositories",
+      "description": "Allow Run/Call executors, cli providers and command gates from trusted repositories in non-interactive runs (claude -p); interactive sessions allow them once the repo is trusted",
       "default": false
     },
     "brief": {

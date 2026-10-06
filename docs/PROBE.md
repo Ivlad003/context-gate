@@ -260,3 +260,48 @@ Run `claude --plugin-dir /path/to/context-gate --debug` with a probe build of `h
 6. `prompt.context` in subagents, and `e.instructionFiles` when another plugin rewrote `claudeMd`.
 7. `$.model.complete({ model: 'haiku' })`: latency and cost per classification, from `usage`.
 8. `prompt.compose` under `-p` (`traits` includes `print`) and under the `sdk-preset`.
+
+## LIVE results (2026-10-06, Claude Code 2.1.291, `claude -p`)
+
+Non-interactive runs only: `scripts/e2e.sh` on temp copies of `examples/reference` and `examples/basic` (model
+`haiku`, context-gate plus the probe plugin, one turn each) and `probe/run-print.sh` on a temp copy of
+`examples/basic` (default model, probe only). `scripts/e2e.sh` plants a random code word in each delivery path and
+passes only when the model quotes it without having read `.cursor/` or `.claude/` (checked on the stream-json tool
+uses).
+
+### context-gate delivery: works
+
+| Path | Hook | Result |
+| --- | --- | --- |
+| Always rules (`alwaysApply: true`) | `prompt.context` (`instructionFiles`) | works, both repos (2 rules in reference, 1 in basic); journal `rule-delivered via prompt.context` |
+| Auto Attached rule after `Read` of a matching file | `tool.call` `context` | works (`api-conventions` for `apps/api/src/*.ts`; `typescript` with a slash-less `*.ts` glob); journal `via tool.call` with the path |
+| Manual rule by `@<id>` in the prompt | `prompt.submit` `context` | works (`@security-review`, `@release`); journal `via @mention` |
+| Markdown DSL section (`.claude/prompt/*.md`) | `prompt.compose` | works without trust (Markdown needs no build) |
+| Compiled DSL section (`.compiled/*.json`) | `prompt.compose` | works without trust (the committed compiled JSON is read; no build runs under `-p` without trust) |
+| `[gate:frontend]` prefix | `prompt.submit` rewrite | stripped: the model reports its message does not start with `[`; the journal records `trigger: manual`, `profile: frontend`, and the following `snapshot` carries `profile: frontend` |
+
+Under `-p` the trust question rejects (`$.ui.ask`), so trust stays `unknown`: no TSX build, `cli` providers render
+`unverified` (health `H007`), and a `.prompt.tsx` without a compiled JSON shows `H013`. That matches Р2.
+
+### Open points from the list above
+
+1. `skill_listing`: **format confirmed** (`- <name>: <description>` lines under one header, ~9–20k chars with user
+   and plugin skills). Whether the rewrite reaches the model was not asked in these runs.
+2. `tool.describe` for `mcp__*`: **works**. It fires for deferred MCP tools (input `isDeferred: true`) and for our own
+   registered tools (`mcp__context-gate__get_api`, a lazy include), and `isDeferred: true` holds in the result.
+3. `skill.prompt` and `` !`…` ``: not exercised (needs `/name args` or a Skill call; interactive step 3).
+4. `$.state` after `/clear`: not testable under `-p`. Seen instead: **`classic.SessionStart {source: 'startup'}` fires
+   before `session.start`** (probe seq 1 and 3), so `classicSessionStart` must not rely on `session.start` having run.
+   It calls `ensureSession` first, which covers it.
+5. `classic.FileChanged` with a directory in `watchPaths`: **works, recursively**. The mod lists `<root>/.claude/prompt`
+   as a directory; a FileChanged arrived for `<root>/.claude/prompt/.trace/last.json` (two levels down, written by the
+   mod's own `prompt.compose`), which no file entry named. The mod's own writes under a watched directory therefore
+   come back as FileChanged: `dsl.ts classifyChange` ignores `.trace/`, `.compiled/` only marks the cache dirty, and
+   `gate.index.json` / `gate.log.jsonl` are not under a watched directory.
+6. `prompt.context`: under `-p` the input has `blocks` `claudeMd, userEmail, currentDate` and **`instructionFiles`
+   defined** (an empty array without project CLAUDE.md files), so the instruction-file path is taken. It fired once per
+   run; subagents were not exercised.
+7. `$.model.complete` cost: not exercised (`/probe classify` is interactive).
+8. `prompt.compose` under `-p`: **fires**, with `traits` `print, skills` (haiku) and `lean, print, skills` (the
+   default Opus model). No `sdk-preset`. The mod skips only `bare` (and serves the last sections for `analysis`), so
+   `lean` renders normally.

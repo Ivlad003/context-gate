@@ -5,7 +5,7 @@ This is the brief for implementing the `claude-code-mod` adapter. Read `docs/PRO
 ## Ground rules
 
 - The runtime has no Node and no `import()`. Imports are `import type … from 'claude-code'`, the runtime helpers `atom / read / update` from `'claude-code'`, and relative `.ts` files, `../packages/core/src/*.ts` included.
-- Session state lives in `$.state` under the `'context-gate'` contract (`types/index.d.ts`), keys `gate, gateState, log, seen, manual, health, budgetsFired, trust, recentPaths, model, tier, agentTiers, ctxPercent, brief, config`. `plugin` and `key` must be **literals**: declare one `atom({ plugin: 'context-gate', key: '…' } as const, initial)` per key in `hooks/state.ts` and never build refs dynamically. Write with `update($, atom, fn)`. Before writing, strip `undefined` fields with `json(x) = JSON.parse(JSON.stringify(x))`, because `$.state.set` takes JSON only. **Never write from a `ui.render` hook.**
+- Session state lives in `$.state` under the `'context-gate'` contract (`types/index.d.ts`), keys `gate, gateState, log, seen, manual, health, budgetsFired, trust, recentPaths, model, tier, agentTiers, ctxPercent, brief, config, sectionView` (16; see "As built: state keys"). `plugin` and `key` must be **literals**: declare one `atom({ plugin: 'context-gate', key: '…' } as const, initial)` per key in `hooks/state.ts` and never build refs dynamically. Write with `update($, atom, fn)`. Before writing, strip `undefined` fields with `json(x) = JSON.parse(JSON.stringify(x))`, because `$.state.set` takes JSON only. **Never write from a `ui.render` hook.**
 - Cross-session state goes in `$.store`: `trust:<repoKey>` → `{ decision, commandsHash, at }`.
 - Module caches (closure variables) are disposable, since a hot reload drops them: the parsed config, the parsed `.mdc` rules, the item list, the compiled prompts, and `skillArgs: Map<skill, string>`. Every cache rebuilds lazily through `ensureConfig($)` / `ensureRules($)` / `ensureItems($)`, which `session.start` calls and every consumer guards with.
 - Paths: `root = await $.session.root()`. `$.fs.*` resolves relative paths against **cwd**, so always pass `join(root, rel)`. The core works on repo-relative POSIX paths via `glob.ts normalizePath(path, root, { windows })`, where `windows = detectWindows(root, await $.env.get('OS'))`.
@@ -14,19 +14,32 @@ This is the brief for implementing the `claude-code-mod` adapter. Read `docs/PRO
 
 ## Files
 
+The first design split the hooks by layer (`core.ts`, `rules.ts`, `gate.ts`, `prompt.ts`). The validator rules in "As
+built: what `claude plugin validate --strict` imposes" moved every hook into `register.ts`; the layers are plain
+functions over the `port`:
+
 ```
 hooks/
-  register.ts      // export const register: Register = (on, options) => { installCore; installRules; installGate; installPrompt; installUi }
-  state.ts         // atoms for every PluginState key + json() + small typed getters
-  ctx.ts           // module caches: ensureConfig / ensureRules / ensureItems / repo paths / options
-  host.ts          // makeRenderHost($, trusted): RenderHost over $.fs / $.process / $.mcp / $.state
-  trust.ts         // ensureTrust($, options): Р2 trust-on-first-use
-  core.ts          // session.start, classic.SessionStart, session.end, session.compact, commands
-  rules.ts         // layer 1: prompt.context, tool.call(file tools), prompt.submit(@file/@rule), /rule
-  gate.ts          // layer 2: prompt.submit signals, turn.step, attachment, describe, mcp deny, agent.offer, skill.prompt, budgets
-  prompt.ts        // layer 3: prompt.compose, build on start, FileChanged
-  ui.ts            // ui.render AbovePrompt + Pane 'gate-why'
-  *.test.ts        // claude-code/testing, run via scripts/plugin-test.sh
+  register.ts        // every on(...), the 16 state atoms, port($): Io, pass()
+  ctx.ts             // Io (the port type), Runtime (module caches), readOptions, join/insideRoot/hash/now
+  state.ts           // INITIAL, json(), isApplied(), hasManual(), pushRing()
+  layers/
+    config.ts        // gate.json load, ensureSession (lazy bootstrap), env whitelist
+    session.ts       // session.start, classic.SessionStart (watchPaths, /clear, compact), session.end, compact
+    cursor-rules.ts  // layer 1: rule sources, prompt.context, tool.call context, @mentions, /rule, /gate rules, root move
+    skill-gate.ts    // layer 2: items, signals, classifier/brief, recompute, listing, MCP describe/deny, agents
+    gates.ts         // gates[]: read-before-write, write/commit/turn/prompt command gates, provider gates, H011 stats
+    budgets.ts       // session.measure / turn.complete thresholds, onExceed
+    dsl.ts           // layer 3: loadPrompts, build, prompt.compose, prompt skills, script/lazy tools, health
+    host.ts          // RenderHost over the port: files, executors + shims, providers, MCP, cache
+    trust.ts         // Р2 trust-on-first-use
+    journal.ts       // 200-entry state ring + .claude/gate.log.jsonl
+    commands.ts      // /gate dispatch, pipes (modPipeHost), section view
+    editor.ts        // /gate edit: the browser editor via $.process.spawn
+    index.ts         // .claude/gate.index.json writer
+    ui.ts            // band, status line, panes gate-why / gate-health / gate-section
+  testkit.ts         // in-memory repo for claude-code/testing + the shared `test` wrapper
+  *.test.ts          // run by scripts/plugin-test.sh (npm run test:mod)
 ```
 
 `options` (userConfig) is `{ profile: string, mode: 'shadow'|'auto', trustBuild: 'ask'|'always'|'never', allowScripts: boolean, brief: boolean }`, read from `register`'s second argument. The engine re-runs `register` when the user changes these settings.
@@ -263,6 +276,28 @@ The mod and `context-gate` render the same prompts the same way because both cal
 - **Binary whitelist**: core `binaryWhitelist(user, repo)`: `~/.claude/context-gate.json` `allowBinaries` (default `DEFAULT_BINARIES`) narrowed by gate.json `allowBinaries`.
 - **Diagnostic codes**: every code any package emits is in `packages/core/src/codes.ts` (`test/codes.test.ts` scans the sources).
 
+- **Shims and hashing**: core `shims.ts` (executors, `@call` language shims, `scripts.*` argv, `parseShimOutput`,
+  `usedFunctions` / `missingExports` for G158) and core `sha256.ts` (`repoCacheName`, the per-repo CLI cache folder
+  the mod falls back to when the repo has no `.compiled/`). `hooks/layers/host.ts` and `dsl.ts` import them; the CLI
+  host does the same, so a shim call is the same argv and stdin on both hosts.
+- **Providers**: core `providers.ts`: `providerResultOk(cfg, exitCode, stdout)` decides whether a `cli` provider run
+  produced data (`okExitCodes`, default `[0]`; `parseOnError: true` accepts another exit code with JSON on stdout, the
+  `eslint -f json` case), `fileProviderValue` parses `.json` files with a dotted `pick`, `pickFields` applies `pick`
+  to `cli` and `module` values. The mod uses them for providers in the render scope, `provider.fn(...)` calls and
+  `gates[].provider` (`hooks/layers/host.ts providerData`). A failure applies `onError` (default: an `unverified` value,
+  which never blocks a gate). Markdown file providers stay plain text in the mod; the CLI parses them into
+  `{ meta, body, headings }`.
+- **Preload** (Р5): core `assemblePrompts(…, { preload })` generates the canonical `preload` section (`scope:
+  profile`, a heading plus `{ t: 'include', source: 'skill', mode: 'inline' }` per skill, bodies through
+  `RenderHost.itemBody`) from `gate.skills.preload`. The mod passes the applied gate's list (`dsl.ts preloadOf`: none
+  in shadow mode or with the gate off) to `sectionsFor` in `prompt.compose`, `/gate render`, pipes and lazy
+  `prompt://` reads. A repo section with id `preload` replaces it.
+- **Prompt section dirs**: core `promptSectionDirs(cfg)` = `prompt.dir` plus every `itemSources` `{ kind:
+  "prompt-dir", dir, as: "section" }` (an `as` other than `section` is not a section source), and
+  `isMarkdownSectionFile(name)` (`*.md`, not `README.md`). The mod lists each dir non-recursively in `loadPrompts`,
+  adds the dirs and files to the cache key and `watchPaths`, and `classic.FileChanged` on such a file marks the
+  prompts dirty. TSX entries are built from `prompt.dir` only.
+
 ### Shadow mode
 
 `decideGate` only decides; applying is the adapter's call. With `classify.mode: "shadow"` (or `/gate shadow`) and no manual signal, `recompute` stores the decision with `gate.shadow = true`, drops `profile` and keeps the proposal in `gate.proposed`. Nothing is filtered: the skill listing, tool descriptions, MCP calls and agents pass through, and Always/Auto rules are delivered as without a gate. The band and `/gate` show `gate (frontend?) · … · skills 30/30 · mcp 6/6` (core `statusLine` counts everything as on in shadow), and `/gate` labels the off lists «пропозиція, не застосовано». `/gate apply` or a manual `/gate <profile>` applies. The hooks adapter does the same (`isApplied` false → deny decisions are only logged).
@@ -282,6 +317,103 @@ With `log.file`, each `prompt.compose` whose render changed appends one `snapsho
 
 The mod runs `node <plugin>/dist/cli.js build --only <repo-relative .prompt.tsx>`; `--only` also takes a prompt id.
 
+## As built: `/gate`, panes and state
+
+### `/gate` subcommands
+
+`gatecmd.ts parseGateCommand` parses; `hooks/layers/commands.ts gateCommand` dispatches. On top of the list in
+"Hooks, one by one":
+
+| Subcommand | What it does |
+| --- | --- |
+| `/gate` | Status line, mode and trust, trigger and groups, the on/off lists, and «звідки»: one line per source (`manual +backend`, `when:paths`, `tier`, `classify 0.82`) from core `pipeline.ts itemProvenance` |
+| `/gate rules` | One row per rule: id, type, globs (`!` excludes too), source when not `.cursor/rules`, «вимкнено профілем», and «доставлено: main — так, agent-1 — ні» per agent seen (`cursor-rules.ts rulesReport`). Rule diagnostics at the end |
+| `/gate why [off]` | Opens pane `gate-why` and prints the journal (`formatWhy`, 50 rows) plus attempts and tokens per tier (core `report.ts tierCosts`, SPEC «Ескалація») |
+| `/gate health` | Opens pane `gate-health`; prints `formatHealth(rt.lastHealth)`, the `prompt ⚠ build` error when the last build failed, and the `turn.step` prompt-cache share |
+| `/gate render prompt://<id>` | Renders one section (or a prompt skill with empty args) as `prompt.compose` would, stores it in `sectionView` and opens pane `gate-section` |
+| `/gate edit <id>` | Starts the browser editor (`packages/editor-web`, `dist/editor-web.js` or the TS source) with `$.process.spawn`, one per id; the URL goes into `sectionView.editorUrl`. «Редактор не знайдено» when neither is in the plugin folder |
+| `/gate <stage> \| <stage> …` | The pipe grammar (`collect`, `where`, `decide`, `render`, `tokens`, `off`, …) run by core `pipeline.ts runPipeline` over `modPipeHost`: the session's items with the decision in force, live signals, sections rendered by the session's host, and the journal |
+| `/gate trust revoke` | Deletes the stored decision; scripts, builds and command gates stop until the next answer |
+
+### Panes
+
+| id | Opened by | Draws |
+| --- | --- | --- |
+| `gate-why` | `/gate why` | Journal table (turn, trigger, profile, changes, reason), `health.sections`, disabled layers; buttons «Застосувати запропонований профіль» (shadow) and «Скинути до auto» |
+| `gate-health` | `/gate health` | The health table with «що зробити» per metric, the build error, a «перерендерити» button (a compose render, which writes fresh `health`; the pane subscribes to it) |
+| `gate-section` | `/gate render`, `/gate edit` | `sectionView`: id, tier, scope, tokens, included/reason, status, diagnostics, the text; buttons «редагувати» (`/gate edit`) and «перерендерити» |
+
+Button handlers write state with `update()` (allowed outside a render); the render hooks only read.
+
+### State keys
+
+The 16 keys of the `'context-gate'` contract (`types/index.d.ts`), one atom each in `register.ts`:
+
+| Key | Holds | Reset on `/clear` |
+| --- | --- | --- |
+| `gate` | the stored `decideGate` result (`shadow`, `proposed`) | kept |
+| `gateState` | turn counter, hysteresis, `profileSource` | `{ turn: 0 }` |
+| `log` | the 200-entry journal ring | kept (a `clear` entry is pushed) |
+| `seen` | delivered rules, `<agent>:<ruleId>` | `[]` |
+| `manual` | `/gate` profile, `+/-` groups, `off`, `mode`, `recheck` | kept |
+| `health` | the last render's hashes, stable share, per-section chars/tokens/status | `null` |
+| `budgetsFired` | thresholds crossed this conversation | `[]` |
+| `trust` | `{ decision, key, commandsHash }` | kept |
+| `recentPaths` | the last 50 touched or mentioned paths | `[]` |
+| `model`, `tier` | the main loop's model and its tier | kept |
+| `agentTiers` | subagent id → tier | `{}` |
+| `ctxPercent` | the last context percent | kept |
+| `brief` | the task brief | `null` |
+| `config` | `{ ok, disabled, diagnostics }` for the band and `/gate why` | kept |
+| `sectionView` | what pane `gate-section` shows (`ContextGateSectionView`, plus `editorUrl` / `editorError`) | kept |
+
+Module-only (dropped by a hot reload, not state): rules/items/prompt caches, `skillArgs`, the static-section cache,
+`lastRender` / `lastHealth`, `stepUsage`, read/changed paths, escalation counters, and the gate statistics below.
+
+### Gate statistics (H011)
+
+`hooks/layers/gates.ts` counts per gate name: `attempts`, `blocks`, total `ms` and `overrides` (a prompt that
+insists after a block, «все одно» / «anyway», within 10 minutes). Skipped gates (untrusted repo, binary off the
+whitelist, no `allowScripts` under `-p`, provider unavailable) are not counted. `gateStats(rt)` feeds `computeHealth(…, { gates })`, which lists one metric per gate and raises H011
+when the worst gate blocks more than `health.H011` % (default 30) of its attempts. The counters live beside the
+`Runtime` (a `WeakMap`) and reset with the conversation: `resetConversation` calls `resetGateStats` on `session.end
+{reason: 'clear'}` and `classic.SessionStart {source: 'clear'}`. Failed gates are journaled as `gate-failed`.
+
+With `log.file`, every evaluation is also a `gate-attempt` entry in `.claude/gate.log.jsonl` (core `journal.ts`
+contract, `gateAttemptEntry`): `data: { gate, on, outcome: pass | block | override | skip, ms, sessionId, skipped? }`.
+These go to the file only (buffered, flushed with the rest of the journal), so the 200-entry state ring and `/gate
+why` keep the decisions. CLI `health` / `report` rebuild the same counters with `gateStatsFromJournal(entries, {
+sessionId })`.
+
+Whether a command gate (`gates[].run`) may start is core `config.ts commandGateDecision`: a trusted repo, scripts
+allowed (interactive, or userConfig `allowScripts` under `-p`) and the binary (basename of `argv[0]`) on the effective
+whitelist (`commandAllowed` over `binaryWhitelist(user, repo)`). A refused gate is skipped and passes; it never
+blocks, because the user did not consent to running it.
+
+### Session root moves (edge case 6)
+
+`cursor-rules.ts checkRoot` compares `$.session.root()` with the cached root on every `ensureRules` (before the 2 s
+re-list throttle) and at the top of the file-tool and `prompt.submit` hooks, before a path is made repo-relative.
+A new root drops the rule, provider-rule, item, prompt and static-section caches and reloads that root's
+`gate.json`. `seen` is kept: a rule id already delivered in this conversation is not delivered again.
+
+### Unverified probe points (G-62)
+
+`hooks/layers/probe.ts` holds `PROBE_POINTS` (the docs/PROBE.md LIVE points, `verified` / `unverified`) and
+`PROBE_REQUIREMENTS` (feature → `requires: ['probe:<point>']`, plus when the feature is in use). `/gate health` and
+`/gate why` list the in-use features with an unverified point under «Не перевірено наживо». A probe session that
+settles a point flips it in `PROBE_POINTS`; `hooks/probe.test.ts` checks every requirement names a known point.
+
+### Secrets in debug output (G-03)
+
+The gate.json `env` whitelist is read from the settings `env` block (`config.ts ensureEnv`, PROBE #9). `envMask(rt)`
+(values of 4+ chars) is passed to the render as `secrets` (trace and diagnostics), and masks the `$.ui.log` debug
+lines, `.claude/gate.debug.log`, `.trace/last.json` (whose scope carries `env.*`) and journal snapshots. The rendered
+section text the model gets is not masked.
+
+Health (`dsl.ts recordHealth`) also gets `compactions` (per conversation), `decision` (profile, classifier confidence,
+count of manual `/gate` changes) and `skillsNoDescription` (from the captured skill listing).
+
 ## Tests (`hooks/*.test.ts`, `npm run test:mod`)
 
 The test body is `test(name, async ($, on) => …)`. `$` calls take the whole event input, e.g. `$.command.run({ command, args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })`. The test's own `on` hooks sit beneath the plugin and stand for the engine. Any `$` op the plugin calls during the test must be answered there, with an op result shaped `{ value }`:
@@ -299,5 +431,11 @@ Cover these:
 - the `skill_listing` rewrite (`$.prompt.attachment({ type: 'skill_listing', text: FIXTURE, origin: { kind: 'engine' } })`)
 - `/gate` subcommands
 - the band on `terminal` and `desktop` through `$.ui.mount`
+
+Test files import `test` from `hooks/testkit.ts`, not from `claude-code/testing`: the wrapper gives every test at
+least `TEST_TIMEOUT_MS` (60 s). `claude plugin test` runs every file in its own child at once and each test pays a
+fresh plugin load (the core is compiled in), so the kit's 5 s default fails under load; the kit has no global timeout
+option. `mountRepo` returns the repo with a mutable `root` (what `session.root` / `session.cwd` answer); files outside
+`ROOT` are keyed by their absolute path, so a test can move the session into another tree.
 
 `scripts/plugin-test.sh` stages `.claude-plugin`, `hooks`, `types` and `packages/core/src` into a temp folder. At the repo root, `claude plugin test` would also load the `node:test` files in `test/` and fail them.

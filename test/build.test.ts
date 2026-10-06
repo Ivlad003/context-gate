@@ -323,3 +323,30 @@ test('renderSkillMd options and validatePrompt on a skill body', () => {
   const body = [{ t: 'let', name: 'x', value: '1' }, { t: 'let', name: 'x', value: '2' }] as CompiledPrompt['sections'][0]['children']
   assert.deepEqual(validatePrompt({ sections: [], skill: { ...cp.skill!, body } }).map((d) => d.code), ['G153'])
 })
+
+test('checkStale: prompt.packages versions recorded in prompt.lock.json (npm:<name> stale / missing; only rebuilds it)', async () => {
+  const skill = "import { Prompt } from '@context-gate/jsx'\nexport default <Prompt as=\"skill\" name=\"hello\" description=\"Hi\">Привіт.</Prompt>\n"
+  const manifest = (version: string) => JSON.stringify({ name: '@acme/listed', version, 'context-gate': { skills: ['skills/hello.prompt.tsx'] } })
+  const root = miniRepo({
+    'node_modules/@acme/listed/package.json': manifest('0.1.0'),
+    'node_modules/@acme/listed/skills/hello.prompt.tsx': skill,
+    '.claude/gate.json': JSON.stringify({ prompt: { packages: ['@acme/listed'] } }),
+  })
+  assert.deepEqual(checkStale({ root }), { stale: [], missing: ['npm:@acme/listed'] })
+  await buildPrompts({ root })
+  const lock = readLock(root)!
+  assert.equal(lock.packages!['@acme/listed']!.version, '0.1.0')
+  assert.match(lock.packages!['@acme/listed']!.hash, /^[0-9a-f]{64}$/)
+  assert.deepEqual(checkStale({ root }), { stale: [], missing: [] })
+  writeFileSync(join(root, 'node_modules/@acme/listed/package.json'), manifest('0.2.0'))
+  assert.deepEqual(checkStale({ root }), { stale: ['npm:@acme/listed'], missing: [] })
+  // `only: ['npm:<name>']` rebuilds just that package and refreshes its lock entry.
+  const r = await buildPrompts({ root, only: ['npm:@acme/listed'] })
+  assert.deepEqual(r.compiled.map((c) => c.id), ['hello'])
+  assert.equal(readLock(root)!.packages!['@acme/listed']!.version, '0.2.0')
+  assert.match(readFileSync(join(root, '.claude/skills/hello/SKILL.md'), 'utf8'), /npm:@acme\/listed@0\.2\.0/)
+  assert.deepEqual(checkStale({ root }), { stale: [], missing: [] })
+  // An unrelated `only` keeps the package entries.
+  await buildPrompts({ root, only: ['nothing'] })
+  assert.ok(readLock(root)!.packages!['@acme/listed'])
+})

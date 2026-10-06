@@ -3,7 +3,7 @@
 **Status: experimental.** SPEC "Єдина модель", harness adapters table: `pi`, `opencode` — `before_agent_start` →
 `systemPromptOptions.skills`; `permissions.skill` and `prompt({ skills })` in V2. SPEC-COVERAGE G-52.
 
-Both adapters read the same `.claude/gate.json` and `.cursor/rules/*.mdc` as the mod, the hooks adapter and shiftwork.
+Both adapters read the same `.claude/gate.json` and rule sources as the mod, the hooks adapter and shiftwork.
 They decide with the same core `decideGate` and journal to the same `.claude/gate.log.jsonl`. Each entry carries
 `data.adapter: "pi"` or `"opencode"`.
 
@@ -12,7 +12,7 @@ They decide with the same core `decideGate` and journal to the same `.claude/gat
 | file | role |
 | --- | --- |
 | `packages/adapters/common/session.ts` | Pure and harness-neutral. Holds the session state, the turn decision, shadow vs applied, the system-prompt parts (status, Always rules, tier preload), skill filtering, the MCP and skill deny texts, Auto Attached rules for a path, and `[gate:x]` and `@file` parsing. Imports only `packages/core/src`. |
-| `packages/adapters/common/load.ts` | Node I/O: `gate.json`, root `.cursor/rules`, skill dirs, the git branch, and the journal append. |
+| `packages/adapters/common/load.ts` | Node I/O: `gate.json`, every rule source (see below), skill dirs, the git branch, and the journal append. |
 | `packages/adapters/pi/{types,plan,index}.ts` | `types.ts` holds local pi API types. `plan.ts` is pure event mapping. `index.ts` is the extension entry (`export default (pi) => …`). |
 | `packages/adapters/opencode/{types,plan,index}.ts` | `types.ts` holds local OpenCode V2 plugin types. `plan.ts` is pure hook mapping. `index.ts` exports the `{ id, setup }` plugin definition. |
 | `test/adapter-pi.test.ts`, `test/adapter-opencode.test.ts` | Tests against fake harness objects, on a temp repo (`test/adapter-fixture.ts`). |
@@ -37,6 +37,22 @@ Deny texts point to `[gate:<group>]` at the start of the prompt instead of `/gat
 command here. Env works as in the hooks adapter: `CONTEXT_GATE_PROFILE` (applied), `CONTEXT_GATE_MODE=auto|shadow`,
 `CONTEXT_GATE_OFF=1`, `CONTEXT_GATE_TICKET_TYPE`, `CONTEXT_GATE_MODEL`. So the `env` of shiftwork's `planForTicket`
 makes a pi or OpenCode shift decide like a `claude -p` shift.
+
+## Rule sources
+
+`loadRules` (`common/load.ts`) calls core `loadRuleSources` (`packages/core/src/mdc.ts`) over a Node file port, the
+same loader the mod's layer 1 mirrors:
+
+- `.cursor/rules/**/*.mdc` and every `itemSources` `{ kind: "cursor-mdc", dir }`;
+- nested `*/.cursor/rules` when `cursorRules.nested` or a `cursor-mdc` source has `nested: true` (breadth-first,
+  depth 6, 400 dirs, `node_modules` / `.git` / `dist` / … skipped), with globs and ids prefixed by the dir;
+- `{ kind: "markdown-dir", dir, frontmatter, as }` (`*.md` without `README.md`);
+- `{ kind: "provider", name, field | pick, template, as }` over a **`file` provider** (core `staticProviderValue`:
+  JSON with `pick`, or text). `cli`, `module` and `mcp` providers start processes or need the engine; these
+  adapters have no trust store, so such a source is skipped with an info diagnostic `G208`. Its rules reach the
+  model through the mod or the CLI (`context-gate sync`) instead.
+
+A later source never replaces a rule with the same id. `cursorRules.enabled: false` turns all of it off.
 
 ## Install
 
@@ -87,7 +103,9 @@ Points to verify before calling it supported:
 
 ## Gaps
 
-- Not implemented here: read-before-write and `strictWrite` (hooks adapter only), nested `.cursor/rules` (`cursorRules.nested`), `/gate` commands, and the `classify` provider.
+- Not implemented here: read-before-write and `strictWrite` (hooks adapter only), command gates (`gates[].run`),
+  `/gate` commands, and the `classify` provider. `provider` rule sources over `cli` / `module` / `mcp` providers are
+  skipped (`G208`, see «Rule sources»).
 - pi has no name-only skill listing, so `nameOnly` skills stay fully listed.
 - OpenCode: the first prompt of a session decides before any `context` hook has reported the model. It uses
   `CONTEXT_GATE_MODEL` or the default tier, so it journals a second `decision` once the model is known.

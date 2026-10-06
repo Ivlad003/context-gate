@@ -11,6 +11,7 @@ import { compileGlob, hasGlobChars } from '../../packages/core/src/glob.ts'
 import { exampleValue, selectExamples } from '../../packages/core/src/examples.ts'
 import { cursorMatch } from '../../packages/core/src/assemble.ts'
 import { parseDuration } from '../../packages/core/src/duration.ts'
+import { fileProviderValue, pickFields, providerResultOk } from '../../packages/core/src/providers.ts'
 import { binaryWhitelist } from '../../packages/core/src/config.ts'
 import { DEFAULT_EXECUTORS as CORE_EXECUTORS, executorFor, executorInvocation, executorsOf, parseShimOutput, scriptArgv, scriptFnName, scriptLang, scriptStdin, shimCommand, type ShimCall, type ShimResponse } from '../../packages/core/src/shims.ts'
 import { type Io, OWN_TOOL_PREFIX, type Runtime, debug, hash, insideRoot, join, now } from '../ctx.ts'
@@ -320,8 +321,9 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
         const argv = tpl ? fillPlaceholders(tpl, args, kwargs) : Array.isArray(fns) && fns.includes(fn) && p.command ? [...p.command, fn, ...args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))] : undefined
         if (!argv || !deps.trusted || !(await allowedBinary(io, rt, argv))) return null
         const r = await runArgv(io, rt, argv, { timeoutMs: 10_000 })
-        if (r.exitCode !== 0) throw new Error(`${req.path}: exit ${r.exitCode}`)
-        return parseOut(r.stdout)
+        const res = providerResultOk(p, r.exitCode, r.stdout) // okExitCodes / parseOnError (eslint -f json exits 1)
+        if (!res.ok) throw new Error(`${req.path}: ${res.error}`)
+        return res.value
       }
       if (p.kind === 'module') return moduleCall(ns, p, fn, args, kwargs)
       return null
@@ -348,29 +350,22 @@ export async function providerData(io: Io, rt: Runtime, host: RenderHostExt & { 
       if (p.kind === 'file' && p.path) {
         const t = await host.readFile(p.path)
         if (t === undefined) throw new Error(`немає файлу ${p.path}`)
-        let parsed: Value = t
-        if (/\.json$/i.test(p.path)) parsed = JSON.parse(t) as Value
-        if (p.pick && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          const src = parsed as Record<string, Value>
-          parsed = Object.fromEntries(p.pick.filter((k) => k in src).map((k) => [k, src[k]]))
-        }
-        v = parsed
+        const f = fileProviderValue(p.path, t, p.pick) // core: .json parsed + dotted `pick`, else the text
+        if ('error' in f) throw new Error(f.error)
+        v = 'value' in f ? f.value : t
       } else if (p.kind === 'cli' && p.command?.length) {
         if (!host.trusted || !(await allowedBinary(io, rt, p.command))) throw new Error('не довірено')
         const r = await runArgv(io, rt, p.command, { timeoutMs: 10_000 })
-        if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
-        v = parseOut(r.stdout)
+        const res = providerResultOk(p, r.exitCode, r.stdout)
+        if (!res.ok) throw new Error(res.error)
+        v = pickFields(res.value, p.pick)
       } else if (p.kind === 'module' && p.path) {
         // Repo module (`<prompt dir>/lib/*.ts`, gate.json `module`): its default export through the node shim.
         const shim = (host as Partial<ModHost>).shim
         if (!host.trusted || !shim) throw new Error('не довірено')
         const r = await shim(p.path, [{ fn: '__default__', args: [] }])
         if (r.errors[0]) throw new Error(r.errors[0])
-        v = r.results[0] ?? null
-        if (p.pick && v && typeof v === 'object' && !Array.isArray(v)) {
-          const src = v as Record<string, Value>
-          v = Object.fromEntries(p.pick.filter((k) => k in src).map((k) => [k, src[k]]))
-        }
+        v = pickFields(r.results[0] ?? null, p.pick)
       } else if (p.kind === 'mcp' && p.tool && host.mcp) {
         const m = /^mcp__(.+?)__(.+)$/.exec(p.tool)
         if (!m) throw new Error(`tool ${p.tool}`)

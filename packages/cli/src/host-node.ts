@@ -9,7 +9,8 @@ import type { ProviderCallRequest, RenderHostExt } from '../../core/src/render.t
 import { parseDuration } from '../../core/src/duration.ts'
 import { splitFrontmatter } from './build.ts'
 import { DEFAULT_EXECUTORS, executorFor, executorInvocation, executorsOf as coreExecutorsOf, parseShimOutput, shimCommand, type ShimCall, type ShimResponse } from '../../core/src/shims.ts'
-import { binaryName, binaryWhitelist, readUserSettings, type UserSettings } from './settings.ts'
+import { binaryWhitelist, readUserSettings, type UserSettings } from './settings.ts'
+import { commandAllowed } from '../../core/src/config.ts'
 import { posix, readJson, readText, runProcess, sha256, writeJson } from './util.ts'
 
 export { DEFAULT_EXECUTORS }
@@ -88,8 +89,9 @@ export class NodeHost implements RenderHostExt {
     return p ? readText(p) : undefined
   }
 
+  /** Core `commandAllowed`: the binary's basename on the effective whitelist (user ∩ repo narrowing). */
   allowed(bin: string): boolean {
-    return this.whitelist.has(binaryName(bin))
+    return commandAllowed([bin], this.whitelist)
   }
 
   // ───────────────────────── run ─────────────────────────
@@ -213,10 +215,24 @@ export class NodeHost implements RenderHostExt {
   }
 }
 
-/** Skill roots: repo `.claude/skills`, then `~/.claude/skills`. */
+let userSkillsOff = false
+
+/** User skills (`~/.claude/skills`) count unless `--no-user-skills` or `CONTEXT_GATE_NO_USER_SKILLS=1` (bench, CI). */
+export function userSkillsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return !userSkillsOff && env.CONTEXT_GATE_NO_USER_SKILLS !== '1'
+}
+
+/** Runs `fn` with user skills switched on or off (the CLI's `--no-user-skills`), restoring the previous state. */
+export async function withUserSkills<T>(on: boolean, fn: () => Promise<T>): Promise<T> {
+  const prev = userSkillsOff
+  userSkillsOff = !on || prev
+  try { return await fn() } finally { userSkillsOff = prev }
+}
+
+/** Skill roots: repo `.claude/skills`, then `~/.claude/skills` (unless user skills are off, see `userSkillsEnabled`). */
 export function skillDirs(root: string): string[] {
   const home = process.env.HOME
-  return [join(root, '.claude', 'skills'), ...(home ? [join(home, '.claude', 'skills')] : [])].filter((d) => existsSync(d))
+  return [join(root, '.claude', 'skills'), ...(home && userSkillsEnabled() ? [join(home, '.claude', 'skills')] : [])].filter((d) => existsSync(d))
 }
 
 export function listSkills(root: string): { name: string; description?: string; path: string; body: string; generated: boolean }[] {

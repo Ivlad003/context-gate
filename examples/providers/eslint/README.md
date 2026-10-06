@@ -2,7 +2,8 @@
 
 [`gate.json`](gate.json) declares two things:
 
-- an `eslint` **cli provider**: `eslint -f json .`, cached for 10 minutes, `onError: unverified`, with a `schema` for the
+- an `eslint` **cli provider**: `eslint -f json .`, cached for 10 minutes, `onError: unverified`, exit 1 accepted
+  (`okExitCodes`, `parseOnError`), with a `schema` for the
   ESLint JSON formatter output (an array of `{ filePath, errorCount, warningCount, messages: [{ ruleId, severity, message, line, column }] }`).
   `context-gate build` turns the schema into the type of `ctx.eslint` in `.claude/prompt/.types/ctx.d.ts`;
 - a `lint` **commit gate**: `eslint -f json {changedPaths}` before `git commit`, passing when no file has errors.
@@ -32,12 +33,18 @@ The same in TSX:
 
 The DSL has no `sum` filter, so the section counts files with errors (`where("errorCount") | len`), not messages.
 
-## Why `sh -c "eslint … || [ $? -eq 1 ]"`
+## Exit code 1 is data: `okExitCodes` and `parseOnError`
 
-ESLint exits with 1 when it finds lint errors, and a cli provider treats any non-zero exit as a failure (`onError`).
-Exit 1 is exactly the case the section is for. The wrapper keeps exit 1 as success and still fails on exit 2
-(a broken config or a crash). With a plain `["eslint", "-f", "json", "."]` the section disappears whenever there are errors.
-The gate needs no wrapper: its `pass` expression looks at `result`, not at the exit code.
+ESLint exits with 1 when it finds lint errors, and that is exactly the case the section is for. By default a cli
+provider treats any non-zero exit as a failure (`onError`). Two provider options change that (core
+`providerResultOk`, shared by the CLI and the mod):
+
+- `okExitCodes: [0, 1]`: these exit codes count as success, stdout is parsed as usual;
+- `parseOnError: true`: any other exit code still yields data when stdout is valid JSON. Exit 2 (a broken config or a
+  crash) prints no JSON, so it still fails with `onError`.
+
+Either option alone is enough for ESLint; the example sets both. The gate needs neither: its `pass` expression looks at
+`result`, not at the exit code. The older workaround `["sh", "-c", "eslint -f json . || [ $? -eq 1 ]"]` still works.
 
 ## Demo without ESLint installed
 
@@ -50,5 +57,5 @@ cp gate.json /tmp/eslint-demo/.claude/gate.json && cp lint.md /tmp/eslint-demo/.
 PATH="$PWD/bin:$PATH" node ../../../dist/cli.js run --root /tmp/eslint-demo --trust-repo --no-markers
 ```
 
-`--trust-repo` lets the CLI start the provider. The binary (`sh` here) must be on the whitelist: the default list or
-`allowBinaries` in `~/.claude/context-gate.json`.
+`--trust-repo` lets the CLI start the provider. The binary (`eslint` here) must be on the whitelist: add it to
+`allowBinaries` in `~/.claude/context-gate.json` (the default list has only interpreters and `git`).
