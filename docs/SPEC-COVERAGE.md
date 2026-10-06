@@ -32,7 +32,7 @@ What is still open is operational, not code:
   `/clear` (the mod resets explicitly either way), `$.model.complete` latency/cost, `prompt.context` in subagents, and
   whether the model sees the rewritten skill listing. The mod lists the features resting on them under «Не перевірено
   наживо» in `/gate health` and `/gate why` (`hooks/layers/probe.ts`); flip `PROBE_POINTS` after a probe session.
-- Markdown `file` providers: the CLI parses them into `{ meta, body, headings }`, the mod keeps the text.
+- Markdown `file` providers: one core `markdownProviderValue` (`{ meta, body, headings }`) in the CLI, the mod and static adapters.
 
 ## Re-audit of the former gaps (final)
 
