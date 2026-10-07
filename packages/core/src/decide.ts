@@ -254,19 +254,22 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
   }
   if (proposed) gate.proposed = proposed
 
+  const passthrough = new Set<string>()
   for (const it of items) {
     let d: ItemDecision
     // An item a group excludes (`!agent:x`) is still grouped: the exclusion turns it off, it must not fall
     // back to the more permissive default of ungrouped items.
     const grouped = noGroups ? false : mentionedInGroups(cfg, it)
+    // A plugin skill `ns:name` that no group names in full follows the groups that name its bare `name` (M10).
+    const bare = !grouped && !noGroups && it.kind === 'skill' && it.name.includes(':') ? { kind: 'skill' as const, name: it.name.replace(/^[^:]+:/, '') } : undefined
     if (it.kind === 'skill' && !removed.has(it.id) && preloadMatch.some((m) => m(it.name))) d = 'preload'
     else if (noGroups || enabled.has(it.id)) d = 'on'
+    else if (bare && mentionedInGroups(cfg, bare)) d = groupsOf(cfg, bare).some((g) => active.has(g)) ? 'on' : 'off'
     else if (it.kind === 'section' || it.kind === 'datum') d = 'on'
     else if (grouped) d = 'off' // script tools (`# gate-tool:`) obey groups like MCP tools (G-35)
     else if (it.kind === 'tool' && !isMcpTool(it)) d = 'on'
     else if (it.kind === 'skill') d = 'nameOnly'
-    else if (it.kind === 'tool' && it.name.startsWith('mcp__ide__')) d = 'on' // the harness's IDE bridge, not a repo MCP server
-    else if (it.kind === 'tool') d = 'off' // MCP tools outside the profile are off
+    else if (it.kind === 'tool') { d = 'on'; passthrough.add(mcpServerOf(it.name) ?? it.name) } // O1: an MCP tool no group mentions (a personal server, a connector, mcp__ide__*) is not the repo's to deny
     else d = 'on' // ungrouped agents and rules stay available
     decisions[it.id] = d
     switch (it.kind) {
@@ -290,6 +293,7 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
     const servers = [...new Set(gate.mcp.off.map((n) => mcpServerOf(n) ?? n))]
     reason.push(`MCP поза профілем вимкнено: ${servers.join(', ')}`)
   }
+  if (passthrough.size) reason.push(`MCP без групи в gate.json не фільтрується: ${[...passthrough].sort().join(', ')}`)
 
   const newState: GateState = { turn, profile, profileSource: source }
   if (pending) newState.pending = pending

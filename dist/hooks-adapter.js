@@ -2630,18 +2630,22 @@ function decideGate(config, signals, state, items, opts = {}) {
     reason
   };
   if (proposed) gate.proposed = proposed;
+  const passthrough = /* @__PURE__ */ new Set();
   for (const it of items) {
     let d;
     const grouped = noGroups ? false : mentionedInGroups(cfg, it);
+    const bare = !grouped && !noGroups && it.kind === "skill" && it.name.includes(":") ? { kind: "skill", name: it.name.replace(/^[^:]+:/, "") } : void 0;
     if (it.kind === "skill" && !removed.has(it.id) && preloadMatch.some((m) => m(it.name))) d = "preload";
     else if (noGroups || enabled.has(it.id)) d = "on";
+    else if (bare && mentionedInGroups(cfg, bare)) d = groupsOf(cfg, bare).some((g) => active.has(g)) ? "on" : "off";
     else if (it.kind === "section" || it.kind === "datum") d = "on";
     else if (grouped) d = "off";
     else if (it.kind === "tool" && !isMcpTool(it)) d = "on";
     else if (it.kind === "skill") d = "nameOnly";
-    else if (it.kind === "tool" && it.name.startsWith("mcp__ide__")) d = "on";
-    else if (it.kind === "tool") d = "off";
-    else d = "on";
+    else if (it.kind === "tool") {
+      d = "on";
+      passthrough.add(mcpServerOf(it.name) ?? it.name);
+    } else d = "on";
     decisions[it.id] = d;
     switch (it.kind) {
       case "skill":
@@ -2664,6 +2668,7 @@ function decideGate(config, signals, state, items, opts = {}) {
     const servers = [...new Set(gate.mcp.off.map((n) => mcpServerOf(n) ?? n))];
     reason.push(`MCP \u043F\u043E\u0437\u0430 \u043F\u0440\u043E\u0444\u0456\u043B\u0435\u043C \u0432\u0438\u043C\u043A\u043D\u0435\u043D\u043E: ${servers.join(", ")}`);
   }
+  if (passthrough.size) reason.push(`MCP \u0431\u0435\u0437 \u0433\u0440\u0443\u043F\u0438 \u0432 gate.json \u043D\u0435 \u0444\u0456\u043B\u044C\u0442\u0440\u0443\u0454\u0442\u044C\u0441\u044F: ${[...passthrough].sort().join(", ")}`);
   const newState2 = { turn, profile, profileSource: source };
   if (pending) newState2.pending = pending;
   return { gate, state: newState2, log: logOf(gate, turn, ts, signals) };

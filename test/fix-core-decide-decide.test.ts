@@ -39,12 +39,22 @@ test('preload: a negated entry preloads nothing; /gate -group beats the tier pre
   assert.equal(removed.items['skill:conv'], 'off')
 })
 
-test('ungrouped mcp__ide__* stays on; other ungrouped MCP tools stay off', () => {
-  const cfg = mergeDefaults({ groups: { g: ['skill:x'] } })
-  const items = [makeItem('tool', 'mcp__ide__getDiagnostics'), makeItem('tool', 'mcp__other__x')]
+test('O1: MCP tools no group mentions pass in every adapter; a grouped server outside the profile stays off', () => {
+  const cfg = mergeDefaults({ groups: { g: ['skill:x'], db: ['tool:mcp__postgres__*'] } })
+  const items = [makeItem('tool', 'mcp__ide__getDiagnostics'), makeItem('tool', 'mcp__other__x'), makeItem('tool', 'mcp__postgres__query')]
   const { gate } = decideGate(cfg, sig(), s0, items)
   assert.equal(gate.items['tool:mcp__ide__getDiagnostics'], 'on')
-  assert.equal(gate.items['tool:mcp__other__x'], 'off')
+  assert.equal(gate.items['tool:mcp__other__x'], 'on')
+  assert.equal(gate.items['tool:mcp__postgres__query'], 'off')
+})
+
+test('M10: a plugin skill ns:name follows the groups that name its bare name', () => {
+  const cfg = mergeDefaults({ groups: { fe: ['skill:react'], be: ['skill:nest'] }, profiles: { frontend: { groups: ['fe'], when: { paths: ['apps/web/**'] } } } })
+  const items = [makeItem('skill', 'acme:react'), makeItem('skill', 'acme:nest'), makeItem('skill', 'acme:other')]
+  const { gate } = decideGate(cfg, sig({ paths: ['apps/web/a.tsx'] }), s0, items)
+  assert.equal(gate.items['skill:acme:react'], 'on')
+  assert.equal(gate.items['skill:acme:nest'], 'off')
+  assert.equal(gate.items['skill:acme:other'], 'nameOnly')
 })
 
 const hcfg: GateConfig = mergeDefaults({

@@ -413,3 +413,7 @@
 - cli hooks-adapter install M38: already done by the adapters package
 - tooling hooks/layers/editor.ts --no-cdn: not needed. The editor server already honours CONTEXT_GATE_EDITOR_CDN=0 from the environment
 - tooling jsx-text L95 branded text, expr.ts exponent literals L94: optional, not done
+
+## Після інтеграції: паритет O1/M10
+
+- **O1, M10 (ядро)** — правило «MCP без групи не фільтрується» і правило для plugin-skill `ns:name` перенесено з моду в core `decideGate`. Тепер hooks-adapter, CLI, pi і opencode вирішують так само, як мод; мод лише показує попередження. Тести: `test/decide.test.ts`, `test/fix-core-decide-decide.test.ts`.

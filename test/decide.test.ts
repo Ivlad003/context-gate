@@ -43,8 +43,9 @@ test('when:paths → frontend; skills/mcp/agents decisions', () => {
   assert.deepEqual(gate.skills.on.sort(), ['git-conventions', 'react-components', 'tailwind', 'tdd'])
   assert.deepEqual(gate.skills.off.sort(), ['nestjs', 'writing-for-agents'])
   assert.deepEqual(gate.skills.nameOnly, ['project-conventions', 'random-skill'], 'ungrouped skills → nameOnly')
-  assert.deepEqual(gate.mcp.on.sort(), ['mcp__figma__get', 'mcp__github__list_prs'])
-  assert.deepEqual(gate.mcp.off.sort(), ['mcp__other__x', 'mcp__postgres__query'])
+  assert.deepEqual(gate.mcp.on.sort(), ['mcp__figma__get', 'mcp__github__list_prs', 'mcp__other__x'], 'an MCP tool no group mentions passes (O1)')
+  assert.deepEqual(gate.mcp.off.sort(), ['mcp__postgres__query'])
+  assert.ok(gate.reason.includes('MCP без групи в gate.json не фільтрується: other'))
   assert.equal(gate.items['tool:Read'], 'on')
   assert.deepEqual(gate.agents, { on: ['ui-reviewer', 'general-purpose'], off: [] })
   assert.equal(state.profile, 'frontend')
@@ -186,7 +187,7 @@ test('deny texts', () => {
   assert.equal(denyText('tool', 'mcp__postgres__query', gate, cfg), 'postgres вимкнено профілем frontend. Користувач може увімкнути: /gate +backend')
   assert.equal(denyText('tool', 'mcp__other__x', gate, cfg), 'other вимкнено профілем frontend. Користувач може увімкнути: /gate off')
   assert.equal(skillOffText('nestjs', gate, cfg), 'Skill nestjs вимкнено профілем frontend. Увімкни: /gate +backend')
-  assert.match(statusLine(gate, { ctxPct: 38.2 }), /^gate frontend · tier standard · skills 4\/8 · mcp 2\/4 · rules 0 · ctx 38%$/)
+  assert.match(statusLine(gate, { ctxPct: 38.2 }), /^gate frontend · tier standard · skills 4\/8 · mcp 3\/4 · rules 0 · ctx 38%$/)
 })
 
 test('decideGate opts.tier forces the tier regardless of the model', () => {

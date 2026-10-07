@@ -125,10 +125,10 @@ export function refineGate(config: GateConfig, items: readonly Item[], gate: Gat
   for (const it of items) {
     const d = decisions[it.id]
     if (d === undefined) continue
-    if (isMcpTool(it) && d === 'off' && (IDE_TOOL.test(it.name) || !mentionedInGroups(cfg, it))) {
-      decisions[it.id] = 'on'
+    if (isMcpTool(it) && (IDE_TOOL.test(it.name) || !mentionedInGroups(cfg, it))) {
+      // Core decideGate already passes these (O1); the mod still names them in the notice.
       servers.add(mcpServerOf(it.name) ?? it.name)
-      changed = true
+      if (d === 'off') { decisions[it.id] = 'on'; changed = true }
     } else if (it.kind === 'skill' && it.name.includes(':') && (d === 'nameOnly' || d === 'off') && !mentionedInGroups(cfg, it)) {
       const bare = { kind: 'skill' as const, name: it.name.replace(/^[^:]+:/, '') }
       if (!mentionedInGroups(cfg, bare)) continue
@@ -136,7 +136,7 @@ export function refineGate(config: GateConfig, items: readonly Item[], gate: Gat
       if (next !== d) { decisions[it.id] = next; changed = true }
     }
   }
-  if (!changed) return { gate, passthrough: [] }
+  if (!changed) return { gate, passthrough: [...servers].sort() }
   const skills: Gate['skills'] = { on: [], nameOnly: [], off: [], preload: [] }
   const mcp: Gate['mcp'] = { on: [], off: [] }
   for (const it of items) {
