@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseMarkdownPrompt } from '../packages/core/src/mddsl.ts'
 import { formatPrompt } from '../packages/cli/src/fmt.ts'
@@ -245,6 +246,9 @@ test('bench: bench/repos.json is the repo list (examples + bench/repos/*); dirs 
   assert.equal(rows.length, listed.length)
   assert.equal(rows[0].repo, 'basic')
   assert.ok(rows[0].promptTokens > 0)
-  const untrusted = JSON.parse((await cli(REPO, ['bench', 'examples/basic', '--json'])).out)
+  // A copy without build outputs: whether examples/basic has a fresh .compiled (gitignored) must not matter.
+  const copy = mkdtempSync(join(tmpdir(), 'cg-bench-'))
+  cpSync(join(REPO, 'examples/basic'), copy, { recursive: true, filter: (src) => !/[\\/]\.(compiled|trace)([\\/]|$)/.test(src) })
+  const untrusted = JSON.parse((await cli(REPO, ['bench', copy, '--json'])).out)
   assert.match(untrusted[0].note ?? '', /H013/)
 })
