@@ -50,7 +50,7 @@ export default (
     <Section id="repo-state" scope="volatile" when={e`${ctx.gate.profile} != ${'docs'}`}>
       Гілка {ctx.git.branch}.
       <Run lang="bash" cache="5m" as="log">git log --oneline -5</Run>
-      <Let name="recent" value="log.stdout" />
+      <Let name="recent" value="log" />
       <Fence lang="text" title="Останні коміти">{'{{ recent }}'}</Fence>
     </Section>
 

@@ -33,7 +33,8 @@ function mountEditor(on: On): { spawned: (readonly string[])[] } {
     spawned.push(e.argv)
     yield { stream: 'stderr', text: 'starting\n' }
     yield { stream: 'stdout', text: JSON.stringify({ url: URL, port: 43123 }) + '\n' }
-    return { code: 0, signal: null }
+    // A `$` call answered by a test hook: the result is wrapped in `{ value }`, like `process.run` in testkit.
+    return { value: { code: 0, signal: null } }
   } as never)
   return { spawned }
 }

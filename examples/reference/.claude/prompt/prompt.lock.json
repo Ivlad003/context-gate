@@ -3,11 +3,11 @@
   "prompts": {
     "main": {
       "entry": ".claude/prompt/main.prompt.tsx",
-      "sourceHash": "a5856e6189a802cc177c32d680629eef11cfdf38c1c76b241c6b4292e2b9fa7b",
+      "sourceHash": "4c494904838d29b082d516015a2570da75ea4ea12ddeddcf8c0fe01e4c30172f",
       "sources": [
         {
           "path": ".claude/prompt/main.prompt.tsx",
-          "hash": "7292373e953e8b08e090849525d00c16ec257a19f0d6ec075041a78fd2d648cb"
+          "hash": "27551293752f4897a9d601c75bd76d8c2f7ea85c56cd732cd2d0ec735d82b933"
         },
         {
           "path": ".claude/prompt/shared/base.prompt.tsx",

@@ -72,9 +72,6 @@
       "when": {
         "branch": "^release/"
       }
-    },
-    "agents-md": {
-      "groups": []
     }
   },
   "classify": {
@@ -102,6 +99,19 @@
       ],
       "pass": "exitCode == 0",
       "message": "Схоже, у файлі пароль або токен. Прибери його і використай системний keyring."
+    },
+    {
+      "name": "people-publish",
+      "on": "publish",
+      "pass": "false",
+      "message": "Публікація — моя справа. Не запускай її, а дай мені точну команду: {{ command }}"
+    },
+    {
+      "name": "no-secrets-in-prompt",
+      "on": "prompt",
+      "pass": "!(prompt | grep(\"(password|Password|PASSWORD|passwd|token|Token|TOKEN|secret|Secret|SECRET)[^a-z]*[:=]\"))",
+      "drop": true,
+      "message": "Схоже, у промпті пароль або токен, тому його не надіслано. Прибери секрет і надішли ще раз."
     }
   ],
   "providers": {

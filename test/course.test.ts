@@ -2,6 +2,7 @@
 // that the DSL rejects.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { REPO, cli, copyFixture } from './cli-helpers.ts'
 
@@ -43,10 +44,12 @@ for (const c of cases) {
     const live = await cli(root, ['run', '--no-markers', '--dry-scripts', '--tier', 'standard'])
     assert.match(live.out, c.state)
     assert.match(live.out, c.safety)
-    const agents = await cli(root, ['run', '--no-markers', '--dry-scripts', '--tier', 'standard', '--profile', 'agents-md'])
-    assert.match(agents.out, c.safety)
-    assert.doesNotMatch(agents.out, c.state)
-    assert.doesNotMatch(agents.out, /unverified/)
+    const agents = await cli(root, ['sync', '--agents-md', 'AGENTS.md', '--tier', 'standard', '--dry-scripts'])
+    assert.equal(agents.code, 0, agents.err)
+    const md = readFileSync(join(root, 'AGENTS.md'), 'utf8')
+    assert.match(md, c.safety)
+    assert.doesNotMatch(md, c.state)
+    assert.doesNotMatch(md, /unverified/)
 
     const debug = await cli(root, ['run', 'debug', '--args', "'export does nothing'", '--dry-scripts', '--no-markers'])
     assert.match(debug.out, c.debug)

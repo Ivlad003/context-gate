@@ -5574,7 +5574,7 @@ var init_config = __esm({
             required: ["name", "on"],
             properties: {
               name: str2,
-              on: { enum: ["write", "commit", "turn", "prompt"] },
+              on: { enum: ["write", "commit", "push", "publish", "turn", "prompt"] },
               builtin: bool2,
               tiers: { type: "array", items: tierRef },
               run: strArr,
@@ -5583,7 +5583,8 @@ var init_config = __esm({
               provider: str2,
               onlyNew: bool2,
               baseline: str2,
-              failClosed: { type: "boolean", description: "A gate that cannot run blocks instead of passing (S6)." }
+              failClosed: { type: "boolean", description: "A gate that cannot run blocks instead of passing (S6)." },
+              drop: { type: "boolean", description: "`prompt` gates: a failure stops the prompt instead of becoming context." }
             }
           }
         },
@@ -9374,10 +9375,29 @@ function preloadPrompt(system, skills, tier) {
   const section = { id: PRELOAD_ID, scope: "profile", children, source: { path: "builtin:preload" } };
   return { version: 1, compiler: "builtin", id: PRELOAD_ID, sourceHash: "", sources: [], sections: [section], diagnostics: [] };
 }
+function promptScript(system) {
+  let cyr = 0;
+  let lat = 0;
+  const walk2 = (v) => {
+    if (cyr + lat > 2e4 || !v || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const x of v) walk2(x);
+      return;
+    }
+    const n = v;
+    if (n.t === "text" && typeof n.value === "string") {
+      cyr += (n.value.match(/[\u0400-\u04FF]/g) ?? []).length;
+      lat += (n.value.match(/[A-Za-z]/g) ?? []).length;
+    }
+    for (const k of ["children", "then", "else"]) walk2(n[k]);
+  };
+  for (const cp of system) walk2(cp.sections);
+  return lat >= 20 && lat > cyr ? "latin" : "cyrillic";
+}
 function planThenAct(system, tier) {
   if (!tier || tier === "premium" || !system.some((cp) => cp.sections.length)) return void 0;
   if (system.some((cp) => cp.id === PLAN_THEN_ACT_ID || cp.sections.some((s) => s.id === PLAN_THEN_ACT_ID))) return void 0;
-  const section = { id: PLAN_THEN_ACT_ID, scope: "static", children: [{ t: "text", value: PLAN_THEN_ACT_TEXT }], source: { path: "builtin:plan-then-act" } };
+  const section = { id: PLAN_THEN_ACT_ID, scope: "static", children: [{ t: "text", value: promptScript(system) === "latin" ? PLAN_THEN_ACT_TEXT_EN : PLAN_THEN_ACT_TEXT }], source: { path: "builtin:plan-then-act" } };
   return { version: 1, compiler: "builtin", id: PLAN_THEN_ACT_ID, sourceHash: "", sources: [], sections: [section], diagnostics: [] };
 }
 function ruleRef(r) {
@@ -9458,7 +9478,7 @@ function sectionText(sections, markers) {
   return sections.filter((s) => s.included && s.text).map((s) => markers ? `<!-- section:${s.id} ${s.scope} -->
 ${s.text}` : s.text).join("\n\n");
 }
-var DEFAULT_PROMPT_DIR, byString, PRELOAD_ID, PLAN_THEN_ACT_ID, PLAN_THEN_ACT_TEXT, DEFAULT_GIT;
+var DEFAULT_PROMPT_DIR, byString, PRELOAD_ID, PLAN_THEN_ACT_ID, PLAN_THEN_ACT_TEXT, PLAN_THEN_ACT_TEXT_EN, DEFAULT_GIT;
 var init_assemble = __esm({
   "packages/core/src/assemble.ts"() {
     "use strict";
@@ -9476,6 +9496,12 @@ var init_assemble = __esm({
       "1. \u041F\u043B\u0430\u043D: \u043F\u0435\u0440\u0435\u0434 \u0437\u043C\u0456\u043D\u043E\u044E \u043A\u043E\u0434\u0443 \u043A\u043E\u0440\u043E\u0442\u043A\u043E \u043D\u0430\u0437\u0432\u0438 \u0444\u0430\u0439\u043B\u0438, \u044F\u043A\u0456 \u0437\u043C\u0456\u043D\u0438\u0448, \u0449\u043E \u0441\u0430\u043C\u0435 \u0437\u043C\u0456\u043D\u0438\u0448 \u0456 \u044F\u043A \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0438\u0448 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442.",
       "2. \u041F\u0440\u0430\u0432\u043A\u0430: \u0437\u043C\u0456\u043D\u044E\u0439 \u043B\u0438\u0448\u0435 \u0442\u0435, \u0449\u043E \u0454 \u0432 \u043F\u043B\u0430\u043D\u0456; \u044F\u043A\u0449\u043E \u043F\u043B\u0430\u043D \u0434\u043E\u0432\u0435\u043B\u043E\u0441\u044F \u0437\u043C\u0456\u043D\u0438\u0442\u0438, \u0441\u043A\u0430\u0436\u0438 \u043F\u0440\u043E \u0446\u0435.",
       "3. \u041F\u0435\u0440\u0435\u0432\u0456\u0440\u043A\u0430: \u0437\u0430\u043F\u0443\u0441\u0442\u0438 \u0442\u0435\u0441\u0442\u0438, typecheck \u0430\u0431\u043E \u043B\u0456\u043D\u0442\u0435\u0440 \u0434\u043B\u044F \u0437\u043C\u0456\u043D\u0435\u043D\u0438\u0445 \u0444\u0430\u0439\u043B\u0456\u0432; \u044F\u043A\u0449\u043E \u043F\u0435\u0440\u0435\u0432\u0456\u0440\u0438\u0442\u0438 \u043D\u0435\u043C\u043E\u0436\u043B\u0438\u0432\u043E, \u043F\u043E\u044F\u0441\u043D\u0438 \u0447\u043E\u043C\u0443."
+    ].join("\n");
+    PLAN_THEN_ACT_TEXT_EN = [
+      "Work in three steps: plan, edit, check.",
+      "1. Plan: before you change code, name the files you will change, what you will change and how you will check the result.",
+      "2. Edit: change only what is in the plan; if the plan had to change, say so.",
+      "3. Check: run the tests, typecheck or linter for the changed files; if you cannot check, explain why."
     ].join("\n");
     DEFAULT_GIT = { branch: "", head: "", dirty: false, ahead: 0, behind: 0, changed: [] };
   }
@@ -12674,6 +12700,10 @@ async function syncCommand(o) {
     res.diagnostics.push(...built.diagnostics);
     if (built.built || built.diagnostics.length) ctx = await buildContext({ ...o, dryScripts: o.dryScripts });
   }
+  if (o.agentsMd?.length) {
+    if (ctx.prompts.system.length > 0) await writeAgentsMd(ctx, o.agentsMd, res);
+    return res;
+  }
   if (!o.noRules) {
     const wantRules = /* @__PURE__ */ new Set();
     const wantSkills = /* @__PURE__ */ new Set();
@@ -12751,6 +12781,38 @@ ${IMPORT_LINE}
     else res.unchanged++;
   }
   return res;
+}
+var AGENTS_BEGIN = "<!-- context-gate:begin -->";
+var AGENTS_END = "<!-- context-gate:end -->";
+async function writeAgentsMd(ctx, targets, res) {
+  const root = ctx.repo.root;
+  const system = ctx.prompts.system.map((cp) => ({ ...cp, sections: cp.sections.filter((sec) => sec.scope !== "volatile") })).filter((cp) => cp.sections.length);
+  const r = await renderWith({ ...ctx, prompts: { ...ctx.prompts, system } }, {});
+  const block = `${AGENTS_BEGIN}
+<!-- ${MARK}: context-gate sync --agents-md (tier ${ctx.tier}${ctx.gate.profile ? `, \u043F\u0440\u043E\u0444\u0456\u043B\u044C ${ctx.gate.profile}` : ""}); \u043D\u0435 \u0440\u0435\u0434\u0430\u0433\u0443\u0439 \u043C\u0456\u0436 \u043C\u0430\u0440\u043A\u0435\u0440\u0430\u043C\u0438, \u0434\u0436\u0435\u0440\u0435\u043B\u043E \u2014 ${ctx.repo.promptDir} -->
+
+${r.result.text.trim()}
+
+${AGENTS_END}`;
+  for (const raw of targets) {
+    const rel = raw.replace(/^\.\//, "");
+    const abs = join10(root, rel);
+    if (!rel || !repoPathInside(root, abs)) {
+      res.diagnostics.push(escapeDiag(rel || raw));
+      continue;
+    }
+    writeIfChanged(root, rel, withAgentsBlock(readText(abs), block), res);
+  }
+}
+function withAgentsBlock(cur, block) {
+  if (!cur) return `${block}
+`;
+  const b = cur.indexOf(AGENTS_BEGIN);
+  const e = b < 0 ? -1 : cur.indexOf(AGENTS_END, b);
+  if (b >= 0 && e >= 0) return cur.slice(0, b) + block + cur.slice(e + AGENTS_END.length);
+  return cur + (cur.endsWith("\n") ? "" : "\n") + `
+${block}
+`;
 }
 function syncWatchPaths(root, promptDir) {
   const config = loadRepo(root).config;
@@ -14335,8 +14397,8 @@ var COMMANDS = {
   },
   sync: {
     summary: "static-\u0430\u0434\u0430\u043F\u0442\u0435\u0440 \u0431\u0435\u0437 mods: .mdc \u2192 .claude/rules/cursor + skills, \u043F\u0440\u043E\u0444\u0456\u043B\u044C \u2192 skillOverrides, DSL \u2192 prompt.generated.md",
-    usage: ["sync [--profile p] [--tier t] [--watch]", "sync --install-hook | --uninstall-hook", "sync --hook"],
-    flags: { ...ctxFlags, watch: { type: "bool", desc: "\u043F\u0435\u0440\u0435\u0433\u0435\u043D\u0435\u0440\u043E\u0432\u0443\u0432\u0430\u0442\u0438 \u043F\u0440\u0438 \u0437\u043C\u0456\u043D\u0430\u0445" }, json: { type: "bool", desc: "\u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 JSON" }, "no-prompt": { type: "bool", desc: "\u0431\u0435\u0437 prompt.generated.md" }, "no-overrides": { type: "bool", desc: "\u0431\u0435\u0437 skillOverrides" }, hard: { type: "bool", desc: "\u0432\u0438\u043C\u043A\u043D\u0435\u043D\u0456 skills \u2192 off (\u0456\u043D\u0430\u043A\u0448\u0435 user-invocable-only: /name \u043B\u0438\u0448\u0430\u0454\u0442\u044C\u0441\u044F)" }, hook: { type: "bool", desc: "\u0440\u0435\u0436\u0438\u043C SessionStart-\u0445\u0443\u043A\u0430: stdout \u2014 JSON (reloadSkills, \u043A\u043E\u043B\u0438 \u0437\u043C\u0456\u043D\u0438\u043B\u0438\u0441\u044C skills)" }, "install-hook": { type: "bool", desc: "\u0437\u0430\u043F\u0438\u0441\u0430\u0442\u0438 SessionStart settings-\u0445\u0443\u043A \xABsync --hook\xBB \u0443 .claude/settings.local.json" }, "uninstall-hook": { type: "bool", desc: "\u043F\u0440\u0438\u0431\u0440\u0430\u0442\u0438 \u0446\u0435\u0439 \u0445\u0443\u043A" } },
+    usage: ["sync [--profile p] [--tier t] [--watch]", "sync --agents-md AGENTS.md[,GEMINI.md]", "sync --install-hook | --uninstall-hook", "sync --hook"],
+    flags: { ...ctxFlags, watch: { type: "bool", desc: "\u043F\u0435\u0440\u0435\u0433\u0435\u043D\u0435\u0440\u043E\u0432\u0443\u0432\u0430\u0442\u0438 \u043F\u0440\u0438 \u0437\u043C\u0456\u043D\u0430\u0445" }, json: { type: "bool", desc: "\u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 JSON" }, "no-prompt": { type: "bool", desc: "\u0431\u0435\u0437 prompt.generated.md" }, "no-overrides": { type: "bool", desc: "\u0431\u0435\u0437 skillOverrides" }, hard: { type: "bool", desc: "\u0432\u0438\u043C\u043A\u043D\u0435\u043D\u0456 skills \u2192 off (\u0456\u043D\u0430\u043A\u0448\u0435 user-invocable-only: /name \u043B\u0438\u0448\u0430\u0454\u0442\u044C\u0441\u044F)" }, hook: { type: "bool", desc: "\u0440\u0435\u0436\u0438\u043C SessionStart-\u0445\u0443\u043A\u0430: stdout \u2014 JSON (reloadSkills, \u043A\u043E\u043B\u0438 \u0437\u043C\u0456\u043D\u0438\u043B\u0438\u0441\u044C skills)" }, "install-hook": { type: "bool", desc: "\u0437\u0430\u043F\u0438\u0441\u0430\u0442\u0438 SessionStart settings-\u0445\u0443\u043A \xABsync --hook\xBB \u0443 .claude/settings.local.json" }, "uninstall-hook": { type: "bool", desc: "\u043F\u0440\u0438\u0431\u0440\u0430\u0442\u0438 \u0446\u0435\u0439 \u0445\u0443\u043A" }, "agents-md": { type: "list", desc: "\u0442\u0456 \u0441\u0430\u043C\u0456 \u0441\u0435\u043A\u0446\u0456\u0457 \u0431\u0435\u0437 volatile \u2014 \u043C\u0456\u0436 \u043C\u0430\u0440\u043A\u0435\u0440\u0430\u043C\u0438 \u0443 \u0444\u0430\u0439\u043B\u0430\u0445 \u0434\u043B\u044F \u0456\u043D\u0448\u0438\u0445 \u0430\u0433\u0435\u043D\u0442\u043D\u0438\u0445 CLI (AGENTS.md, \u2026)", arg: "<file,\u2026>" } },
     async run(p, root, io) {
       const hookMode = bool3(p, "hook") ? "hook" : bool3(p, "install-hook") ? "install" : bool3(p, "uninstall-hook") ? "uninstall" : void 0;
       if (hookMode) {
@@ -14346,7 +14408,7 @@ var COMMANDS = {
         return r.code;
       }
       const once = async () => {
-        const r = await syncCommand({ ...ctxOpts(p, root), noPrompt: bool3(p, "no-prompt"), noOverrides: bool3(p, "no-overrides"), hard: bool3(p, "hard") });
+        const r = await syncCommand({ ...ctxOpts(p, root), noPrompt: bool3(p, "no-prompt"), noOverrides: bool3(p, "no-overrides"), hard: bool3(p, "hard"), agentsMd: list(p, "agents-md") });
         io.out(bool3(p, "json") ? JSON.stringify(r) + "\n" : formatSync(r));
         return 0;
       };

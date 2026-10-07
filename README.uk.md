@@ -125,7 +125,7 @@ JSON Schema — [`schema/context-gate.schema.json`](schema/context-gate.schema.j
 | `providers` | іменовані джерела даних для DSL: `cli` (JSON зі stdout), `file`, `mcp`, `module`; `schema`, `cache`, `onError`, `functions`; для `cli`: `okExitCodes`, `parseOnError` (`eslint -f json` виходить з 1) |
 | `executors` | як `Run`/`Call` запускають мову (`python3`, `node`, `bash`, `deno`, …) |
 | `itemSources` | джерела елементів: `cursor-mdc`, `markdown-dir`, `provider` (`field`, `as`, `template`), `prompt-dir` (додаткова тека секцій, `as: "section"`), `claude-skills`, `claude-tools` |
-| `gates` | детерміновані перевірки: `on: write \| commit \| turn \| prompt`, `run` або `provider`, вираз `pass`, шаблон `message`, `onlyNew` + `baseline`, `tiers`; вбудований `read-before-write` |
+| `gates` | детерміновані перевірки: `on: write \| commit \| push \| publish \| turn \| prompt`, `run` або `provider` (або лише вираз `pass`), вираз `pass` (`command` для Bash-гейтів, `prompt` для prompt-гейтів; `run` prompt-гейта отримує промпт на stdin), `drop` (невдалий prompt-гейт зупиняє промпт), шаблон `message`, `onlyNew` + `baseline`, `tiers`; вбудований `read-before-write` |
 | `cursorRules` | `enabled`, `nested`, `maxCharsPerInjection`, `strictWrite` |
 | `prompt` | `dir`, `runCacheDefault`, `build: auto \| never`, `commitCompiled`, `persist` |
 | `health` | пороги за кодами (`H001`: 12000, …) |
@@ -156,7 +156,7 @@ JSON Schema — [`schema/context-gate.schema.json`](schema/context-gate.schema.j
 | **Репозиторій** | |
 | `init` | створити `.claude/gate.json` зі структури репозиторію (`classify: shadow`) і рядки `.gitignore` |
 | `migrate` | перевести `skillGroups`/`mcpGroups`/`ruleSources` у `groups`/`itemSources` |
-| `sync` | fallback без mods: `.mdc` → `.claude/rules/cursor/` і skills, профіль → `skillOverrides`, DSL → `.claude/prompt.generated.md`; `--watch` |
+| `sync` | fallback без mods: `.mdc` → `.claude/rules/cursor/` і skills, профіль → `skillOverrides`, DSL → `.claude/prompt.generated.md`; `--watch`; `--agents-md AGENTS.md,…` пише лише секції без volatile між маркерами у файли, які читають інші агентні CLI |
 | `example skills` | скопіювати приклади skills-промптів у `.claude/prompt/` |
 | `trust` | довіра до репозиторію (Р2): процеси, cli/module-провайдери, `@run`/`@call` |
 | `data` | сховище даних скриптів `data.*` |
@@ -187,7 +187,7 @@ CI падає, якщо з'являється виклик `$` поза [`script
 | `prompt.submit` | `@rule`, `@file` → Auto Attached, `[gate:x]`, сигнали, класифікатор першого промпту, бриф, гейти `prompt` |
 | `prompt.attachment{type=skill_listing}` | переписати листинг skills під gate |
 | `tool.call{tool=Read\|Edit\|Write\|NotebookEdit}` | glob-правила після результату, `strictWrite`, гейти `write`, read-before-write |
-| `tool.call{tool=Bash}` | гейти `commit` на `git commit`; впалі тести/лінт рахуються для ескалації |
+| `tool.call{tool=Bash}` | гейти `commit`, `push` і `publish` на `git commit`, `git push` і публікацію пакетів; впалі тести/лінт рахуються для ескалації |
 | `tool.call{tool=Skill}` | аргументи для `skill.prompt`; вимкнені skills |
 | `tool.call{tool=/"^mcp__"/}` | `{ deny }` для MCP поза профілем; власні інструменти плагіна (ліниві включення, скрипти) |
 | `tool.describe{tool=/"^mcp__"/}` | однорядковий опис і `isDeferred` для вимкнених MCP |

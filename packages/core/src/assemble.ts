@@ -136,15 +136,43 @@ export const PLAN_THEN_ACT_TEXT = [
   '3. Перевірка: запусти тести, typecheck або лінтер для змінених файлів; якщо перевірити неможливо, поясни чому.',
 ].join('\n')
 
+/** The same section for repositories whose prompts are written in a Latin-script language. */
+export const PLAN_THEN_ACT_TEXT_EN = [
+  'Work in three steps: plan, edit, check.',
+  '1. Plan: before you change code, name the files you will change, what you will change and how you will check the result.',
+  '2. Edit: change only what is in the plan; if the plan had to change, say so.',
+  '3. Check: run the tests, typecheck or linter for the changed files; if you cannot check, explain why.',
+].join('\n')
+
+/** Letters of the repo's own section text: Cyrillic vs Latin decides the language of the builtin section. */
+function promptScript(system: readonly CompiledPrompt[]): 'cyrillic' | 'latin' {
+  let cyr = 0
+  let lat = 0
+  const walk = (v: unknown): void => {
+    if (cyr + lat > 20_000 || !v || typeof v !== 'object') return
+    if (Array.isArray(v)) { for (const x of v) walk(x); return }
+    const n = v as Record<string, unknown>
+    if (n.t === 'text' && typeof n.value === 'string') {
+      cyr += (n.value.match(/[\u0400-\u04FF]/g) ?? []).length
+      lat += (n.value.match(/[A-Za-z]/g) ?? []).length
+    }
+    for (const k of ['children', 'then', 'else']) walk(n[k])
+  }
+  for (const cp of system) walk(cp.sections)
+  // A few Latin letters (ids, commands, a one-word section) do not make a prompt English.
+  return lat >= 20 && lat > cyr ? 'latin' : 'cyrillic'
+}
+
 /**
  * SPEC «Контракти виходу і гейти»: for a tier below `premium` the builtin `plan-then-act` section turns on,
  * unless the repo defines its own section with that id (an empty one switches it off). Only next to the repo's
- * own prompts: a repo without prompts gets no system-prompt text from us.
+ * own prompts: a repo without prompts gets no system-prompt text from us. The text follows the script of those
+ * prompts: Ukrainian by default, English when the repo's sections are mostly Latin letters (at least 20 of them).
  */
 export function planThenAct(system: readonly CompiledPrompt[], tier: Tier): CompiledPrompt | undefined {
   if (!tier || tier === 'premium' || !system.some((cp) => cp.sections.length)) return undefined
   if (system.some((cp) => cp.id === PLAN_THEN_ACT_ID || cp.sections.some((s) => s.id === PLAN_THEN_ACT_ID))) return undefined
-  const section: SectionNode = { id: PLAN_THEN_ACT_ID, scope: 'static', children: [{ t: 'text', value: PLAN_THEN_ACT_TEXT }], source: { path: 'builtin:plan-then-act' } }
+  const section: SectionNode = { id: PLAN_THEN_ACT_ID, scope: 'static', children: [{ t: 'text', value: promptScript(system) === 'latin' ? PLAN_THEN_ACT_TEXT_EN : PLAN_THEN_ACT_TEXT }], source: { path: 'builtin:plan-then-act' } }
   return { version: 1, compiler: 'builtin', id: PLAN_THEN_ACT_ID, sourceHash: '', sources: [], sections: [section], diagnostics: [] }
 }
 

@@ -2,6 +2,7 @@
 //   .mdc → .claude/rules/cursor/*.md (always/auto) + .claude/skills/cursor-<id>/SKILL.md (agent/manual)
 //   profile/tier decision → skillOverrides in .claude/settings.local.json
 //   DSL → one render into .claude/prompt.generated.md, imported from CLAUDE.md with `@.claude/prompt.generated.md`
+//   --agents-md AGENTS.md,…: only that — the render without volatile sections, between markers in files other agent CLIs read
 
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -50,7 +51,7 @@ function escapeDiag(rel: string): Diagnostic {
   return { code: 'G314', severity: 'warning', message: `${rel}: шлях веде за межі репозиторію (symlink) — не записано`, path: rel }
 }
 
-export async function syncCommand(o: ContextOptions & { noPrompt?: boolean; noRules?: boolean; noOverrides?: boolean; hard?: boolean }): Promise<SyncResult> {
+export async function syncCommand(o: ContextOptions & { noPrompt?: boolean; noRules?: boolean; noOverrides?: boolean; hard?: boolean; agentsMd?: string[] }): Promise<SyncResult> {
   let ctx = await buildContext({ ...o, dryScripts: o.dryScripts })
   const root = ctx.repo.root
   const res: SyncResult = { written: [], removed: [], unchanged: 0, overrides: {}, diagnostics: [] }
@@ -60,6 +61,13 @@ export async function syncCommand(o: ContextOptions & { noPrompt?: boolean; noRu
     const built = await ensureBuilt(root, ctx.repo.promptDir, ctx.host.trusted, ctx.repo.config.prompt?.build)
     res.diagnostics!.push(...built.diagnostics)
     if (built.built || built.diagnostics.length) ctx = await buildContext({ ...o, dryScripts: o.dryScripts })
+  }
+
+  // `--agents-md` writes only those files: in a repo with the plugin, prompt.generated.md and skillOverrides would
+  // give Claude Code the same sections twice.
+  if (o.agentsMd?.length) {
+    if (ctx.prompts.system.length > 0) await writeAgentsMd(ctx, o.agentsMd, res)
+    return res
   }
 
   // ── rules ──
@@ -136,6 +144,37 @@ export async function syncCommand(o: ContextOptions & { noPrompt?: boolean; noRu
     else res.unchanged++
   }
   return res
+}
+
+export const AGENTS_BEGIN = '<!-- context-gate:begin -->'
+export const AGENTS_END = '<!-- context-gate:end -->'
+
+/**
+ * The sections for agent CLIs that read a Markdown instruction file (`AGENTS.md`, …) and have no plugin. Volatile
+ * sections are left out: a file keeps a snapshot, and live state (branch, tickets) would be stale by the next turn.
+ * The render goes between markers; text outside them is the user's and is kept. A file without markers gets them
+ * appended.
+ */
+async function writeAgentsMd(ctx: Awaited<ReturnType<typeof buildContext>>, targets: string[], res: SyncResult): Promise<void> {
+  const root = ctx.repo.root
+  const system = ctx.prompts.system.map((cp) => ({ ...cp, sections: cp.sections.filter((sec) => sec.scope !== 'volatile') })).filter((cp) => cp.sections.length)
+  const r = await renderWith({ ...ctx, prompts: { ...ctx.prompts, system } }, {})
+  const block = `${AGENTS_BEGIN}\n<!-- ${MARK}: context-gate sync --agents-md (tier ${ctx.tier}${ctx.gate.profile ? `, профіль ${ctx.gate.profile}` : ''}); не редагуй між маркерами, джерело — ${ctx.repo.promptDir} -->\n\n${r.result.text.trim()}\n\n${AGENTS_END}`
+  for (const raw of targets) {
+    const rel = raw.replace(/^\.\//, '')
+    const abs = join(root, rel)
+    if (!rel || !repoPathInside(root, abs)) { res.diagnostics!.push(escapeDiag(rel || raw)); continue }
+    writeIfChanged(root, rel, withAgentsBlock(readText(abs), block), res)
+  }
+}
+
+/** `cur` with the generated block replaced (or appended when the file has none, or created). */
+export function withAgentsBlock(cur: string | undefined, block: string): string {
+  if (!cur) return `${block}\n`
+  const b = cur.indexOf(AGENTS_BEGIN)
+  const e = b < 0 ? -1 : cur.indexOf(AGENTS_END, b)
+  if (b >= 0 && e >= 0) return cur.slice(0, b) + block + cur.slice(e + AGENTS_END.length)
+  return cur + (cur.endsWith('\n') ? '' : '\n') + `\n${block}\n`
 }
 
 /** What `sync --watch` watches: every cursor-mdc and markdown-dir rule source (not only the root .cursor/rules). */

@@ -72,9 +72,6 @@
       "when": {
         "branch": "^release/"
       }
-    },
-    "agents-md": {
-      "groups": []
     }
   },
   "classify": {
@@ -102,6 +99,19 @@
       ],
       "pass": "exitCode == 0",
       "message": "This looks like a password or token in a file. Remove it and use the system keyring."
+    },
+    {
+      "name": "people-publish",
+      "on": "publish",
+      "pass": "false",
+      "message": "Publishing is mine. Do not run it; give me the exact command instead: {{ command }}"
+    },
+    {
+      "name": "no-secrets-in-prompt",
+      "on": "prompt",
+      "pass": "!(prompt | grep(\"(password|Password|PASSWORD|passwd|token|Token|TOKEN|secret|Secret|SECRET)[^a-z]*[:=]\"))",
+      "drop": true,
+      "message": "Your prompt looks like it contains a password or token, so it was not sent. Remove the secret and send it again."
     }
   ],
   "providers": {

@@ -1,7 +1,6 @@
 ---
 id: work-state
 scope: volatile
-when: gate.profile != "agents-md"
 budget: 1800
 ---
 @run bash cache=30s as=tickets

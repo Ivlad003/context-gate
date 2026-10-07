@@ -207,8 +207,8 @@ export const gateJsonSchema = {
       items: {
         type: 'object', additionalProperties: false, required: ['name', 'on'],
         properties: {
-          name: str, on: { enum: ['write', 'commit', 'turn', 'prompt'] }, builtin: bool, tiers: { type: 'array', items: tierRef },
-          run: strArr, pass: str, message: str, provider: str, onlyNew: bool, baseline: str, failClosed: { type: 'boolean', description: 'A gate that cannot run blocks instead of passing (S6).' },
+          name: str, on: { enum: ['write', 'commit', 'push', 'publish', 'turn', 'prompt'] }, builtin: bool, tiers: { type: 'array', items: tierRef },
+          run: strArr, pass: str, message: str, provider: str, onlyNew: bool, baseline: str, failClosed: { type: 'boolean', description: 'A gate that cannot run blocks instead of passing (S6).' }, drop: { type: 'boolean', description: '`prompt` gates: a failure stops the prompt instead of becoming context.' },
         },
       },
     },

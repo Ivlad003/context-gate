@@ -64,28 +64,53 @@ function words(segment: string): string[] {
 /** Shells whose `-c` takes a script (`/bin/bash`, `sh`, `zsh`…). */
 const SHELLS = /^(?:.*[\\/])?(?:ba|z|da|k|fi)?sh(\.exe)?$/i
 
+/** What a Bash command does that a gate can be bound to. */
+export type BashTrigger = 'commit' | 'push' | 'publish'
+
+/** Options of package managers that take a separate value (`npm --workspace pkg publish`, `pnpm -C dir publish`). */
+const PUBLISH_VALUE_OPTS = new Set(['-w', '--workspace', '--prefix', '--registry', '--cwd', '-C', '--dir', '--filter', '-F', '--manifest-path', '--package', '-p', '--repository', '--userconfig'])
+
+/** Package managers whose `publish` (or `npm publish` under yarn berry) uploads a package, plus twine's `upload`. */
+const PUBLISHERS: Record<string, readonly string[]> = { npm: ['publish'], pnpm: ['publish'], yarn: ['publish', 'npm'], bun: ['publish'], cargo: ['publish'], poetry: ['publish'], twine: ['upload'] }
+
 /**
- * Does a Bash command run `git commit`? Every command of a list or pipeline (`;`, `&&`, `||`, `|`, `&`, newlines,
- * `$(…)`, backticks, subshells) counts, and any `git` word in it (after `sudo`, `env X=1`, `time`…); git's global
- * options are skipped with their values (`-C <dir>`, `-c k=v`, `--git-dir=…`), and the subcommand must be exactly
- * `commit` (`git commit-tree` is not one). A quoted script given to `sh -c` or `eval` is scanned as a command line.
- * A false positive (`echo git commit`) only runs the gates.
+ * What a Bash command runs: `git commit`, `git push`, a package publish. Every command of a list or pipeline (`;`,
+ * `&&`, `||`, `|`, `&`, newlines, `$(…)`, backticks, subshells) counts, and any program word in it (after `sudo`,
+ * `env X=1`, `time`…); git's global options are skipped with their values (`-C <dir>`, `-c k=v`, `--git-dir=…`), and
+ * the subcommand must match exactly (`git commit-tree` is not a commit). A quoted script given to `sh -c` or `eval` is
+ * scanned as a command line. A false positive (`echo git commit`) only runs the gates.
  */
-export function isGitCommit(cmd: string, depth = 0): boolean {
+export function bashTriggers(cmd: string, depth = 0, out: Set<BashTrigger> = new Set()): Set<BashTrigger> {
   for (const segment of cmd.split(/\|\||&&|[;|&\n`(){}]|\$\(/)) {
     const w = words(segment)
     for (let j = 0; j < w.length; j++) {
       // A quoted script is one word: the argument of a shell's `-c` (`bash -lc "git commit"`, `xargs sh -c '…'`)
       // or of `eval` is a command line of its own. (`grep "git commit"` is not: its argument is only text.)
       const script = j > 0 && (/^-[A-Za-z]*c$/.test(w[j - 1]) && w.slice(0, j - 1).some((x) => SHELLS.test(x)) || w.slice(0, j).some((x) => x === 'eval'))
-      if (script && depth < 4 && isGitCommit(w[j], depth + 1)) return true
-      if (!/^git(\.exe)?$/i.test(w[j].split(/[\\/]/).pop() ?? '')) continue
+      if (script && depth < 4) bashTriggers(w[j], depth + 1, out)
+      const prog = (w[j].split(/[\\/]/).pop() ?? '').replace(/\.(exe|cmd)$/i, '').toLowerCase()
+      if (prog === 'git') {
+        let i = j + 1
+        while (i < w.length && w[i].startsWith('-')) i += GIT_VALUE_OPTS.has(w[i]) ? 2 : 1
+        if (w[i] === 'commit') out.add('commit')
+        if (w[i] === 'push') out.add('push')
+        continue
+      }
+      const subs = PUBLISHERS[prog]
+      if (!subs) continue
+      // The subcommand is the first word that is not an option or an option's value (`npm --workspace x publish`).
       let i = j + 1
-      while (i < w.length && w[i].startsWith('-')) i += GIT_VALUE_OPTS.has(w[i]) ? 2 : 1
-      if (w[i] === 'commit') return true
+      while (i < w.length && w[i].startsWith('-')) i += PUBLISH_VALUE_OPTS.has(w[i]) ? 2 : 1
+      const sub = w[i]
+      if (sub && subs.includes(sub) && (prog !== 'yarn' || sub === 'publish' || w.slice(j + 1).includes('publish'))) out.add('publish')
     }
   }
-  return false
+  return out
+}
+
+/** Does a Bash command run `git commit`? (M08; see `bashTriggers`.) */
+export function isGitCommit(cmd: string): boolean {
+  return bashTriggers(cmd).has('commit')
 }
 
 // ───────────────────────── argv placeholders (M09/S13) ─────────────────────────
@@ -305,12 +330,41 @@ async function gateProvider(io: Io, rt: Runtime, name: string, trusted: boolean)
 
 const isUnverified = (v: Value | undefined): boolean => v === undefined || v === null || (typeof v === 'object' && !Array.isArray(v) && (v as Record<string, Value>).unverified === true)
 
+/** What the gate's expressions see of its trigger: the prompt text (prompt gates), the Bash command (Bash gates). */
+function inputsOf(vars: GateVars): Scope_ {
+  return { ...(vars.prompt !== undefined ? { prompt: vars.prompt } : {}), ...(vars.command !== undefined ? { command: vars.command } : {}) }
+}
+
+/**
+ * A gate with `pass` and neither `run` nor `provider`: only the expression decides, over `prompt` / `command`. Runs no
+ * process, so it needs no trust: `{ "on": "publish", "pass": "false", "message": "…" }` keeps publishing for people.
+ */
+function expressionGate(io: Io, g: Gate, vars: GateVars): GateOutcome {
+  const scope: Scope_ = { exitCode: 0, stdout: '', stderr: '', result: null, ...inputsOf(vars) }
+  let pass: boolean
+  try {
+    pass = truthy(evalSource(g.pass!, scope, newBudget()))
+  } catch (err) {
+    debug(io, `gate ${g.name}: pass expression failed: ${String(err)}`)
+    return { pass: true, skipped: 'вираз pass не обчислено' }
+  }
+  if (pass) return { pass }
+  let message = `Гейт ${g.name} не пройдено.`
+  if (g.message) {
+    const t = parseTemplate(g.message)
+    try { message = renderTemplate(t.parts, scope, newBudget()) } catch { message = g.message }
+  }
+  return { pass, message }
+}
+
 /**
  * Run one command gate (trusted repos only), or a provider gate (`provider` without `run`). `capture` records the
  * baseline of an `onlyNew` gate (before the first edit, or a `{file}` gate just before its edit) and always passes.
  */
-export async function runCommandGate(io: Io, rt: Runtime, g: Gate, vars: { file?: string }, opts: { capture?: boolean } = {}): Promise<GateOutcome> {
-  if (!g.run?.length && !g.provider) return { pass: true, skipped: 'немає run' }
+export interface GateVars { file?: string; prompt?: string; command?: string }
+
+export async function runCommandGate(io: Io, rt: Runtime, g: Gate, vars: GateVars, opts: { capture?: boolean } = {}): Promise<GateOutcome> {
+  if (!g.run?.length && !g.provider) return g.pass && !opts.capture ? expressionGate(io, g, vars) : { pass: true, skipped: 'немає run' }
   const trust = await trustState(io, rt)
   const trusted = trust === 'trusted'
   if (g.run?.length) {
@@ -332,7 +386,8 @@ export async function runCommandGate(io: Io, rt: Runtime, g: Gate, vars: { file?
       return opts.capture ? { pass: true, skipped: ex.error } : { pass: false, message: `Гейт ${g.name}: ${ex.error} — перевірку не запущено.` }
     }
     try {
-      r = await io.process.run(ex.argv, { cwd: rt.root, timeoutMs: opts.capture ? CAPTURE_TIMEOUT_MS : GATE_TIMEOUT_MS })
+      // A prompt gate reads the prompt on stdin (never in argv: the text is the user's, not a command).
+      r = await io.process.run(ex.argv, { cwd: rt.root, timeoutMs: opts.capture ? CAPTURE_TIMEOUT_MS : GATE_TIMEOUT_MS, ...(vars.prompt !== undefined ? { stdin: vars.prompt } : {}) })
     } catch (err) {
       r = { exitCode: -1, stdout: '', stderr: String((err as Error)?.message ?? err) }
     }
@@ -348,7 +403,7 @@ export async function runCommandGate(io: Io, rt: Runtime, g: Gate, vars: { file?
     result = prov ?? null
     r = { exitCode: 0, stdout: typeof prov === 'string' ? prov : JSON.stringify(prov), stderr: '' }
   }
-  const scope: Scope_ = { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, result }
+  const scope: Scope_ = { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, result, ...inputsOf(vars) }
   if (g.provider) {
     scope.provider = prov ?? null
     if (!(g.provider in scope)) scope[g.provider] = prov ?? null
@@ -418,7 +473,7 @@ function skipOutcome(io: Io, rt: Runtime, g: Gate, out: GateOutcome): GateOutcom
 }
 
 /** Gates of one kind; returns the first failure's message. */
-async function runGates(io: Io, rt: Runtime, on: GateCheckConfig['on'], tier: string, vars: { file?: string }): Promise<string | undefined> {
+async function runGates(io: Io, rt: Runtime, on: GateCheckConfig['on'], tier: string, vars: GateVars, failedGate?: (g: Gate) => void): Promise<string | undefined> {
   for (const g of gatesFor(rt, on, tier)) {
     if (g.builtin) continue
     const t0 = now()
@@ -427,6 +482,7 @@ async function runGates(io: Io, rt: Runtime, on: GateCheckConfig['on'], tier: st
     await noteAttempt(io, rt, g, out.skipped ? 'skip' : out.pass ? 'pass' : 'block', now() - t0, tier, out.skipped)
     if (!out.pass) {
       await failed(io, rt, g, out, tier)
+      failedGate?.(g)
       return out.message
     }
   }
@@ -515,22 +571,36 @@ export function gatesMentioned(rt: Runtime, rels: string[]): void {
   for (const r of rels) reads.add(r)
 }
 
-/** `prompt` gates: a failure becomes context of the prompt. `text` (the prompt) feeds the «все одно» override counter. */
-export async function promptGates(io: Io, rt: Runtime, text?: string): Promise<string | undefined> {
+/**
+ * `prompt` gates over the prompt text (stdin of `run`, `prompt` in `pass`/`message`). A failure becomes context of the
+ * prompt, or, for a gate with `drop: true`, stops the prompt before the model sees it. `text` also feeds the «все одно»
+ * override counter.
+ */
+export async function promptGates(io: Io, rt: Runtime, text?: string): Promise<{ message: string; drop: boolean } | undefined> {
   const overridden = noteGateOverride(rt, text)
   if (overridden) {
     const g = rt.config?.gates?.find((x) => x.name === overridden)
     await noteAttempt(io, rt, { name: overridden, on: g?.on ?? 'gate' }, 'override', 0, await tierOf(io, undefined))
   }
   if (!rt.config) return undefined
-  return runGates(io, rt, 'prompt', await tierOf(io, undefined), {})
+  let drop = false
+  const message = await runGates(io, rt, 'prompt', await tierOf(io, undefined), { prompt: text ?? '' }, (g) => { drop = g.drop === true })
+  return message === undefined ? undefined : { message, drop }
 }
 
-/** Bash before: commit gates on `git commit` (any spelling git accepts, M08). */
+/** Bash before: `commit`, `push` and `publish` gates on the commands that trigger them (any spelling git accepts, M08). */
 export async function bashBefore(io: Io, rt: Runtime, cmd: string, agentId: string | undefined): Promise<string | undefined> {
   await ensureSession(io, rt)
-  if (!rt.config || !isGitCommit(cmd)) return undefined
-  return runGates(io, rt, 'commit', await tierOf(io, agentId), {})
+  if (!rt.config) return undefined
+  const triggers = bashTriggers(cmd)
+  if (!triggers.size) return undefined
+  const tier = await tierOf(io, agentId)
+  for (const on of ['commit', 'push', 'publish'] as const) {
+    if (!triggers.has(on)) continue
+    const msg = await runGates(io, rt, on, tier, { command: cmd })
+    if (msg) return msg
+  }
+  return undefined
 }
 
 /** Whether a failing guard must refuse instead of letting the call through (R7): the repo enforces something on it. */
@@ -540,7 +610,9 @@ export function guardsFileCall(rt: Runtime, tool: string): boolean {
 }
 
 export function guardsBash(rt: Runtime, cmd: string): boolean {
-  return !!rt.config && (rt.config.gates ?? []).some((g) => g.on === 'commit') && isGitCommit(cmd)
+  if (!rt.config) return false
+  const triggers = bashTriggers(cmd)
+  return (rt.config.gates ?? []).some((g) => (triggers as Set<string>).has(g.on))
 }
 
 /** Bash after: a failed test / typecheck / lint command counts as a failed verification. */

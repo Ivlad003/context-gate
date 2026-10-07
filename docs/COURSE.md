@@ -269,7 +269,9 @@ Work in small steps and run the tests before every commit.
 ```
 
 The premium model gets only the first sentence. The quick and standard models also get the four steps. Below premium,
-context-gate also adds a short built-in "plan, edit, check" section on its own.
+context-gate also adds a short built-in "plan, edit, check" section on its own, written in the language of your
+sections (Ukrainian or English). To change its text, add your own section with `id: plan-then-act`; an empty one
+switches it off.
 
 When a variant grows large, move it into its own file. `workflow.quick.md` next to `workflow.md` replaces the whole
 section for the quick tier. The command `npx context-gate expand` can draft such variants for you with a strong model,
@@ -555,9 +557,32 @@ check that context-gate runs itself.
 ```
 
 When the model runs `git commit`, the plugin runs `npm test` first. If the result does not pass, the commit is
-refused, and the model gets your message. Gates can also run on `write` (after a file edit), `turn` (after each answer)
-and `prompt` (before your prompt reaches the model). The built-in `read-before-write` gate refuses an edit of a file
-the model has not read, which helps small models most.
+refused, and the model gets your message. The built-in `read-before-write` gate refuses an edit of a file the model
+has not read, which helps small models most.
+
+A gate can listen to six events:
+
+| `on` | When it runs | What its expressions see |
+| --- | --- | --- |
+| `write` | after the model edits a file | `exitCode`, `stdout`, `result` of `run` |
+| `commit` | before a Bash command that runs `git commit` | the same, plus `command` |
+| `push` | before `git push` | the same, plus `command` |
+| `publish` | before a package publish: `npm`, `pnpm`, `yarn`, `bun publish`, `cargo publish`, `poetry publish`, `twine upload` | the same, plus `command` |
+| `turn` | after each answer of the model | `exitCode`, `stdout`, `result` |
+| `prompt` | before your prompt reaches the model | the same, plus `prompt`; `run` gets the prompt text on stdin |
+
+A gate does not always need a command. When it has only `pass`, the expression decides alone, nothing runs, and the
+repository does not even have to be trusted. This gate keeps publishing for people and gives the model a useful answer
+instead of a bare refusal:
+
+```json
+{ "name": "people-publish", "on": "publish", "pass": "false",
+  "message": "Publishing is mine. Do not run it; give me the exact command instead: {{ command }}" }
+```
+
+A `prompt` gate normally adds its message to your prompt as context. With `"drop": true` it stops the prompt instead,
+so the model never sees it, and shows you the message. Lesson 12.4 uses that to keep pasted passwords away from the
+model.
 
 ## 10. Checking and debugging prompts
 
@@ -649,7 +674,6 @@ A volatile section answers these before anyone asks:
 ---
 id: work-state
 scope: volatile
-when: gate.profile != "agents-md"
 budget: 1800
 ---
 @run bash cache=30s as=tickets
@@ -670,7 +694,7 @@ The latest handoff is `{{ handoff }}`. Read it before you continue earlier work.
 @end
 ````
 
-The `when` line is explained in 12.8. The spec does not need to be pasted into the prompt to stop the re-reading. A
+The spec does not need to be pasted into the prompt to stop the re-reading. A
 reference is enough, because the model then knows where the knowledge lives and opens it only when the task needs it:
 
 ```markdown
@@ -741,7 +765,8 @@ Things that are hard to undo:
 - Pushing is fine after the checks pass. Publishing a package is mine: prepare everything and give me the exact command.
 ```
 
-The rule about secrets is important enough to back with a gate, so it holds even when the model forgets it:
+The rule about secrets is important enough to back with gates, so it holds even when the model forgets it. The first
+gate checks the files the model writes:
 
 ```json
 { "name": "no-secrets", "on": "write",
@@ -749,6 +774,18 @@ The rule about secrets is important enough to back with a gate, so it holds even
   "pass": "exitCode == 0",
   "message": "This looks like a password or token in a file. Remove it and use the system keyring." }
 ```
+
+The second gate checks your own prompt before the model sees it. A pasted password is stopped right there, and you
+get the message instead of the model:
+
+```json
+{ "name": "no-secrets-in-prompt", "on": "prompt", "drop": true,
+  "pass": "!(prompt | grep(\"(password|Password|PASSWORD|passwd|token|Token|TOKEN|secret|Secret|SECRET)[^a-z]*[:=]\"))",
+  "message": "Your prompt looks like it contains a password or token, so it was not sent. Remove the secret and send it again." }
+```
+
+The regular expressions of the DSL have no case-insensitive flag, which is why the pattern lists the spellings. The
+publish rule from the `safety` section has its own gate too, the `people-publish` gate from lesson 9.
 
 ### 12.5 Results that live only in the chat
 
@@ -817,17 +854,20 @@ another with `$name`, a third with `@name`. The user even asked once for the ski
 available in all three CLIs".
 
 With context-gate, the sections are the single source. Claude Code gets them live through the plugin. For a tool that
-reads `AGENTS.md`, you render the same sections into that file. Live data would be stale in a file, so the volatile
-sections carry `when: gate.profile != "agents-md"`, and you render with that profile:
+reads `AGENTS.md` (or any other Markdown instruction file), `sync --agents-md` renders the same sections into that file:
 
-```json
-"profiles": { "agents-md": { "groups": [] } }
+```bash
+npx context-gate sync --agents-md AGENTS.md --tier standard
+npx context-gate sync --agents-md AGENTS.md,GEMINI.md --tier quick --profile docs
 ```
 
-```json
-"scripts": { "agents-md": "context-gate run --profile agents-md --tier standard --no-markers > AGENTS.md" }
-```
+Three details make this safe to run often. Volatile sections are left out, because live data such as the branch or the
+ticket list would be stale in a file. The render goes between `<!-- context-gate:begin -->` and
+`<!-- context-gate:end -->`, so anything you wrote by hand above or below the markers is kept. And with `--agents-md`,
+`sync` writes only those files, so Claude Code with the plugin does not get the sections twice. Pass `--profile` when
+the file should include a profile's sections; without it, the profile comes from the files you have changed.
 
+The example repository has it as a script: `"agents-md": "context-gate sync --agents-md AGENTS.md --tier standard"`.
 Run `npm run agents-md` after you change a section, or from a pre-commit hook. Now one edit reaches every tool, and the
 `how-to-ask-me`, `safety` and `testing` rules are the same everywhere.
 
@@ -874,6 +914,9 @@ name (`pkg.version`), `cursor.always`, `cursor.auto` (Cursor rules), `env.*` (on
 
 **Filters:** `take`, `sort`, `grep`, `map`, `join`, `truncate`, `fence`, `unique`, `where`, `len`, `round`, `ago`.
 **Functions:** `len`, `min`, `max`, `abs`, `round`, `floor`, `ceil`.
+
+**Gates:** `on: write | commit | push | publish | turn | prompt`; `run` or `provider` or only `pass`; `drop: true`
+stops a prompt.
 
 **In a session:** `/gate`, `/gate why`, `/gate <profile>`, `/gate +<group>`, `/gate auto`, `/gate apply`,
 `/gate health`, `/gate rules`, `[gate:<profile>]` in a prompt.

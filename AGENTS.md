@@ -1,6 +1,6 @@
 # context-gate: rules for working in this repo
 
-The spec is `docs/SPEC.md` (in Ukrainian). The "Ревю дизайну і прийняті рішення" section (Р1–Р7) overrides the sections above it.
+The spec is `docs/SPEC.md` (in Ukrainian). The "Ревю дизайну і прийняті рішення" section (Р1–Р11) overrides the sections above it.
 
 ## Layout
 

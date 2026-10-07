@@ -41,6 +41,7 @@ $.session.compact
 $.session.id
 # trust revoke, cache entries
 $.store.delete
+$.store.keys
 # MCP servers of the session (index, /gate why)
 $.tool.list
 

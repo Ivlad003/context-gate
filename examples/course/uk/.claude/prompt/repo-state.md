@@ -1,7 +1,6 @@
 ---
 id: repo-state
 scope: volatile
-when: gate.profile != "agents-md"
 ---
 Гілка `{{ git.branch }}`.
 @if git.dirty

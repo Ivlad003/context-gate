@@ -153,17 +153,21 @@ export interface ExecutorConfig {
 
 export interface GateCheckConfig {
   name: string
-  on: 'write' | 'commit' | 'turn' | 'prompt'
+  /** `push` / `publish`: a Bash command that runs `git push` / publishes a package (npm, pnpm, yarn, bun, cargo, twine, poetry). */
+  on: 'write' | 'commit' | 'push' | 'publish' | 'turn' | 'prompt'
   builtin?: boolean
   tiers?: Tier[]
+  /** A `prompt` gate gets the prompt text on stdin; others get nothing. Without `run` and `provider`, only `pass` decides. */
   run?: string[]
-  pass?: string // expression over { exitCode, stdout, result }
+  pass?: string // expression over { exitCode, stdout, stderr, result, prompt (prompt gates), command (Bash gates) }
   message?: string
   provider?: string
   onlyNew?: boolean
   baseline?: string
   /** A gate that cannot run (untrusted, not whitelisted, provider unavailable) blocks instead of passing (S6). */
   failClosed?: boolean
+  /** `prompt` gates: a failure stops the prompt (the message is shown to the user) instead of reaching the model as context. */
+  drop?: boolean
 }
 
 export interface ItemSourceConfig {

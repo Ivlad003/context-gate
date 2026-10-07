@@ -124,7 +124,7 @@ JSON Schema: [`schema/context-gate.schema.json`](schema/context-gate.schema.json
 | `providers` | named data sources for the DSL: `cli` (JSON stdout), `file`, `mcp`, `module`; `schema`, `cache`, `onError`, `functions`; `cli`: `okExitCodes`, `parseOnError` (`eslint -f json` exits 1) |
 | `executors` | how `Run`/`Call` start a language (`python3`, `node`, `bash`, `deno`, …) |
 | `itemSources` | item sources: `cursor-mdc`, `markdown-dir`, `provider` (`field`, `as`, `template`), `prompt-dir` (extra section dir, `as: "section"`), `claude-skills`, `claude-tools` |
-| `gates` | deterministic checks: `on: write \| commit \| turn \| prompt`, `run` or `provider`, `pass` expression, `message` template, `onlyNew` + `baseline`, `tiers`; builtin `read-before-write` |
+| `gates` | deterministic checks: `on: write \| commit \| push \| publish \| turn \| prompt`, `run` or `provider` (or only a `pass` expression), `pass` expression (`command` for Bash gates, `prompt` for prompt gates; `run` of a prompt gate gets the prompt on stdin), `drop` (a failed prompt gate stops the prompt), `message` template, `onlyNew` + `baseline`, `tiers`; builtin `read-before-write` |
 | `cursorRules` | `enabled`, `nested` (rules in sub-package `.cursor/rules`), `maxCharsPerInjection`, `strictWrite` |
 | `prompt` | `dir`, `runCacheDefault`, `build: auto \| never`, `commitCompiled`, `persist` |
 | `health` | thresholds per code (`H001`: 12000, …) |
@@ -155,7 +155,7 @@ this by default). Exit codes: 0 ok, 1 failure, 2 bad arguments.
 | **Repository** | |
 | `init` | create `.claude/gate.json` from the repo structure (`classify: shadow`) and `.gitignore` lines |
 | `migrate` | convert legacy `skillGroups`/`mcpGroups`/`ruleSources` into `groups`/`itemSources` |
-| `sync` | the fallback without mods: `.mdc` → `.claude/rules/cursor/` and skills, profile → `skillOverrides`, DSL → `.claude/prompt.generated.md`; `--watch` |
+| `sync` | the fallback without mods: `.mdc` → `.claude/rules/cursor/` and skills, profile → `skillOverrides`, DSL → `.claude/prompt.generated.md`; `--watch`; `--agents-md AGENTS.md,…` writes only the sections without volatile ones between markers in files other agent CLIs read |
 | `example skills` | copy the example skill prompts into `.claude/prompt/` |
 | `trust` | trust for the repository (Р2): processes, cli/module providers, `@run`/`@call` |
 | `data` | the script data store `data.*` |
@@ -186,7 +186,7 @@ CI fails when a `$` call outside [`scripts/expected-calls.txt`](scripts/expected
 | `prompt.submit` | `@rule`, `@file` → Auto Attached rules, `[gate:x]`, signals, first-prompt classifier, brief, `prompt` gates |
 | `prompt.attachment{type=skill_listing}` | rewrite the skills listing for the gate |
 | `tool.call{tool=Read\|Edit\|Write\|NotebookEdit}` | glob rules after the result, `strictWrite`, `write` gates, read-before-write |
-| `tool.call{tool=Bash}` | `commit` gates on `git commit`, failed test/lint runs count for escalation |
+| `tool.call{tool=Bash}` | `commit`, `push` and `publish` gates on `git commit`, `git push` and package publishes; failed test/lint runs count for escalation |
 | `tool.call{tool=Skill}` | skill args for `skill.prompt`; disabled skills |
 | `tool.call{tool=/"^mcp__"/}` | `{ deny }` for MCP tools outside the profile; serves the plugin's own tools (lazy includes, script tools) |
 | `tool.describe{tool=/"^mcp__"/}` | one-line description and `isDeferred` for gated-off MCP tools |

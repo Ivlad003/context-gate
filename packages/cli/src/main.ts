@@ -288,13 +288,13 @@ export const COMMANDS: Record<string, Command> = {
   },
   sync: {
     summary: 'static-адаптер без mods: .mdc → .claude/rules/cursor + skills, профіль → skillOverrides, DSL → prompt.generated.md',
-    usage: ['sync [--profile p] [--tier t] [--watch]', 'sync --install-hook | --uninstall-hook', 'sync --hook'],
-    flags: { ...ctxFlags, watch: { type: 'bool', desc: 'перегенеровувати при змінах' }, json: { type: 'bool', desc: 'результат JSON' }, 'no-prompt': { type: 'bool', desc: 'без prompt.generated.md' }, 'no-overrides': { type: 'bool', desc: 'без skillOverrides' }, hard: { type: 'bool', desc: 'вимкнені skills → off (інакше user-invocable-only: /name лишається)' }, hook: { type: 'bool', desc: 'режим SessionStart-хука: stdout — JSON (reloadSkills, коли змінились skills)' }, 'install-hook': { type: 'bool', desc: 'записати SessionStart settings-хук «sync --hook» у .claude/settings.local.json' }, 'uninstall-hook': { type: 'bool', desc: 'прибрати цей хук' } },
+    usage: ['sync [--profile p] [--tier t] [--watch]', 'sync --agents-md AGENTS.md[,GEMINI.md]', 'sync --install-hook | --uninstall-hook', 'sync --hook'],
+    flags: { ...ctxFlags, watch: { type: 'bool', desc: 'перегенеровувати при змінах' }, json: { type: 'bool', desc: 'результат JSON' }, 'no-prompt': { type: 'bool', desc: 'без prompt.generated.md' }, 'no-overrides': { type: 'bool', desc: 'без skillOverrides' }, hard: { type: 'bool', desc: 'вимкнені skills → off (інакше user-invocable-only: /name лишається)' }, hook: { type: 'bool', desc: 'режим SessionStart-хука: stdout — JSON (reloadSkills, коли змінились skills)' }, 'install-hook': { type: 'bool', desc: 'записати SessionStart settings-хук «sync --hook» у .claude/settings.local.json' }, 'uninstall-hook': { type: 'bool', desc: 'прибрати цей хук' }, 'agents-md': { type: 'list', desc: 'ті самі секції без volatile — між маркерами у файлах для інших агентних CLI (AGENTS.md, …)', arg: '<file,…>' } },
     async run(p, root, io) {
       const hookMode = bool(p, 'hook') ? 'hook' : bool(p, 'install-hook') ? 'install' : bool(p, 'uninstall-hook') ? 'uninstall' : undefined
       if (hookMode) { const r = await syncHookMode({ ...ctxOpts(p, root), noPrompt: bool(p, 'no-prompt'), noOverrides: bool(p, 'no-overrides'), hard: bool(p, 'hard') }, hookMode); io.out(r.out); if (r.err) io.err(r.err); return r.code }
       const once = async (): Promise<number> => {
-        const r = await syncCommand({ ...ctxOpts(p, root), noPrompt: bool(p, 'no-prompt'), noOverrides: bool(p, 'no-overrides'), hard: bool(p, 'hard') })
+        const r = await syncCommand({ ...ctxOpts(p, root), noPrompt: bool(p, 'no-prompt'), noOverrides: bool(p, 'no-overrides'), hard: bool(p, 'hard'), agentsMd: list(p, 'agents-md') })
         io.out(bool(p, 'json') ? JSON.stringify(r) + '\n' : formatSync(r))
         return 0
       }

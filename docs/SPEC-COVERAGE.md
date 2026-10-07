@@ -13,7 +13,7 @@ audit (at `bc3e5ec`) listed 65 gaps; each was re-checked against the code (table
 
 Rules applied:
 
-- The Р1–Р7 decisions override earlier sections.
+- The Р1–Р11 decisions override earlier sections (Р8–Р11 were added on 2026-10-07, see below).
 - Where `docs/PROBE.md` records a mods-API difference, the PROBE way counts as DONE.
 
 ## Summary
@@ -406,6 +406,20 @@ The fixes of the 2026-10-06 bug review changed documented behaviour in these pla
 - **CLI.** Live SKILL.md line (`skillCommand`), `build --force`, orphan pruning, lock-driven loading, atomic writes; `sync` rebuilds or reports H013, writes nothing in shadow without `--profile/--tier`, refuses an unparsable settings file (G301); root discovery stops at the nearest `.git`/`gate.json`; symlink containment (`safeJoin`); process groups and `--no-optional-locks` git; providers in parallel under a 12 s deadline; `--trust-repo` ignored on `pull_request_target`; `report --since` and `observe --since` reject unitless numbers.
 - **Adapters.** Preload only for the applied gate; read-before-write needs `builtin: true`; `[gate:x]` with an undeclared profile → G502; session-state lock and 3-way merge; SubagentStart rules; opt-in PostModelSwitch; fork seeding; `CONTEXT_GATE_ADD/REMOVE/PRELOAD`; pi/opencode journal only with `log.file`.
 - **Tooling.** New build-time G160 cases (JS methods on Each items, refs inside `<Run>`, object Mcp args, non-finite numbers); default CLI `npx --no context-gate`; editor `--no-cdn`, pinned CodeMirror, CRLF kept, cross-site requests rejected.
+
+## Decisions Р8–Р11 (2026-10-07)
+
+All four are DONE in the working tree; each has tests.
+
+| Decision | Code | Tests |
+| --- | --- | --- |
+| Р8 `push` / `publish` gates; `pass`-only gates; `command` in expressions | `hooks/layers/gates.ts` (`bashTriggers`, `expressionGate`, `bashBefore`, `guardsBash`), `packages/core/src/types.ts`, `config.ts`, schema | `hooks/gates-push-prompt.test.ts` (`bashTriggers`, push and publish gates) |
+| Р9 prompt text on stdin and as `prompt`; `drop: true` stops the prompt | `hooks/layers/gates.ts` (`promptGates`), `hooks/register.ts` (`prompt.submit` → `{ drop }`) | `hooks/gates-push-prompt.test.ts` (prompt gates) |
+| Р10 `sync --agents-md`: sections without volatile ones between markers, nothing else written | `packages/cli/src/cmd-sync.ts` (`writeAgentsMd`, `withAgentsBlock`), `main.ts` | `test/cli-sync.test.ts`, `test/course.test.ts` |
+| Р11 `plan-then-act` in the script of the repo's prompts | `packages/core/src/assemble.ts` (`promptScript`, `PLAN_THEN_ACT_TEXT_EN`) | `test/shims.test.ts`, `test/mod-dsl.test.ts` (G-54) |
+
+The same pass fixed the `/gate render` and `/gate edit` mod tests: their `process.spawn` test hook returned
+`{ code, signal }` where the engine expects a `$` call's answer as `{ value: { code, signal } }`.
 
 ## N/A
 

@@ -1,7 +1,6 @@
 ---
 id: repo-state
 scope: volatile
-when: gate.profile != "agents-md"
 ---
 Branch `{{ git.branch }}`.
 @if git.dirty

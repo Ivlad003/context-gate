@@ -257,7 +257,8 @@ export const register: Register = (on, options) => {
     const context = [...(e.context ?? []), ...g.context]
     if (!g.text.trimStart().startsWith('/')) {
       const failed = await promptGates(io, rt, e.text)
-      if (failed) context.push(failed)
+      if (failed?.drop) return { drop: failed.message }
+      if (failed) context.push(failed.message)
     }
     if (g.text === e.text && context.length === (e.context?.length ?? 0)) return next(e)
     return next({ ...e, text: g.text, context })

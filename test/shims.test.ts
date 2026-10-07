@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { DEFAULT_EXECUTORS, executorFor, executorInvocation, missingExports, parseShimOutput, scriptArgv, scriptFnName, scriptLang, scriptStdin, shimCommand, shimLang, usedFunctions } from '../packages/core/src/shims.ts'
 import { repoCacheName, sha256Hex } from '../packages/core/src/sha256.ts'
 import { parseToolHeaders } from '../packages/core/src/toolheader.ts'
-import { PLAN_THEN_ACT_ID, assemblePrompts, planThenAct } from '../packages/core/src/assemble.ts'
+import { PLAN_THEN_ACT_ID, PLAN_THEN_ACT_TEXT, PLAN_THEN_ACT_TEXT_EN, assemblePrompts, planThenAct } from '../packages/core/src/assemble.ts'
 import { repoHash } from '../packages/cli/src/settings.ts'
 import { DEFAULT_EXECUTORS as CLI_EXECUTORS } from '../packages/cli/src/host-node.ts'
 import type { CompiledPrompt } from '../packages/core/src/types.ts'
@@ -101,4 +101,20 @@ test('plan-then-act: builtin below premium next to repo prompts; own section or 
   const md = [{ path: '.claude/prompt/a.md', text: '---\nid: a\n---\nA\n' }]
   assert.deepEqual(assemblePrompts([], md, 'standard').system.map((p) => p.id), ['a', PLAN_THEN_ACT_ID])
   assert.deepEqual(assemblePrompts([], md, 'standard', undefined, { builtins: false }).system.map((p) => p.id), ['a'])
+})
+
+test('plan-then-act: the builtin text follows the script of the repo prompts', () => {
+  const textOf = (value: string): unknown => {
+    const cp: CompiledPrompt = { version: 1, compiler: 't', id: 'a', sourceHash: '', sources: [], sections: [{ id: 'a', scope: 'static', children: [{ t: 'text', value }] }], diagnostics: [] }
+    const n = planThenAct([cp], 'quick')?.sections[0]?.children[0]
+    return n && n.t === 'text' ? n.value : undefined
+  }
+  const cases: [string, string][] = [
+    ['Work in small steps and run the tests.', PLAN_THEN_ACT_TEXT_EN],
+    ['Працюй малими кроками і запускай тести.', PLAN_THEN_ACT_TEXT],
+    ['', PLAN_THEN_ACT_TEXT], // no letters: the default stays Ukrainian
+    ['Запускай `npm test` після кожної правки.', PLAN_THEN_ACT_TEXT],
+    ['A', PLAN_THEN_ACT_TEXT], // too few letters to tell
+  ]
+  for (const [text, want] of cases) assert.equal(textOf(text), want, text)
 })

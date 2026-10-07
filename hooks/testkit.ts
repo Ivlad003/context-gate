@@ -25,7 +25,8 @@ export interface RepoOptions {
   model?: string
   tools?: string[]
   store?: Record<string, unknown>
-  run?: (argv: readonly string[]) => RunResult
+  /** `stdin` is what the module passed to `process.run` (a `prompt` gate's prompt text). */
+  run?: (argv: readonly string[], stdin?: string) => RunResult
   /** A promise answers late (the shadow grace path of the classifier and the brief, P5). */
   complete?: (req: { model: string; prompt: string; system?: string }) => string | undefined | Promise<string | undefined>
   /** `clock.after` waits the real time instead of firing at once, so `within()` can time out. */
@@ -145,7 +146,7 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
   on('ui.close', () => ({ value: undefined }))
   on('process.run', ($, e) => {
     repo.runs.push(e.argv)
-    const r = opts.run?.(e.argv) ?? { exitCode: 0, stdout: '', stderr: '' }
+    const r = opts.run?.(e.argv, e.init?.stdin) ?? { exitCode: 0, stdout: '', stderr: '' }
     return { value: { ...r, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('model.complete', async ($, e) => {
