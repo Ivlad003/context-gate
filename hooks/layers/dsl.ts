@@ -10,7 +10,7 @@ import type { CompiledPrompt, Diagnostic, Gate, RenderedSection, Scope_, Section
 import { DEBUG_LOG_FILE, DEBUG_LOG_MAX, capDebugLog, debugLogLines, renderPrompt, materializeData } from '../../packages/core/src/render.ts'
 import type { RenderHostExt, RenderOptionsExt, RenderResultExt } from '../../packages/core/src/render.ts'
 import { argsToJsonSchema } from '../../packages/core/src/argparse.ts'
-import { maskSecrets, tierForModel } from '../../packages/core/src/config.ts'
+import { maskSecrets, maskSecretsDeep } from '../../packages/core/src/config.ts'
 import { denyText } from '../../packages/core/src/decide.ts'
 import { assemblePrompts, buildScope as coreBuildScope, defaultGate, isMarkdownSectionFile, promptSectionDirs, skillArgs, type MarkdownFile, type PromptSet as AssembledSet } from '../../packages/core/src/assemble.ts'
 import { parseToolHeader, parseToolHeaders } from '../../packages/core/src/toolheader.ts'
@@ -21,23 +21,31 @@ import { computeHealth } from '../../packages/core/src/health.ts'
 import { parseSkillListing } from '../../packages/core/src/items.ts'
 import { isApplied, json } from '../state.ts'
 import { type Io, OWN_TOOL_PREFIX, type PromptSet, type Runtime, type ScriptTool, debug, hash, insideRoot, join, now, stableJson } from '../ctx.ts'
-import { ensureEnv, ensureSession, envMask } from './config.ts'
+import { ensureEnv, ensureSession, envMask, modelTier } from './config.ts'
 import { ensureRules } from './cursor-rules.ts'
 import { journal, pushFileEntry } from './journal.ts'
 import { snapshotData, snapshotEntry } from '../../packages/core/src/journal.ts'
-import { type ModHost, allowedBinary, makeRenderHost, providerConfigs, providerData, runArgv } from './host.ts'
-import { ensureTrust, needsTrust, repoKey, trustState } from './trust.ts'
+import { type ModHost, allowedBinary, makeRenderHost, providerConfigs, providerData, readRepoFile, runArgv, writableInsideRoot } from './host.ts'
+import { ensureTrust, needsTrust, rebindAfterBuild, repoKey, sourcesHash, trustState } from './trust.ts'
 import { budgetSections } from './budgets.ts'
-import { readBranch, skillOffMessage } from './skill-gate.ts'
+import { gateFor, noteSkillInvocation, readBranch, setPromptContextSource, skillOffMessage, takeSkillInvocation } from './skill-gate.ts'
 import { refreshStatus } from './ui.ts'
 import { gateStats } from './gates.ts'
+
+// `prompt.volatile: "context"` sections reach the model through prompt.submit, which skill-gate.ts handles.
+setPromptContextSource((io, rt) => volatileContext(io, rt))
 
 const SYNC_BUILD_MS = 2000
 const FULL_BUILD_MS = 30_000
 const SECTION_PREFIX = 'context-gate:'
 
+const DEFAULT_PROMPT_DIR = '.claude/prompt'
+
+/** gate.json `prompt.dir`, repo-relative. An absolute or `..` value would read prompts from, and write `.trace` and
+ * `data/` into, a directory outside the repo before any trust: it falls back to the default (M05). */
 export function promptDir(rt: Runtime): string {
-  return (rt.cfg.prompt?.dir ?? '.claude/prompt').replace(/\/+$/, '')
+  const dir = (rt.cfg.prompt?.dir ?? DEFAULT_PROMPT_DIR).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+  return dir && insideRoot(dir) ? dir : DEFAULT_PROMPT_DIR
 }
 
 // ───────────────────────── loading ─────────────────────────
@@ -65,7 +73,29 @@ async function mtimeOf(io: Io, rt: Runtime, rel: string, lists: Map<string, List
   return entries.find((e) => e.name === rel.slice(i + 1) && e.kind === 'file')?.mtimeMs
 }
 
-/** Per-repo cache dir of the CLI (`~/.cache/context-gate/<name>-<hash12>/`, XDG_CACHE_HOME respected), SPEC Р3. */
+/**
+ * Spellings of one git remote (`git@host:o/r.git`, `https://host/o/r`, `ssh://git@host/o/r.git`, …): the engine
+ * may report the remote differently from `git config remote.origin.url`, which keys the CLI's cache dir.
+ */
+export function remoteSpellings(remote: string): string[] {
+  const out = new Set<string>([remote])
+  const m = /^(?:[\w+.-]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/.exec(remote.trim())
+  if (m) {
+    const [, host, path] = m
+    for (const base of [`https://${host}/${path}`, `http://${host}/${path}`, `git@${host}:${path}`, `ssh://git@${host}/${path}`, `git://${host}/${path}`]) {
+      out.add(base)
+      out.add(`${base}.git`)
+    }
+  }
+  out.add('')
+  return [...out]
+}
+
+/**
+ * Per-repo cache dir of the CLI (`~/.cache/context-gate/<name>-<hash12>/`, XDG_CACHE_HOME respected), SPEC Р3.
+ * Only a dir whose name is this root's own hash counts (the remote's spellings tried); never another repo's dir
+ * that merely shares the basename (M02).
+ */
 export async function repoCacheDir(io: Io, rt: Runtime): Promise<string | undefined> {
   const xdg = await io.env.cacheHome?.().catch(() => undefined)
   const home = xdg ? undefined : await io.env.home().catch(() => undefined)
@@ -74,10 +104,40 @@ export async function repoCacheDir(io: Io, rt: Runtime): Promise<string | undefi
   const repo = await io.session.repo().catch(() => null)
   const exact = `${base}/${repoCacheName(rt.root, repo?.remote ?? '')}`
   if (await io.fs.exists(`${exact}/compiled`).catch(() => false)) return exact
-  // The engine may spell the remote differently from `git config remote.origin.url`: one dir for this repo name is it.
-  const name = repoCacheName(rt.root).replace(/-[0-9a-f]{12}$/, '-')
-  const dirs = (await io.fs.list(base).catch(() => [])).filter((e) => e.kind === 'dir' && e.name.startsWith(name) && /-[0-9a-f]{12}$/.test(e.name))
-  return dirs.length === 1 ? `${base}/${dirs[0].name}` : exact
+  // The CLI keys its dir on the raw `git config --get remote.origin.url`: with no remote from the engine, read it
+  // from the repo's git config and try that exact spelling first.
+  const remote = repo?.remote || (await originUrl(io, rt.root)) || ''
+  const spellings = remote && remote !== repo?.remote ? [remote, ...remoteSpellings(remote)] : remoteSpellings(remote)
+  for (const spelling of spellings) {
+    const dir = `${base}/${repoCacheName(rt.root, spelling)}`
+    if (dir !== exact && (await io.fs.exists(`${dir}/compiled`).catch(() => false))) return dir
+  }
+  return exact
+}
+
+/** `remote.origin.url` from `<root>/.git/config`, or a worktree's common git dir (`.git` file → gitdir → commondir). */
+async function originUrl(io: Io, root: string): Promise<string | undefined> {
+  const read = async (p: string): Promise<string | undefined> => {
+    const t = await io.fs.read(p).catch(() => undefined)
+    return typeof t === 'string' ? t : undefined
+  }
+  let gitDir = join(root, '.git')
+  let config = await read(`${gitDir}/config`)
+  if (config === undefined) {
+    const m = /^gitdir:\s*(.+)$/m.exec((await read(gitDir)) ?? '')
+    if (!m) return undefined
+    gitDir = join(root, m[1].trim())
+    const common = (await read(`${gitDir}/commondir`))?.trim()
+    config = await read(`${common ? join(gitDir, common) : gitDir}/config`)
+  }
+  let inOrigin = false
+  for (const line of (config ?? '').split(/\r?\n/)) {
+    const sec = /^\s*\[(.+)\]\s*$/.exec(line)
+    if (sec) { inOrigin = /^remote\s+"origin"$/.test(sec[1].trim()); continue }
+    const kv = inOrigin ? /^\s*url\s*=\s*(.*?)\s*$/.exec(line) : null
+    if (kv) return kv[1]
+  }
+  return undefined
 }
 
 async function readCompiledDir(io: Io, absDir: string, label: string, entries: readonly ListEntry[], diagnostics: Diagnostic[]): Promise<{ prompt: CompiledPrompt; mtimeMs: number }[]> {
@@ -95,6 +155,18 @@ async function readCompiledDir(io: Io, absDir: string, label: string, entries: r
     }
   }
   return out
+}
+
+/** Prompt ids `<prompt dir>/prompt.lock.json` lists; undefined without a lock (or an empty one). */
+async function lockedIds(io: Io, rt: Runtime, dir: string): Promise<Set<string> | undefined> {
+  const t = await readRepoFile(io, rt, `${dir}/prompt.lock.json`)
+  if (typeof t !== 'string') return undefined
+  try {
+    const prompts = (JSON.parse(t) as { prompts?: unknown }).prompts
+    if (!prompts || typeof prompts !== 'object' || Array.isArray(prompts)) return undefined
+    const ids = Object.keys(prompts)
+    return ids.length ? new Set(ids) : undefined
+  } catch { return undefined }
 }
 
 /**
@@ -129,14 +201,16 @@ export async function loadPrompts(io: Io, rt: Runtime, opts: { force?: boolean }
   }
   // Markdown section dirs beyond `prompt.dir`: `itemSources` `{ kind: "prompt-dir", as: "section" }` (core, as the CLI).
   const extraDirs: { rel: string; entries: ListEntry[] }[] = []
-  for (const rel of promptSectionDirs({ ...rt.cfg, prompt: { ...rt.cfg.prompt, dir } }).slice(1)) {
+  for (const rel of promptSectionDirs({ ...rt.cfg, prompt: { ...rt.cfg.prompt, dir } }).slice(1).filter((d) => insideRoot(d))) {
     extraDirs.push({ rel, entries: [...(await io.fs.list(join(rt.root, rel)).catch(() => []))] })
   }
   const key = [`from:${compiledFrom}`, ...entries.map((e) => `${e.name}:${e.mtimeMs}`), ...compiledEntries.map((e) => `c/${e.name}:${e.mtimeMs}`), ...sourceKey,
     ...extraDirs.flatMap((d) => d.entries.map((e) => `d/${d.rel}/${e.name}:${e.mtimeMs}`))].sort().join('|')
   if (rt.prompts && rt.prompts.key === key && !rt.promptsDirty && !opts.force) return rt.prompts
   const diagnostics: Diagnostic[] = []
-  const loaded = await readCompiledDir(io, compiledDir, compiledLabel, compiledEntries, diagnostics)
+  // With a lock, only the ids it lists (CLI loadCompiled, M32): an orphan of a removed or renamed prompt never renders.
+  const listed = await lockedIds(io, rt, dir)
+  const loaded = (await readCompiledDir(io, compiledDir, compiledLabel, compiledEntries, diagnostics)).filter((l) => !listed || listed.has(l.prompt.id))
   const compiled = loaded.map((l) => l.prompt)
   // Markdown sources as files; tier variants and parsing are core `assemblePrompts` (same as the CLI).
   const markdown: MarkdownFile[] = []
@@ -145,7 +219,7 @@ export async function loadPrompts(io: Io, rt: Runtime, opts: { force?: boolean }
       if (e.kind !== 'file' || !isMarkdownSectionFile(e.name)) continue
       const path = `${d.rel}/${e.name}`
       if (markdown.some((m) => m.path === path)) continue
-      const t = await io.fs.read(join(rt.root, path)).catch(() => undefined)
+      const t = await readRepoFile(io, rt, path) // symlinks out of the repo are not read (H02)
       if (typeof t === 'string') markdown.push({ path, text: t })
     }
   }
@@ -207,9 +281,12 @@ export async function buildPrompts(io: Io, rt: Runtime, opts: { only?: string; t
   if (rt.building) return { ok: false, message: 'Збірка вже йде' }
   rt.building = true
   try {
+    const sources = await sourcesHash(io, rt).catch(() => undefined)
     const argv = ['node', cli, 'build', ...(opts.only ? ['--only', opts.only] : [])]
     const r = await runArgv(io, rt, argv, { timeoutMs: opts.timeoutMs })
     rt.promptsDirty = true
+    // The `.compiled/` this trusted build wrote is part of the trust surface: keep the decision (S1, Р3).
+    if (sources !== undefined) await rebindAfterBuild(io, rt, sources).catch((err: unknown) => debug(io, `trust rebind: ${String(err)}`))
     if (r.exitCode === 0) {
       const hadError = !!rt.buildError
       rt.buildError = undefined
@@ -244,7 +321,10 @@ export async function buildStale(io: Io, rt: Runtime): Promise<void> {
 /** The render scope: core `buildScope` (the CLI's too) over the session's gate, rules, ctx, data and providers. */
 export async function buildScope(io: Io, rt: Runtime, host: RenderHostExt, model: string | undefined): Promise<{ scope: Scope_; tier: string; dataKey: string }> {
   const stateGate = await io.read('gate')
-  const tier = model ? tierForModel(rt.cfg, model).tier : stateGate?.tier ?? (await io.read('tier')) ?? 'standard'
+  // The main loop's tier is the stored one (it may come from the context window, G-01); another model (a
+  // subagent's compose) gets its own (M22).
+  const main = await io.read('model')
+  const tier = model && model !== main ? modelTier(rt, model) : (await io.read('tier')) ?? stateGate?.tier ?? (model ? modelTier(rt, model) : 'standard')
   const pct = await io.read('ctxPercent')
   const fired = await io.read('budgetsFired')
   const owned = budgetSections(rt)
@@ -280,7 +360,7 @@ async function itemBodyOf(io: Io, rt: Runtime, kind: 'skill' | 'rule', name: str
   }
   if (!/^[\w.:@-]+$/.test(name)) return undefined
   const rel = `.claude/skills/${name.replace(/^[^:]+:/, '')}/SKILL.md`
-  const t = await io.fs.read(join(rt.root, rel)).catch(() => undefined)
+  const t = await readRepoFile(io, rt, rel)
   if (typeof t !== 'string') return undefined
   const m = /^---\n([\s\S]*?)\n---\n?/.exec(t.replace(/\r\n?/g, '\n'))
   const desc = m ? /^description:\s*(.+)$/m.exec(m[1])?.[1]?.replace(/^["']|["']$/g, '') : undefined
@@ -316,8 +396,10 @@ export function sectionsFor(rt: Runtime, set: PromptSet, tier: string, preload: 
   return assemblePrompts(set.compiled, set.markdown, tier, Object.keys(rt.cfg.tiers ?? {}), { preload })
 }
 
-/** Р5: the skills `tiers[*].preload` inlines for the applied gate (none in shadow mode or with the gate off). */
-export async function preloadOf(io: Io): Promise<string[]> {
+/** Р5: the skills `tiers[*].preload` inlines for the applied gate (none in shadow mode, with the gate off, or
+ * while gate.json is invalid: a stored gate must not outlive the layer, M18). */
+export async function preloadOf(io: Io, rt?: Runtime): Promise<string[]> {
+  if (rt && !rt.config) return []
   const gate = await io.read('gate')
   return isApplied(gate) ? gate.skills.preload : []
 }
@@ -343,11 +425,47 @@ async function syncBuild(io: Io, rt: Runtime, set: PromptSet): Promise<PromptSet
   return rebuilt ? loadPrompts(io, rt, { force: true }) : set
 }
 
+/**
+ * gate.json `prompt.volatile` (P1): `system` (default, SPEC «volatile — щоходу, останніми») keeps `scope: volatile`
+ * sections at the end of the system prompt; `context` delivers them as the prompt's `context` (prompt.submit)
+ * instead. The system prompt sits ahead of the whole conversation in the API's cache prefix, so a section that
+ * changes every turn there rewrites the cache of everything after it; a block beside the new message does not.
+ */
+export function volatileVia(rt: Runtime): 'system' | 'context' {
+  return (rt.cfg.prompt as { volatile?: unknown } | undefined)?.volatile === 'context' ? 'context' : 'system'
+}
+
+/** The prompts with only their `scope: volatile` sections (or only the others). */
+function byVolatile(prompts: readonly CompiledPrompt[], volatile: boolean): CompiledPrompt[] {
+  return prompts.map((p) => ({ ...p, sections: p.sections.filter((s) => (s.scope === 'volatile') === volatile) })).filter((p) => p.sections.length)
+}
+
+/** prompt.submit with `prompt.volatile: "context"`: the volatile sections rendered for this prompt, as one block. */
+export async function volatileContext(io: Io, rt: Runtime): Promise<string | undefined> {
+  if (volatileVia(rt) !== 'context') return undefined
+  try {
+    const set = await loadPrompts(io, rt)
+    const host = await hostFor(io, rt)
+    const { scope, tier, dataKey } = await buildScope(io, rt, host, undefined)
+    const prompts = byVolatile(sectionsFor(rt, set, tier, await preloadOf(io, rt)).system, true)
+    if (!prompts.length) return undefined
+    const res = await renderPrompt(prompts, scope, host, renderOptions(rt, tier))
+    await persistData(io, rt, dataKey, res)
+    const owned = budgetSections(rt)
+    const fired = await io.read('budgetsFired')
+    const texts = res.sections.filter((s) => s.included && s.text && !(owned.get(s.id) && !fired.includes(owned.get(s.id)!))).map((s) => s.text)
+    return texts.length ? `Поточний стан (context-gate, оновлюється з кожним промптом):\n\n${texts.join('\n\n')}` : undefined
+  } catch (err) {
+    debug(io, `volatile context: ${String((err as Error)?.message ?? err)}`)
+    return undefined
+  }
+}
+
 export async function composeSections(io: Io, rt: Runtime, model: string | undefined): Promise<{ sections: { id: string; text: string; scope: 'session' }[]; result?: RenderResultExt }> {
   let set = await loadPrompts(io, rt)
   set = await syncBuild(io, rt, set)
   const out: { id: string; text: string; scope: 'session' }[] = []
-  const preload = await preloadOf(io)
+  const preload = await preloadOf(io, rt)
   const hasSections = set.compiled.some((p) => !p.skill && p.sections.length) || set.markdown.length > 0 || preload.length > 0
   if (!hasSections) {
     rt.lastSections = out
@@ -358,7 +476,9 @@ export async function composeSections(io: Io, rt: Runtime, model: string | undef
   // The preload section (Р5) is core's: `assemblePrompts` generates it from the gate's `skills.preload`, as the CLI.
   const tiered = sectionsFor(rt, set, tier, preload)
   const g158 = await checkExports(io, rt, host, [...tiered.system, ...Object.values(tiered.skills)])
-  const res = await renderPrompt(tiered.system, scope, host, renderOptions(rt, tier))
+  // `prompt.volatile: "context"`: the volatile sections ride prompt.submit (volatileContext), not the system prompt.
+  const system = volatileVia(rt) === 'context' ? byVolatile(tiered.system, false) : tiered.system
+  const res = await renderPrompt(system, scope, host, renderOptions(rt, tier))
   res.diagnostics.push(...g158)
   await persistData(io, rt, dataKey, res)
   // Budget-owned sections appear only while their threshold is crossed.
@@ -429,15 +549,24 @@ async function writeDebugLog(io: Io, rt: Runtime, res: RenderResultExt, tier: st
   const rel = rt.cfg.debugLog?.path ?? DEBUG_LOG_FILE
   if (!insideRoot(rel)) return
   const path = join(rt.root, rel)
-  if (rt.debugLogText === undefined) {
-    const t = await io.fs.read(path).catch(() => '')
-    rt.debugLogText = typeof t === 'string' ? t : ''
-  }
-  rt.debugLogText = capDebugLog(rt.debugLogText, add, rt.cfg.debugLog?.maxBytes ?? DEBUG_LOG_MAX)
+  if (!(await writableInsideRoot(io, rt, path))) { debug(io, `debug log: ${rel} веде за межі репозиторію — не пишу`); return }
+  // Re-read before every write, as flushJournal (M16): another session or `context-gate run --debug` may have
+  // appended since. An existing file that cannot be read is never overwritten.
+  const exists = await io.fs.exists(path).catch(() => false)
+  const t = exists ? await io.fs.read(path).catch(() => undefined) : ''
+  if (typeof t !== 'string') { debug(io, `debug log: ${rel} не прочитано — не перезаписую`); return }
+  rt.debugLogText = capDebugLog(t, add, rt.cfg.debugLog?.maxBytes ?? DEBUG_LOG_MAX)
   await io.fs.write(path, rt.debugLogText).catch((err: unknown) => debug(io, `debug log: ${String(err)}`))
 }
 
 const TRACE_EVERY_MS = 5000
+
+/** The scope as files keep it: `env.*` values never leave memory (the LSP shows `***`). */
+function scopeForDisk(scope: Scope_): Scope_ {
+  const env = (scope as Record<string, unknown>).env
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return scope
+  return { ...scope, env: Object.fromEntries(Object.keys(env).map((k) => [k, '***'])) } as Scope_
+}
 
 /**
  * `<prompt dir>/.trace/last.json` after prompt.compose (core RunJson, as `context-gate run --json` writes it), for
@@ -447,7 +576,8 @@ async function writeLastTrace(io: Io, rt: Runtime, res: RenderResultExt, scope: 
   try {
     const gate = await io.read('gate')
     const lazies = [...rt.tools.entries()].filter(([, t]) => t.kind === 'lazy').map(([name, t]) => ({ name: name.slice(OWN_TOOL_PREFIX.length), ref: (t as { ref: string }).ref, description: (t as { description: string }).description }))
-    const body = { sections: res.sections, text: res.text, trace: res.trace, diagnostics: res.diagnostics, scope }
+    // Masked structurally, before serialization: a secret with `"` or `\` survives a mask of the JSON text (M04).
+    const body = maskSecretsDeep({ sections: res.sections, text: res.text, trace: res.trace, diagnostics: res.diagnostics, scope: scopeForDisk(scope) }, envMask(rt))
     const key = hash(stableJson(body))
     const t = now()
     if (rt.traceWrite && (rt.traceWrite.hash === key || t - rt.traceWrite.at < TRACE_EVERY_MS)) return
@@ -469,8 +599,7 @@ async function writeLastTrace(io: Io, rt: Runtime, res: RenderResultExt, scope: 
         at: t,
       },
     }
-    // The scope carries `env.*` values: mask them in the file (the LSP shows `***`).
-    await io.fs.write(join(rt.root, `${promptDir(rt)}/.trace/last.json`), maskSecrets(JSON.stringify(j, null, 2), envMask(rt)) + '\n')
+    await io.fs.write(join(rt.root, `${promptDir(rt)}/.trace/last.json`), JSON.stringify(j, null, 2) + '\n')
   } catch (err) {
     debug(io, `trace: ${String((err as Error)?.message ?? err)}`)
   }
@@ -490,8 +619,8 @@ async function writeSnapshot(io: Io, rt: Runtime, scope: Scope_, tier: string, s
     const meta = await snapshotMeta(io, rt)
     const gate = await io.read('gate')
     const secrets = envMask(rt)
-    const raw = snapshotData({ ...meta, tier, profile: gate?.profile ?? null, scope: scope as Record<string, Value>, text: sections.map((s) => s.text).join('\n\n') })
-    const data = secrets.length ? (JSON.parse(maskSecrets(JSON.stringify(raw), secrets)) as typeof raw) : raw
+    const raw = snapshotData({ ...meta, tier, profile: gate?.profile ?? null, scope: scopeForDisk(scope) as Record<string, Value>, text: sections.map((s) => s.text).join('\n\n') })
+    const data = maskSecretsDeep(raw, secrets)
     const key = hash(stableJson(data))
     if (rt.lastSnapshot === key) return
     rt.lastSnapshot = key
@@ -557,10 +686,27 @@ export function findPromptSkill(rt: Runtime, name: string): CompiledPrompt | und
   return rt.prompts?.compiled.find((p) => p.skill && (p.skill.name === name || p.skill.name === bare))
 }
 
-/** Raw args from the SKILL.md render line: `--args "…"` (the fallback when no tool.call/command.run carried them). */
+/** Raw args from the SKILL.md render line (`run <name> --args '…' --ctx-from live`, or an older `--args "…"`): the
+ * first such span in the text, so the generated comment's `--args "<аргументи>"` placeholder after it never wins.
+ * The engine substitutes `$ARGUMENTS` raw, so a single-quoted value runs to `' --ctx-from` (a `'` inside stays).
+ * An unexpanded `$ARGUMENTS` is no args. */
 export function argsFromText(text: string): string | undefined {
-  const m = /--args\s+"((?:[^"\\]|\\.)*)"/.exec(text)
-  return m ? m[1].replace(/\\(.)/g, '$1') : undefined
+  const re = /\brun\s+\S+\s+--args\s+(["'])/g
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const start = m.index + m[0].length
+    let v: string | undefined
+    if (m[1] === '"') {
+      const d = /^((?:[^"\\]|\\.)*)"/.exec(text.slice(start))
+      v = d ? d[1].replace(/\\(.)/g, '$1') : undefined
+    } else {
+      const end = text.indexOf("' --ctx-from", start)
+      const raw = end >= 0 ? text.slice(start, end) : /^((?:[^']|'\\'')*)'/.exec(text.slice(start))?.[1]
+      v = raw?.replace(/'\\''/g, "'")
+    }
+    if (v === undefined || v === '<аргументи>') continue
+    return v === '$ARGUMENTS' ? undefined : v
+  }
+  return undefined
 }
 
 /**
@@ -624,7 +770,7 @@ export async function registerScriptTools(io: Io, rt: Runtime): Promise<void> {
   for (const e of entries) {
     if (e.kind !== 'file') continue
     const rel = `${dir}/${e.name}`
-    const t = await io.fs.read(join(rt.root, rel)).catch(() => undefined)
+    const t = await readRepoFile(io, rt, rel)
     if (typeof t !== 'string') continue
     const tool = parseScriptHeader(t, rel)
     if (tool) await registerOwnScriptTool(io, rt, tool)
@@ -656,7 +802,7 @@ async function toolModules(io: Io, rt: Runtime): Promise<string[]> {
  */
 export async function registerFunctionTools(io: Io, rt: Runtime): Promise<void> {
   for (const path of await toolModules(io, rt)) {
-    const t = await io.fs.read(join(rt.root, path)).catch(() => undefined)
+    const t = await readRepoFile(io, rt, path)
     if (typeof t !== 'string' || !t.includes('gate-tool')) continue
     for (const h of parseToolHeaders(t).headers) {
       await registerOwnScriptTool(io, rt, { name: h.name, description: h.description ?? h.name, path, inputSchema: h.inputSchema, fn: h.name, ...(h.tiers ? { tiers: h.tiers } : {}) })
@@ -665,7 +811,7 @@ export async function registerFunctionTools(io: Io, rt: Runtime): Promise<void> 
 }
 
 async function scriptToolArgv(io: Io, rt: Runtime, rel: string): Promise<string[]> {
-  const t = await io.fs.read(join(rt.root, rel)).catch(() => '')
+  const t = (await readRepoFile(io, rt, rel)) ?? ''
   return scriptArgv(join(rt.root, rel), scriptLang(rel, typeof t === 'string' ? t : '') ?? 'bash')
 }
 
@@ -675,14 +821,14 @@ async function lazyText(io: Io, rt: Runtime, ref: string): Promise<string> {
     const set = await loadPrompts(io, rt)
     const host = await hostFor(io, rt)
     const { scope, tier } = await buildScope(io, rt, host, undefined)
-    const res = await renderPrompt(sectionsFor(rt, set, tier, await preloadOf(io)).system, scope, host, { ...renderOptions(rt, tier), only: id })
+    const res = await renderPrompt(sectionsFor(rt, set, tier, await preloadOf(io, rt)).system, scope, host, { ...renderOptions(rt, tier), only: id })
     return res.sections.find((s) => s.id === id)?.text || `Секцію ${id} не знайдено`
   }
   const m = /^(skill|rule):(.+)$/.exec(ref)
   if (m) return (await itemBodyOf(io, rt, m[1] as 'skill' | 'rule', m[2]))?.body ?? `${ref} не знайдено`
   if (ref.startsWith('text:')) return 'Текст цього включення доступний лише в рендері секції.'
   if (!insideRoot(ref)) return `${ref}: шлях поза репозиторієм`
-  const t = await io.fs.read(join(rt.root, ref)).catch(() => undefined)
+  const t = await readRepoFile(io, rt, ref)
   return typeof t === 'string' ? t : `${ref} не знайдено`
 }
 
@@ -710,21 +856,36 @@ export async function composeAfter(io: Io, rt: Runtime, e: { model: string; trai
   return [...sections, ...rest]
 }
 
-/** command.run for a prompt skill typed as `/name args`: keep the args for skill.prompt. */
-export function captureSkillArgs(rt: Runtime, command: string, args: string): void {
-  if (command !== 'gate' && command !== 'rule' && findPromptSkill(rt, command)) rt.skillArgs.set(command, args)
+/** command.run: a `/name args` the person typed (origin `composer`). Remembered for skill.prompt: its args (prompt
+ * skills) and that the user, not the model, asked for it, so the gate's off text never replaces it (M13). Another
+ * plugin's `$.command.run`, a bridge or an SDK run is not the person: nothing is queued, so its expansion is checked
+ * against the gate like any unannounced one (its args still come from the render line). */
+export function captureSkillArgs(rt: Runtime, command: string, args: string, origin?: { kind: string }): void {
+  if (origin && origin.kind !== 'composer') return
+  if (command !== 'gate' && command !== 'rule') noteSkillInvocation(rt, command, { args, user: true })
 }
 
-/** skill.prompt: off text for a gated-off skill; our prompt skill rendered with parsed args; else undefined. */
+/**
+ * skill.prompt: off text for a gated-off skill; our prompt skill rendered with parsed args; else undefined.
+ * The event names neither the agent nor the call: the invocation queued by tool.call Skill (already checked
+ * against that agent's gate, G-08) or by a typed `/name` is taken, and only an expansion nobody announced (a
+ * subagent's preload) is checked against the main gate here (M06). Args: the queued call's, else the render line's
+ * `--args '…'`, which the engine fills per call (M07).
+ */
 export async function skillPrompt(io: Io, rt: Runtime, skill: string, text: string): Promise<string | undefined> {
   await ensureSession(io, rt)
-  const off = await skillOffMessage(io, rt, skill)
-  if (off) return off
+  const fromText = argsFromText(text)
+  const inv = takeSkillInvocation(rt, skill, fromText)
+  if (!inv) {
+    const off = await skillOffMessage(io, rt, skill)
+    if (off) return off
+  }
   await loadPrompts(io, rt)
   const prompt = findPromptSkill(rt, skill)
   if (!prompt) return undefined
-  const args = rt.skillArgs.get(skill) ?? argsFromText(text) ?? ''
-  rt.skillArgs.delete(skill)
+  // The queued call's args are what the user or the model passed; the text only picks the invocation and is the
+  // fallback when nothing was queued (the render line can be garbled by a quote in the args).
+  const args = inv?.args || fromText || ''
   return renderSkill(io, rt, prompt, args)
 }
 
@@ -750,12 +911,15 @@ export async function serveOwnTool(io: Io, rt: Runtime, e: { tool: string } & Re
       return { result: await lazyText(io, rt, entry.ref) }
     }
     const tool = entry.tool
-    const gate = await io.read('gate')
-    const tier = gate?.tier ?? (await io.read('tier')) ?? 'standard'
+    // The calling agent's gate and tier (G-08): a subagent on another tier sees its own decision (L07).
+    const agentId = typeof e.agentId === 'string' ? e.agentId : undefined
+    const gate = await gateFor(io, rt, agentId)
+    const agentTier = agentId !== undefined ? (await io.read('agentTiers'))[agentId] : undefined
+    const tier = agentTier ?? gate?.tier ?? (await io.read('tier')) ?? 'standard'
     // `kind: tool` items obey groups and profiles like MCP tools (SPEC «Скрипти як інструменти моделі»).
     if (rt.config && isApplied(gate) && (gate.items[`tool:${tool.name}`] === 'off' || gate.items[`tool:${e.tool}`] === 'off')) {
       rt.denies[e.tool] = (rt.denies[e.tool] ?? 0) + 1
-      await journal(io, rt, { kind: 'deny', trigger: 'script-tool', tier, data: { tool: tool.name, count: rt.denies[e.tool] } })
+      await journal(io, rt, { kind: 'deny', trigger: 'script-tool', tier, data: { tool: tool.name, count: rt.denies[e.tool], ...(agentId !== undefined ? { agent: agentId } : {}) } })
       return { deny: denyText('tool', tool.name, gate as unknown as Gate, rt.config) }
     }
     if (tool.tiers && !tool.tiers.includes(tier)) return { deny: `Інструмент ${tool.name} недоступний для tier ${tier} (tiers: ${tool.tiers.join(', ')})` }

@@ -20,8 +20,9 @@ export interface Io {
     list(path: string): ReturnType<E['fs']['list']>
     exists(path: string): Promise<boolean>
     write(path: string, text: string): Promise<void>
-    /** `$.fs.stat` (optional: layers fall back to the parent's `list`). */
-    stat?(path: string): Promise<{ kind: string; size: number; mtimeMs: number }>
+    /** `$.fs.stat` (optional: layers fall back to the parent's `list`). With `resolve`, `realPath` is where the path
+     *  lands (absent when it leads nowhere); `isLink` says whether the path itself is a symbolic link. */
+    stat?(path: string, options?: { resolve: boolean }): Promise<{ kind: string; size: number; mtimeMs: number; isLink?: boolean; realPath?: string }>
   }
   session: {
     id(): Promise<string>
@@ -37,8 +38,18 @@ export interface Io {
     home(): Promise<string | undefined>
     /** `XDG_CACHE_HOME` (optional; the cache dir falls back to `<home>/.cache`). */
     cacheHome?(): Promise<string | undefined>
+    /** Runner plan (shiftwork): `CONTEXT_GATE_PROFILE`, `CONTEXT_GATE_TICKET_TYPE`, `CONTEXT_GATE_TICKET` (M19). */
+    planProfile?(): Promise<string | undefined>
+    ticketType?(): Promise<string | undefined>
+    ticket?(): Promise<string | undefined>
   }
-  store: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; delete(key: string): Promise<void> }
+  store: {
+    get(key: string): Promise<unknown>
+    set(key: string, value: unknown): Promise<void>
+    delete(key: string): Promise<void>
+    /** `$.store.keys()` (optional for fake ports): the cache sweep drops entries no index knows (R2). */
+    keys?(): Promise<string[]>
+  }
   process: {
     run: E['process']['run']
     /** `$.process.spawn` (WP2: `/gate edit` starts the browser editor; optional for fake ports). */
@@ -118,6 +129,8 @@ export interface ScriptTool {
 export interface Runtime {
   options: Options
   ready: boolean
+  /** The bootstrap in flight: concurrent hooks on a fresh runtime await it instead of running on an empty config. */
+  boot?: Promise<void>
   root: string
   windows: boolean
   interactive: boolean
@@ -158,12 +171,19 @@ export interface Runtime {
   editedThisTurn: boolean
   escalated: Set<string>
   journalBuffer: string[]
-  journalText?: string
+  /** Flushes run one after another (each re-reads the file, so other writers' lines survive). */
+  journalFlush?: Promise<void>
+  /** The journal file exists but cannot be read: writing it whole would erase other writers' history. */
+  journalBlocked?: boolean
   /** Hash of the last written journal snapshot (dedup). */
   lastSnapshot?: string
   trustAsked: boolean
   recheckReason?: 'new' | 'compact' | 'auto'
   trustCache?: { key: string; hash: string; decision: 'unknown' | 'trusted' | 'denied' }
+  /** Hash of the code the repo can execute beyond gate.json (S1): file fingerprint, content hash, when computed. */
+  trustSurface?: { root: string; fingerprint: string; hash: string; at: number }
+  /** Real path of `root` (symlinks resolved), for the read containment check (H02). */
+  realRoot?: { root: string; real: string }
   building: boolean
   buildAttempted: Set<string>
   whitelist?: string[]

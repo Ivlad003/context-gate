@@ -4,11 +4,11 @@
 // update it in place and return what to deliver plus the journal entries to append.
 
 import type { DecisionLogEntry, Gate, GateConfig, GateState, Item, MdcRule, Signals } from '../../core/src/types.ts'
-import { decideGate, denyText, skillOffText, statusLine } from '../../core/src/decide.ts'
+import { decideGate, denyText, profileParts, skillOffText, statusLine } from '../../core/src/decide.ts'
 import { autoRulesFor, isPartialRead, packInjections, ruleToItem } from '../../core/src/mdc.ts'
 import { normalizePath } from '../../core/src/glob.ts'
-import { makeItem } from '../../core/src/items.ts'
-import { extractMentions, extractPromptFlag } from '../../core/src/gatecmd.ts'
+import { makeItem, ownEntry } from '../../core/src/items.ts'
+import { extractMentions, extractPromptFlag, promptFlagAction } from '../../core/src/gatecmd.ts'
 import { normalizeModelId, tierForModel } from '../../core/src/config.ts'
 
 /** Log file the mod, the hooks adapter, shiftwork and these adapters share (repo-relative). */
@@ -31,7 +31,15 @@ export interface GateEnv {
   CONTEXT_GATE_TICKET_TYPE?: string
   /** Model id when the harness gives none. */
   CONTEXT_GATE_MODEL?: string
+  /** Shiftwork plan: the ticket's `Skills: +a -b` as groups (or profiles) added / removed, space or comma separated. */
+  CONTEXT_GATE_ADD?: string
+  CONTEXT_GATE_REMOVE?: string
+  /** `system`: the runner already put the tier preload into the system prompt; the adapter does not repeat it. */
+  CONTEXT_GATE_PRELOAD?: string
 }
+
+/** Env keys these adapters read (load.ts `gateEnv` copies exactly these). */
+export const GATE_ENV_KEYS = ['CONTEXT_GATE_PROFILE', 'CONTEXT_GATE_MODE', 'CONTEXT_GATE_OFF', 'CONTEXT_GATE_TICKET_TYPE', 'CONTEXT_GATE_MODEL', 'CONTEXT_GATE_ADD', 'CONTEXT_GATE_REMOVE', 'CONTEXT_GATE_PRELOAD'] as const
 
 export interface GateData {
   /** Absolute repo root. */
@@ -94,14 +102,40 @@ export function isApplied(cfg: GateConfig, s: GateSession, env: GateEnv): boolea
   if (env.CONTEXT_GATE_OFF === '1' || s.manual?.off) return false
   if (env.CONTEXT_GATE_PROFILE?.trim()) return true
   if (s.manual?.profile) return true
+  // A runner plan's `Skills: +a -b` is a manual signal, like `/gate +a` in the mod.
+  if (envList(env.CONTEXT_GATE_ADD).length || envList(env.CONTEXT_GATE_REMOVE).length) return true
   const mode = env.CONTEXT_GATE_MODE?.trim() || cfg.classify?.mode || 'shadow'
   return mode === 'auto'
+}
+
+/** `CONTEXT_GATE_ADD="pg, +ops"` → `['pg', 'ops']`. */
+export function envList(v: string | undefined): string[] {
+  return (v ?? '').split(/[\s,]+/).map((x) => x.replace(/^[+-]/, '')).filter(Boolean)
 }
 
 function manualSignal(s: GateSession, env: GateEnv): Signals['manual'] {
   if (env.CONTEXT_GATE_OFF === '1' || s.manual?.off) return { add: [], remove: [], off: true }
   const p = s.manual?.profile || env.CONTEXT_GATE_PROFILE?.trim()
-  return p ? { profile: p, add: [], remove: [] } : undefined
+  const add = envList(env.CONTEXT_GATE_ADD)
+  const remove = envList(env.CONTEXT_GATE_REMOVE)
+  if (!p && !add.length && !remove.length) return undefined
+  return p ? { profile: p, add, remove } : { add, remove }
+}
+
+/** Is every part of `word` (`a+b` unions too) a profile gate.json declares? The mod ignores others (G502). */
+export function declaredProfile(cfg: GateConfig, word: string): boolean {
+  const parts = profileParts(word, cfg)
+  return parts.length > 0 && parts.every((p) => ownEntry(cfg.profiles, p) !== undefined)
+}
+
+/**
+ * The `[gate:x]` word that enables `group`: `[gate:x]` sets a profile, not a group, so it is the group itself only
+ * when that is a declared profile, else a declared profile that contains the group (M73).
+ */
+export function flagForGroup(cfg: GateConfig, group: string): string | undefined {
+  if (ownEntry(cfg.profiles, group)) return group
+  for (const [name, p] of Object.entries(cfg.profiles ?? {})) if (p?.groups?.includes(group)) return name
+  return undefined
 }
 
 function allItems(data: GateData, extra: readonly Item[]): Item[] {
@@ -137,16 +171,26 @@ export interface PromptParse {
   files: string[]
 }
 
-/** A leading `[gate:x]` / `[gate:off]` / `[gate:auto]` / `[gate:new]` of a user prompt: updates the overrides. */
-export function applyFlag(s: GateSession, prompt: string): { text: string; recheck: boolean; flag?: string } {
+/**
+ * A leading `[gate:x]` / `[gate:off]` / `[gate:auto]` / `[gate:new]` of a user prompt: updates the overrides. With
+ * `cfg`, a profile gate.json does not declare is ignored as the mod does (G502): `ignored` carries the notice.
+ */
+export function applyFlag(s: GateSession, prompt: string, cfg?: GateConfig): { text: string; recheck: boolean; flag?: string; ignored?: string } {
   const flag = extractPromptFlag(prompt)
+  const action = promptFlagAction(flag.profile)
   let recheck = false
-  if (flag.profile === 'off') s.manual = { off: true }
-  else if (flag.profile === 'auto') { s.manual = undefined; recheck = true }
-  else if (flag.profile === 'new') recheck = true
-  else if (flag.profile) s.manual = { profile: flag.profile }
+  let ignored: string | undefined
+  if (action === 'off') s.manual = { off: true }
+  else if (action === 'auto') { s.manual = undefined; recheck = true }
+  else if (action === 'new') recheck = true
+  else if (flag.profile && cfg && !declaredProfile(cfg, flag.profile)) {
+    ignored = `context-gate: G502 [gate:${flag.profile}]: профіль не оголошено в gate.json, прапорець проігноровано. Відомі: ${Object.keys(cfg.profiles ?? {}).join(', ') || '—'}`
+  } else if (flag.profile) s.manual = { profile: flag.profile }
   if (recheck) s.pendingRecheck = true
-  return flag.profile ? { text: flag.text, recheck, flag: flag.profile } : { text: flag.text, recheck }
+  const out: { text: string; recheck: boolean; flag?: string; ignored?: string } = { text: flag.text, recheck }
+  if (flag.profile) out.flag = flag.profile
+  if (ignored) out.ignored = ignored
+  return out
 }
 
 /** Repo-relative paths of `@file` mentions; they become `when.paths` signals. */
@@ -158,7 +202,7 @@ export function mentionedFiles(data: GateData, s: GateSession, prompt: string): 
 
 /** Both of the above for one prompt. */
 export function applyPrompt(data: GateData, s: GateSession, prompt: string): PromptParse {
-  const f = applyFlag(s, prompt)
+  const f = applyFlag(s, prompt, data.config)
   return { text: f.text, recheck: f.recheck, files: mentionedFiles(data, s, f.text) }
 }
 
@@ -205,8 +249,9 @@ export function decideTurn(data: GateData, s: GateSession, adapter: AdapterName,
 export function gateWith(data: GateData, s: GateSession, extra: readonly Item[], now: number): Gate {
   const signals: Signals = { paths: [], model: s.model ?? modelIdOf(data.env.CONTEXT_GATE_MODEL) }
   const manual = manualSignal(s, data.env)
-  if (manual) signals.manual = manual
-  else if (s.gate.profile) signals.manual = { profile: s.gate.profile, add: [], remove: [] }
+  // The committed profile holds; runner adjustments (CONTEXT_GATE_ADD/REMOVE) apply on top of it.
+  if (manual && (manual.profile || manual.off || !s.gate.profile)) signals.manual = manual
+  else if (s.gate.profile) signals.manual = { profile: s.gate.profile, add: manual?.add ?? [], remove: manual?.remove ?? [] }
   return decideGate(data.config, signals, s.gate, allItems(data, extra), { now }).gate
 }
 
@@ -258,7 +303,9 @@ export function systemParts(data: GateData, s: GateSession, gate: Gate, applied:
     }
   }
   const bodies: string[] = []
-  for (const name of gate.skills.preload) {
+  // Preload (Р5) only for the applied gate, as the mod's preload section (M03); not when the runner already did it.
+  const preload = applied && !gate.off && data.env.CONTEXT_GATE_PRELOAD !== 'system' ? gate.skills.preload : []
+  for (const name of preload) {
     const it = data.items.find((i) => i.kind === 'skill' && i.name === name)
     const path = it?.provenance.path
     const body = it?.body ?? (path && readBody ? readBody(path) : undefined)
@@ -305,7 +352,7 @@ export function skillDeny(data: GateData, s: GateSession, name: string, adapter:
   const reason = skillOffText(name, gate, data.config)
   const applied = isApplied(data.config, s, data.env)
   const entry = denyLog(now, s, gate, `skill:${name}`, applied ? reason : `shadow: ${reason}`, !applied, adapter)
-  return applied ? { deny: promptHint(reason, data.env), log: [entry] } : { log: [entry] }
+  return applied ? { deny: promptHint(reason, data), log: [entry] } : { log: [entry] }
 }
 
 // ───────────────────────── tools ─────────────────────────
@@ -317,9 +364,12 @@ function denyLog(now: number, s: GateSession, gate: Gate, id: string, reason: st
 }
 
 /** `/gate +x` is a mod command; in these harnesses the user switches with `[gate:x]` in the prompt. */
-function promptHint(reason: string, env: GateEnv): string {
-  const text = reason.replace(/(Користувач може увімкнути|Увімкни): \/gate (\S+)/, (_m, lead: string, g: string) => `${lead}: [gate:${g.replace(/^\+/, '')}] на початку промпту`)
-  return env.CONTEXT_GATE_PROFILE ? `${text} (профіль задано CONTEXT_GATE_PROFILE)` : `${text}. Або [gate:off].`
+function promptHint(reason: string, data: Pick<GateData, 'config' | 'env'>): string {
+  const text = reason.replace(/(Користувач може увімкнути|Увімкни): \/gate (\S+)/, (_m, lead: string, g: string) => {
+    const flag = g === 'off' ? 'off' : flagForGroup(data.config, g.replace(/^\+/, '')) ?? 'off'
+    return `${lead}: [gate:${flag}] на початку промпту`
+  })
+  return data.env.CONTEXT_GATE_PROFILE ? `${text} (профіль задано CONTEXT_GATE_PROFILE)` : `${text}. Або [gate:off].`
 }
 
 /** MCP tool (canonical `mcp__<server>__<tool>`) call: deny text when gated off and applied; a `deny` entry either way. */
@@ -331,7 +381,7 @@ export function toolDeny(data: GateData, s: GateSession, tool: string, adapter: 
   const reason = denyText('tool', tool, gate, data.config)
   const applied = isApplied(data.config, s, data.env)
   const entry = denyLog(now, s, gate, item.id, applied ? reason : `shadow: ${reason}`, !applied, adapter)
-  return applied ? { deny: promptHint(reason, data.env), log: [entry] } : { log: [entry] }
+  return applied ? { deny: promptHint(reason, data), log: [entry] } : { log: [entry] }
 }
 
 /** Names (canonical) of MCP tools to hide from the model this turn. Empty in shadow mode. */
@@ -347,12 +397,13 @@ export function hiddenTools(data: GateData, s: GateSession, tools: readonly stri
 
 /**
  * Auto Attached rules for a file a tool touched (or a prompt mentioned), not yet delivered in this context.
- * A full read of a `.mdc` counts as delivering that rule; a partial read (offset/limit) doesn't.
+ * A full read (or a mention) of a `.mdc` counts as delivering that rule; a partial read (offset/limit) and an
+ * edit/write (only the diff reached the model) don't — as the mod and the hooks adapter.
  */
 export function rulesForFile(data: GateData, s: GateSession, path: string, via: string, adapter: AdapterName, now: number, toolInput?: unknown): { text?: string; rel: string; log: DecisionLogEntry[] } {
   const rel = relPath(data, path)
   s.paths = pushRecent(s.paths, rel, RECENT_PATHS)
-  if (rel.endsWith('.mdc') && !isPartialRead(toolInput)) {
+  if (rel.endsWith('.mdc') && (via === 'tool:read' || via === 'prompt') && !isPartialRead(toolInput)) {
     const r = data.rules.find((x) => x.path === rel)
     if (r && !s.seen.includes(r.id)) s.seen.push(r.id)
   }

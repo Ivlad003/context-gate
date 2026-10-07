@@ -5,10 +5,11 @@ import type { DecisionLogEntry, Gate, GateConfig, GateState, Item, ItemDecision,
 import type { PipeStage } from './gatecmd.ts'
 import { parseDuration } from './duration.ts'
 import { ruleToItem } from './mdc.ts'
-import { groupsOf, normalizeItems, parseSkillListing, skillListingItems } from './items.ts'
+import { groupsOf, normalizeItems, ownEntry, parseSkillListing, skillListingItems } from './items.ts'
 import { decideGate } from './decide.ts'
 import type { DecideOptions } from './decide.ts'
 import { filterWhere, formatWhy, getPath } from './journal.ts'
+import { deniedItem } from './report.ts'
 
 export type DecidedItem = Item & { decision: ItemDecision }
 
@@ -108,6 +109,8 @@ const asItems = (records: readonly unknown[]): AnyItem[] => records.filter((r): 
 
 export function sinceMs(since: string | undefined, now: number): number | undefined {
   if (!since) return undefined
+  // A unitless number is ambiguous (ms? days?): rejected, the caller reports it (L17).
+  if (/^\s*\d+(\.\d+)?\s*$/.test(since)) return undefined
   const d = parseDuration(since)
   if (d !== undefined) return now - d
   const t = Date.parse(since)
@@ -134,8 +137,10 @@ export function observeCounts(entries: readonly DecisionLogEntry[], from?: numbe
       for (const id of ids) bump(id.includes(':') ? id : `rule:${id}`, 'delivered', e.ts)
     } else if (kind === 'skill-render' && typeof d.skill === 'string') bump(`skill:${d.skill}`, 'delivered', e.ts)
     else if (kind === 'deny') {
-      const t = (d.tool ?? d.id ?? d.name) as string | undefined
-      if (t) bump(t.includes(':') ? t : `tool:${t}`, 'denied', e.ts)
+      // Shadow denies were never applied; the mod journals a denied skill as `data.skill` (report's resolver).
+      if (d.shadow === true) continue
+      const it = deniedItem(e)
+      if (it) bump(`${it.kind}:${it.name}`, 'denied', e.ts)
     } else if (kind === 'decision') for (const id of e.enabled ?? []) bump(id, 'enabled', e.ts)
   }
   return out
@@ -223,7 +228,9 @@ export async function runPipeStage(stage: PipeStage, input: readonly unknown[], 
       return { records: asItems(input).map((it) => { const d = it.decision ?? 'on'; return { id: it.id, decision: d, adapter, ...deliveryOf(it, d, adapter) } }) }
     }
     case 'observe': {
-      const counts = observeCounts(await host.log(), sinceMs(a.since, host.now))
+      const from = sinceMs(a.since, host.now)
+      if (a.since !== undefined && from === undefined) return { error: `невірне --since «${a.since}»: тривалість з одиницею (30m, 24h, 7d) або дата (2026-01-31)`, code: 2 }
+      const counts = observeCounts(await host.log(), from)
       const status = a.status
       const out = asItems(input).map((it) => ({ ...it, observed: counts.get(it.id) ?? { delivered: 0, enabled: 0, denied: 0 } }))
       const filtered = !status ? out : out.filter((it) => {
@@ -325,8 +332,8 @@ export function itemProvenance(items: readonly Pick<Item, 'id' | 'kind' | 'name'
   const tierGroups = new Set(p.config.tiers?.[p.gate.tier]?.groups ?? [])
   const manualAdd = new Set<string>()
   for (const a of p.manual?.add ?? []) {
-    if (p.config.groups?.[a]) manualAdd.add(a)
-    else for (const g of p.config.profiles?.[a]?.groups ?? [a]) manualAdd.add(g)
+    if (ownEntry(p.config.groups, a)) manualAdd.add(a)
+    else for (const g of ownEntry(p.config.profiles, a)?.groups ?? [a]) manualAdd.add(g)
   }
   const active = new Set(p.gate.groups)
   const profileTrigger = p.manual?.profile ? 'manual' : p.profileSource ?? 'profile'

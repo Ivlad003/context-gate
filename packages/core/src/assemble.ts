@@ -52,6 +52,9 @@ export function isMarkdownSectionFile(name: string): boolean {
   return name.endsWith('.md') && !/^readme\.md$/i.test(name)
 }
 
+/** Code-unit order, independent of the process locale (`localeCompare` follows LANG: CLI and mod would differ). */
+const byString = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
 function wrapSection(section: SectionNode, uses: Record<string, string>, path: string): CompiledPrompt {
   return { version: 1, compiler: 'markdown', id: section.id, sourceHash: '', sources: [{ path, hash: '' }], sections: [section], ...(Object.keys(uses).length ? { uses } : {}), diagnostics: [] }
 }
@@ -64,11 +67,11 @@ export function assemblePrompts(compiled: readonly CompiledPrompt[], markdown: r
   const diagnostics: Diagnostic[] = []
   const system: CompiledPrompt[] = []
   const skills: Record<string, CompiledPrompt> = {}
-  for (const cp of [...compiled].sort((a, b) => a.id.localeCompare(b.id))) {
+  for (const cp of [...compiled].sort((a, b) => byString(a.id, b.id))) {
     if (cp.skill) skills[cp.skill.name] = cp
     else system.push(cp)
   }
-  const files = [...markdown].sort((a, b) => a.path.localeCompare(b.path))
+  const files = [...markdown].sort((a, b) => byString(a.path, b.path))
   const variantsOf = new Map<string, { tier: Tier; file: MarkdownFile }[]>()
   const canonical: MarkdownFile[] = []
   for (const f of files) {
@@ -80,7 +83,7 @@ export function assemblePrompts(compiled: readonly CompiledPrompt[], markdown: r
     } else canonical.push(f)
   }
   for (const f of canonical) {
-    const base = parseMarkdownPrompt(f.text, { path: f.path })
+    const base = parseMarkdownPrompt(f.text, { path: f.path, ...(tierNames ? { tiers: tierNames } : {}) })
     diagnostics.push(...base.diagnostics)
     const variants: Record<Tier, SectionNode> = {}
     const uses = { ...base.uses }
@@ -190,7 +193,7 @@ export interface DataEntry { key: string; value: Value; fetchedAt?: number; cach
  */
 export function dataScope(entries: readonly DataEntry[]): Value {
   const out: Record<string, Value> = {}
-  for (const e of [...entries].sort((a, b) => a.key.localeCompare(b.key))) out[e.key] = e.fetchedAt !== undefined ? dataEnvelope(e.value, e.fetchedAt, e.cache) : e.value
+  for (const e of [...entries].sort((a, b) => byString(a.key, b.key))) out[e.key] = e.fetchedAt !== undefined ? dataEnvelope(e.value, e.fetchedAt, e.cache) : e.value
   return out
 }
 

@@ -41,6 +41,10 @@ export type GateParse = GateCommand | { error: string }
 
 const SIMPLE = new Set(['off', 'auto', 'new', 'shadow', 'apply', 'rules', 'health', 'build', 'help'])
 
+/** Words `/gate <word>` reads as a subcommand or pipe stage, never as a profile (a profile with such a name is
+ * reachable only as `/gate profile <name>` or `[gate:<name>]`; config validation warns, G316). */
+export const RESERVED_GATE_WORDS: readonly string[] = [...new Set([...SIMPLE, ...PIPE_STAGES, 'why', 'render', 'edit', 'trust'])]
+
 /** Split on `|` outside quotes. */
 function splitPipe(s: string): string[] {
   const out: string[] = []
@@ -131,6 +135,13 @@ export function parseGateCommand(input: string, opts: ParseGateOptions = {}): Ga
     }
     return { cmd: 'groups', add, remove }
   }
+  if (head === 'profile' && ws.length === 2) {
+    // Explicit form: also reaches profiles named like a subcommand (`/gate profile build`).
+    if (opts.profiles && !opts.profiles.includes(ws[1])) {
+      return { error: `G502 Невідомий профіль «${ws[1]}». Відомі: ${opts.profiles.join(', ') || '—'}` }
+    }
+    return { cmd: 'profile', profile: ws[1] }
+  }
   if (head === 'why') {
     if (ws.length === 1) return { cmd: 'why' }
     if (ws.length === 2 && ws[1] === 'off') return { cmd: 'why', close: true }
@@ -172,12 +183,28 @@ export function parseGateCommand(input: string, opts: ParseGateOptions = {}): Ga
 
 // ───────────────────────── Prompt helpers ─────────────────────────
 
-/** `[gate:frontend] fix the button` → { profile: 'frontend', text: 'fix the button' }. */
+/** Prompt-flag words that are commands, not profiles: `[gate:off]` = `/gate off`, `[gate:auto]`, `[gate:new]`. */
+export type PromptFlagAction = 'off' | 'auto' | 'new'
+
+const FLAG_ACTIONS: readonly string[] = ['off', 'auto', 'new']
+
+/** `[gate:frontend] fix the button` → { profile: 'frontend', text: 'fix the button' }. The name is any run of
+ * non-space characters, as `/gate <name>` accepts (`[gate:фронт]`). `[gate:off|auto|new]` are commands, not
+ * profiles: check `promptFlagAction(flag.profile)` before treating the word as a profile. */
 export function extractPromptFlag(text: string): { profile?: string; text: string } {
-  const m = /^\s*\[gate:\s*([\w.+-]+)\s*\]\s*/.exec(text)
+  const m = /^\s*\[gate:\s*([^\]\s]+)\s*\]\s*/u.exec(text)
   if (!m) return { text }
   return { profile: m[1], text: text.slice(m[0].length) }
 }
+
+/** The command a prompt-flag word stands for (`[gate:off]` = `/gate off`, `[gate:auto]`, `[gate:new]`), or
+ * undefined for a profile name. Every adapter must use this, so `[gate:off]` never pins a profile named `off`. */
+export function promptFlagAction(word: string | undefined): PromptFlagAction | undefined {
+  return word !== undefined && FLAG_ACTIONS.includes(word) ? (word as PromptFlagAction) : undefined
+}
+
+/** A line/column suffix of an IDE file reference: `#L10-20`, `#L5`, `#L10-L20`, `:12`, `:12:3`, `:10-20`. */
+const REF_SUFFIX = /(?:#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?|:\d+(?::\d+)?(?:-\d+)?)$/
 
 /** `@path/with.ext` → file; bare `@id` → rule id candidate. Code spans and fences are skipped; emails are ignored. */
 export function extractMentions(text: string): { files: string[]; rules: string[] } {
@@ -193,7 +220,7 @@ export function extractMentions(text: string): { files: string[]; rules: string[
     while ((m = re.exec(plain))) {
       let ref = m[2]
       if (ref.startsWith('"')) ref = ref.slice(1, -1)
-      ref = ref.replace(/[.,;:!?]+$/, '')
+      ref = ref.replace(/[.,;:!?]+$/, '').replace(REF_SUFFIX, '')
       if (!ref || ref.includes('@')) continue
       if (ref.includes('/') || /\.[A-Za-z0-9]+$/.test(ref)) files.add(ref.replace(/^\.\//, ''))
       else if (/^[\w-]+$/.test(ref)) rules.add(ref)

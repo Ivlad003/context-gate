@@ -1,10 +1,21 @@
-// The single HTML page of the browser editor. CodeMirror 6 comes from esm.sh; if it cannot load
-// (offline), the page falls back to a plain <textarea> with the same save / preview / REPL panel.
+// The single HTML page of the browser editor. CodeMirror 6 comes from esm.sh at exact versions; if it cannot
+// load (offline, or `cdn: false`), the page falls back to a plain <textarea> with the same save / preview / REPL panel.
 
 const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 
-export function editorPage(p: { token: string; file: string; id: string; section: string; nonce: string }): string {
-  const boot = JSON.stringify({ token: p.token, file: p.file, id: p.id, section: p.section }).replace(/</g, '\\u003c')
+/**
+ * CodeMirror modules, pinned: exact versions, and `deps` pins the shared @codemirror packages every module
+ * imports (one instance of state/view). A floating `@6` would run whatever release esm.sh resolves next in the
+ * page that holds the API token (M70). Bump the versions together.
+ */
+const CM_DEPS = 'deps=@codemirror/state@6.7.6,@codemirror/view@6.43.13,@codemirror/language@6.12.4,@codemirror/autocomplete@6.20.3,@codemirror/lint@6.9.7'
+export const CODEMIRROR_URLS = [
+  'codemirror@6.0.2', '@codemirror/view@6.43.13', '@codemirror/state@6.7.6', '@codemirror/autocomplete@6.20.3',
+  '@codemirror/lint@6.9.7', '@codemirror/lang-javascript@6.2.5', '@codemirror/lang-markdown@6.5.2',
+].map((m) => `https://esm.sh/${m}?${CM_DEPS}`)
+
+export function editorPage(p: { token: string; file: string; id: string; section: string; nonce: string; cdn?: boolean }): string {
+  const boot = JSON.stringify({ token: p.token, file: p.file, id: p.id, section: p.section, cm: p.cdn === false ? [] : CODEMIRROR_URLS }).replace(/</g, '\\u003c')
   return `<!doctype html>
 <html lang="uk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -67,9 +78,12 @@ const escH = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 let etag = null, saved = '', getText = () => '', setDiagnostics = () => {}, gotoLine = () => {};
 const status = (s, cls = 'muted') => { $('status').textContent = s; $('status').className = cls; };
 const markDirty = () => { $('dirty').textContent = getText() !== saved ? ' ●' : ''; };
+addEventListener('beforeunload', (e) => { if (getText() !== saved) e.preventDefault(); });
 
 const file = await api('/api/file?path=' + encodeURIComponent(BOOT.file)).catch((e) => ({ text: '', etag: null, error: e.message }));
-saved = file.text; etag = file.etag;
+// The editor works on LF text; a CRLF file is written back with CRLF (no whole-file diff on Windows).
+const eol = /\\r\\n/.test(file.text) ? '\\r\\n' : '\\n';
+saved = file.text.replace(/\\r\\n/g, '\\n'); etag = file.etag ?? null;
 if (file.error) status(file.error, 'error');
 const idx = await api('/api/index').catch(() => ({ roots: {}, tiers: [], profiles: [] }));
 for (const t of idx.tiers || []) $('tier').append(new Option(t, t));
@@ -80,22 +94,15 @@ async function check() {
 }
 function lineOf(off) { return getText().slice(0, off).split('\\n').length; }
 function showDiags(ds) {
-  $('diags').innerHTML = ds.map((d) => '<li class="' + d.severity + '"><a href="#" data-off="' + d.start + '">:' + lineOf(d.start) + '</a> <b>' + escH(d.code) + '</b> ' + escH(d.message) + '</li>').join('');
+  $('diags').innerHTML = ds.map((d) => '<li class="' + escH(d.severity) + '"><a href="#" data-off="' + escH(d.start) + '">:' + lineOf(d.start) + '</a> <b>' + escH(d.code) + '</b> ' + escH(d.message) + '</li>').join('');
   setDiagnostics(ds);
 }
 $('diags').addEventListener('click', (e) => { const a = e.target.closest('[data-off]'); if (a) { e.preventDefault(); gotoLine(lineOf(Number(a.dataset.off))); } });
 
-// ── editor: CodeMirror 6 from esm.sh, textarea fallback ──
+// ── editor: CodeMirror 6 from esm.sh (pinned), textarea fallback ──
 try {
-  const [cm, view, state, auto, lint, jsLang, mdLang] = await Promise.all([
-    import('https://esm.sh/codemirror@6.0.1'),
-    import('https://esm.sh/@codemirror/view@6'),
-    import('https://esm.sh/@codemirror/state@6'),
-    import('https://esm.sh/@codemirror/autocomplete@6'),
-    import('https://esm.sh/@codemirror/lint@6'),
-    import('https://esm.sh/@codemirror/lang-javascript@6'),
-    import('https://esm.sh/@codemirror/lang-markdown@6'),
-  ]);
+  if (!BOOT.cm.length) throw new Error('завантаження з esm.sh вимкнено');
+  const [cm, view, state, auto, lint, jsLang, mdLang] = await Promise.all(BOOT.cm.map((u) => import(u)));
   const isMd = /\\.md$/.test(BOOT.file);
   const completion = async (ctx) => {
     const r = await api('/api/complete', { method: 'POST', body: JSON.stringify({ path: BOOT.file, text: ctx.state.doc.toString(), offset: ctx.pos }) }).catch(() => null);
@@ -136,26 +143,33 @@ try {
 }
 
 async function save() {
+  // Keystrokes typed while the PUT runs stay unsaved (dirty).
+  const sent = getText();
   try {
-    const r = await api('/api/file?path=' + encodeURIComponent(BOOT.file), { method: 'PUT', body: JSON.stringify({ text: getText(), etag }) });
-    etag = r.etag; saved = getText(); markDirty(); status('збережено');
+    // etag null = "no file when loaded": the server refuses to overwrite one created since.
+    const r = await api('/api/file?path=' + encodeURIComponent(BOOT.file), { method: 'PUT', body: JSON.stringify({ text: eol === '\\n' ? sent : sent.replace(/\\n/g, eol), etag }) });
+    etag = r.etag; saved = sent; markDirty(); status('збережено');
     preview(false);
   } catch (e) { status(e.message, 'error'); }
 }
 
+let previewSeq = 0;
 async function preview(runScripts) {
   if (runScripts && !confirm('Виконати скрипти секції «' + $('section').value + '»? Run/Call/Mcp запустяться з правами користувача.')) return;
+  // Only the latest request paints: a slower earlier one (another tier) must not overwrite it.
+  const seq = ++previewSeq;
   status(runScripts ? 'виконую скрипти…' : 'рендер…');
   try {
     const r = await api('/api/preview', { method: 'POST', body: JSON.stringify({ path: BOOT.file, section: $('section').value, tier: $('tier').value, profile: $('profile').value, ctxFrom: $('ctxFrom').value, runScripts, confirm: runScripts }) });
+    if (seq !== previewSeq) return;
     const sec = (r.sections || []).find((s) => s.id === $('section').value) || (r.sections || [])[0];
     $('text').textContent = r.error ? r.error : (sec && sec.text != null ? sec.text : r.text || '');
     $('text').className = r.error ? 'error' : '';
     $('meta').textContent = sec ? '· ' + (sec.tokens ?? Math.ceil((sec.text || '').length / 4)) + ' ток.' + (sec.included === false ? ' · не увійшла: ' + (sec.reason || '') : '') + (r.ms != null ? ' · ' + r.ms + ' мс' : '') + ' · ' + r.via + (runScripts ? '' : ' · dry-scripts') : '';
-    $('trace').innerHTML = (r.trace || []).map((t) => '<tr' + (t.line ? ' data-line="' + t.line + '"' : '') + '><td>' + escH(t.section) + '</td><td>' + escH(t.kind) + '</td><td>' + escH(t.detail) + '</td><td>' + (t.ms ?? '') + '</td><td>' + escH(t.source) + '</td></tr>').join('');
+    $('trace').innerHTML = (r.trace || []).map((t) => '<tr' + (t.line ? ' data-line="' + escH(t.line) + '"' : '') + '><td>' + escH(t.section) + '</td><td>' + escH(t.kind) + '</td><td>' + escH(t.detail) + '</td><td>' + escH(t.ms) + '</td><td>' + escH(t.source) + '</td></tr>').join('');
     if ((r.diagnostics || []).length) $('text').textContent += '\\n\\n' + r.diagnostics.map((d) => d.code + ': ' + d.message).join('\\n');
     status('');
-  } catch (e) { status(e.message, 'error'); }
+  } catch (e) { if (seq === previewSeq) status(e.message, 'error'); }
 }
 $('trace').addEventListener('click', (e) => { const tr = e.target.closest('[data-line]'); if (tr) gotoLine(Number(tr.dataset.line)); });
 $('save').onclick = save;

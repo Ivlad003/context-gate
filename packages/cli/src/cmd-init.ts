@@ -1,11 +1,12 @@
 // `context-gate init | migrate | example skills` (SPEC «Сценарії», сценарій 1; «Єдина модель», G310).
 
+import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Diagnostic, ProfileConfig } from '../../core/src/types.ts'
 import { loadConfig, migrateConfig } from '../../core/src/config.ts'
-import { ensureGitignore, readText, writeJson, writeText } from './util.ts'
+import { ensureGitignore, readText, repoPathInside, writeJson, writeText } from './util.ts'
 import { writeEditorTypes } from './editor-types.ts'
 
 export const GITIGNORE_LINES = ['.claude/prompt/.compiled/', '.claude/prompt/.trace/', '.claude/gate.debug.log', '.claude/gate.log.jsonl', '.claude/gate.index.json']
@@ -20,16 +21,31 @@ export function gitignoreLines(cfg: { prompt?: { dir?: string; commitCompiled?: 
   ]
 }
 
-/** Drop `.gitignore` lines (exact match), e.g. `.compiled/` once `commitCompiled` is on. Returns the removed lines. */
+/** A `.gitignore` line in the forms git treats alike: no leading `/`, no trailing `/`. */
+const ignoreKey = (l: string): string => l.trim().replace(/^\//, '').replace(/\/+$/, '')
+
+/**
+ * Drop `.gitignore` lines, e.g. `.compiled/` once `commitCompiled` is on: the exact line and its equivalents
+ * (with or without the leading or trailing `/`). Returns the removed lines.
+ */
 export function removeGitignoreLines(root: string, lines: string[]): string[] {
   const path = join(root, '.gitignore')
-  const cur = readText(path)
+  const cur = repoPathInside(root, path) ? readText(path) : undefined
   if (cur === undefined) return []
-  const drop = new Set(lines)
+  const keys = new Set(lines.map(ignoreKey))
+  const drop = { has: (l: string): boolean => keys.has(ignoreKey(l)) }
   const kept = cur.split('\n').filter((l) => !drop.has(l.trim()))
   const removed = cur.split('\n').filter((l) => drop.has(l.trim())).map((l) => l.trim())
-  if (removed.length) writeText(path, kept.join('\n'))
+  if (removed.length) writeText(path, kept.join('\n'), root)
   return removed
+}
+
+/** `git check-ignore -v` for a path: the matching `source:line:pattern`, or undefined (not ignored / not git). */
+export function gitIgnoredBy(root: string, rel: string): string | undefined {
+  try {
+    const out = execFileSync('git', ['check-ignore', '-v', '--no-index', rel], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 })
+    return out.split('\t')[0]?.trim() || undefined
+  } catch { return undefined }
 }
 
 const isDir = (p: string): boolean => { try { return statSync(p).isDirectory() } catch { return false } }
@@ -57,11 +73,13 @@ export function guessProfiles(root: string): InitGuess {
       const rel = top ? `${top}/${d}` : d
       if (FRONTEND.test(d)) { addPaths('frontend', [`${rel}/**`], ['skill:react-*', 'skill:tailwind*', 'skill:storybook', 'tool:mcp__figma__*', 'tool:mcp__playwright__*', 'rule:react*', 'rule:frontend*']); notes.push(`${rel} → frontend`) }
       else if (BACKEND.test(d)) { addPaths('backend', [`${rel}/**`], ['skill:nestjs', 'skill:prisma', 'skill:api-*', 'tool:mcp__postgres__*', 'rule:api*', 'rule:backend*']); notes.push(`${rel} → backend`) }
-      else if (top) { addPaths(d, [`${rel}/**`], [`rule:${d}*`, `skill:${d}*`]); notes.push(`${rel} → ${d}`) }
+      else if (top) { const name = d === 'core' || d === 'always' ? `app-${d}` : d; addPaths(name, [`${rel}/**`], [`rule:${d}*`, `skill:${d}*`]); notes.push(`${rel} → ${name}`) }
     }
   }
+  // `core` and `always` are tier-wide seeded groups: a package of that name gets its own `pkg-` group, else its
+  // rules and skills would be on in every session regardless of paths.
   for (const d of listDirs(join(root, 'packages'))) {
-    const name = profiles[d] ? `pkg-${d}` : d
+    const name = profiles[d] || d === 'core' || d === 'always' ? `pkg-${d}` : d
     addPaths(name, [`packages/${d}/**`], [`rule:${d}*`, `skill:${d}*`])
     notes.push(`packages/${d} → ${name}`)
   }
@@ -108,7 +126,12 @@ export function initCommand(root: string, o: { force?: boolean; dryRun?: boolean
   const types = writeEditorTypes(root, cfg.prompt?.dir ?? '.claude/prompt')
   if (types.written.length) lines.push(`типи для редактора (TSX без npm): ${types.written.join(', ')}`)
   lines.push(...types.notes)
-  if (cfg.prompt?.commitCompiled) lines.push(`prompt.commitCompiled: true — ${cfg.prompt.dir ?? '.claude/prompt'}/.compiled/ комітиться разом із джерелами (Р3)${removed.length ? '; рядок прибрано з .gitignore' : ''}`)
+  if (cfg.prompt?.commitCompiled) {
+    const dir = (cfg.prompt.dir ?? '.claude/prompt').replace(/^\.\//, '').replace(/\/+$/, '')
+    const still = gitIgnoredBy(root, `${dir}/.compiled/x.json`)
+    if (still) lines.push(`увага: ${dir}/.compiled/ досі ігнорується (${still}) — прибери цей рядок, інакше .compiled не потрапить у git і claude -p/CI залишаться без зібраних промптів`)
+    else lines.push(`prompt.commitCompiled: true — ${dir}/.compiled/ комітиться разом із джерелами (Р3)${removed.length ? '; рядок прибрано з .gitignore' : ''}`)
+  }
   lines.push(guess.notes.length ? `профілі: ${guess.notes.join('; ')}` : 'профілі не вгадано: структура без apps/, packages/, docs/ — додай їх у profiles вручну')
   if (added.length) lines.push(`.gitignore: + ${added.join(', ')}`)
   return { code: 0, out: lines.join('\n') + '\n' }

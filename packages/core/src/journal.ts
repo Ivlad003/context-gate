@@ -40,7 +40,8 @@ function triggerLabel(e: DecisionLogEntry): string {
 
 /** Markdown table of the last `n` decision entries: хід, тригер, профіль, tier, зміни, причина. */
 export function formatWhy(entries: readonly DecisionLogEntry[], n = 50): string {
-  const decisions = entries.filter((e) => !e.kind || e.kind === 'decision')
+  // A shiftwork Verify pass is journaled as `decision` with trigger `verify` and empty lists: not a decision row.
+  const decisions = entries.filter((e) => (!e.kind || e.kind === 'decision') && e.trigger !== 'verify')
   const start = Math.max(0, decisions.length - n)
   const rows = ['| хід | тригер | профіль | tier | зміни | причина |', '| --- | --- | --- | --- | --- | --- |']
   for (let i = start; i < decisions.length; i++) {

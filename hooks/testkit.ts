@@ -26,7 +26,10 @@ export interface RepoOptions {
   tools?: string[]
   store?: Record<string, unknown>
   run?: (argv: readonly string[]) => RunResult
-  complete?: (req: { model: string; prompt: string; system?: string }) => string | undefined
+  /** A promise answers late (the shadow grace path of the classifier and the brief, P5). */
+  complete?: (req: { model: string; prompt: string; system?: string }) => string | undefined | Promise<string | undefined>
+  /** `clock.after` waits the real time instead of firing at once, so `within()` can time out. */
+  realClock?: boolean
   ask?: string
   percent?: number
   /** The settings `env` block `$.settings.read()` answers (the gate.json `env` whitelist reads it). */
@@ -35,6 +38,9 @@ export interface RepoOptions {
   allowBinaries?: string[]
   /** Answers `fs.exists` first (paths outside the repo, e.g. the plugin folder); undefined → the repo. */
   exists?: (path: string) => boolean | undefined
+  /** Symbolic links: repo-relative link path → absolute target (`fs.read`/`fs.write` follow it, `fs.stat` reports
+   *  `isLink` and, with `resolve`, the target as `realPath`). A target outside ROOT is a file keyed by its path. */
+  links?: Record<string, string>
 }
 
 export interface Repo {
@@ -77,16 +83,23 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
     return { message: e.message, uuid: `u${repo.appended.length}` } as never
   })
   on('env.get', ($, e) => ({ value: e.name === 'HOME' ? HOME : undefined }))
+  const links = opts.links ?? {}
+  /** Where a path lands: a link's target, else the path itself, as a files-map key. */
+  const follow = (p: string): string => { const r = rel(p); return links[r] !== undefined ? rel(links[r]) : r }
+  const real = (r: string): string => (r.startsWith('/') ? r : r ? `${ROOT}/${r}` : ROOT)
   on('fs.read', ($, e) => {
-    const f = repo.files.get(rel(e.path))
+    const f = repo.files.get(follow(e.path))
     return f ? { value: f.text } : { deny: `ENOENT: ${e.path}` }
   })
-  on('fs.exists', ($, e) => ({ value: opts.exists?.(e.path) ?? (repo.files.has(rel(e.path)) || isDir(rel(e.path))) }))
+  on('fs.exists', ($, e) => ({ value: opts.exists?.(e.path) ?? (repo.files.has(follow(e.path)) || isDir(rel(e.path))) }))
   on('fs.stat', ($, e) => {
-    const r = rel(e.path)
+    const isLink = links[rel(e.path)] !== undefined
+    const r = follow(e.path)
     const f = repo.files.get(r)
-    if (f) return { value: { kind: 'file', size: f.text.length, mtimeMs: f.mtimeMs, isLink: false } }
-    return isDir(r) ? { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } } : { deny: `ENOENT: ${e.path}` }
+    const at = e.resolve ? { realPath: real(r) } : {}
+    if (f) return { value: { kind: 'file', size: f.text.length, mtimeMs: f.mtimeMs, isLink, ...at } }
+    if (isLink) return { value: { kind: 'other', size: 0, mtimeMs: 0, isLink, ...at } }
+    return isDir(r) ? { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, ...at } } : { deny: `ENOENT: ${e.path}` }
   })
   on('fs.list', ($, e) => {
     const r = rel(e.path)
@@ -103,7 +116,7 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
     return { value: [...seen.values()] }
   })
   on('fs.write', ($, e) => {
-    repo.files.set(rel(e.path), { text: e.text, mtimeMs: 9999 })
+    repo.files.set(follow(e.path), { text: e.text, mtimeMs: 9999 })
     return { value: undefined }
   })
   on('command.register', ($, e) => {
@@ -135,16 +148,23 @@ export function mountRepo(on: On, opts: RepoOptions = {}): Repo {
     const r = opts.run?.(e.argv) ?? { exitCode: 0, stdout: '', stderr: '' }
     return { value: { ...r, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('model.complete', ($, e) => {
+  on('model.complete', async ($, e) => {
     repo.completes.push(e.model)
-    const text = opts.complete?.(e)
+    const text = await opts.complete?.(e)
     const usage = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
     return { value: (text === undefined ? { isAnswered: false, reason: 'empty-reply', usage } : { isAnswered: true, text, usage }) as never }
   })
   on('model.classify', () => ({ value: undefined }))
   if (opts.settingsEnv) on('settings.read', () => ({ value: { env: opts.settingsEnv } }) as never)
-  on('clock.after', () => ({ value: undefined }))
+  if (opts.realClock) on('clock.after', async ($, e) => { await sleep(e.ms); return { value: undefined } })
+  else on('clock.after', () => ({ value: undefined }))
   return repo
+}
+
+/** Real-time wait for tests (the mod's types have no timers; the test runtime does). */
+export function sleep(ms: number): Promise<void> {
+  const timers = globalThis as unknown as { setTimeout(fn: () => void, ms: number): unknown }
+  return new Promise((resolve) => { timers.setTimeout(resolve, ms) })
 }
 
 export const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as const

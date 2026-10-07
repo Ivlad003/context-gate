@@ -7,11 +7,16 @@ import type {
   CompiledPrompt, Diagnostic, IncludeMode, ItemStatus, Node, RenderHost, RenderOptions, RenderResult, RenderedSection, Scope, Scope_,
   SectionNode, TraceEntry, Value,
 } from './types.ts'
-import { type Budget, type EvalEnv, StepLimitError, dataKeys, evalExpr, isObj, lookup, newBudget, parseExpr, parseTemplate, renderTemplate, toText, truthy } from './expr.ts'
+import { type Budget, type EvalEnv, StepLimitError, ValueLimitError, chargeValue, dataKeys, evalExpr, freeVars, isObj, lookup, newBudget, parseExpr, parseTemplate, renderTemplate, toText, truthy, valueCells } from './expr.ts'
+import { parseDuration } from './duration.ts'
 
 // ───────────────────────── public extras ─────────────────────────
 
-export interface ProviderCallRequest { path: string; ns: string; fn: string; args: Value[]; kwargs: Record<string, Value> }
+export interface ProviderCallRequest {
+  path: string; ns: string; fn: string; args: Value[]; kwargs: Record<string, Value>
+  /** What is left of the render's run budget (SPEC «Продуктивність»: one 2 s deadline per compose). */
+  timeoutMs?: number
+}
 
 /** RenderHost plus optional provider functions (`fs.examples`, `git.log`, …). */
 export interface RenderHostExt extends RenderHost {
@@ -72,6 +77,8 @@ export function isDataEnvelope(v: Value | undefined): v is { [k: string]: Value 
  * and `stale` fields next to its own (`data.api-endpoints.count`, `data.api-endpoints.fetchedAt | ago`);
  * any other value (list, string, number) becomes `{ value, fetchedAt, stale }`. `stale` = age > cache
  * window (false when there is no window). Plain (non-envelope) values pass through untouched.
+ * On an object the two fields are non-enumerable, so `@each`, `len()` and JSON never see them as user keys,
+ * and a real `fetchedAt` / `stale` field of the data wins.
  */
 export function materializeData(data: Record<string, Value>, now: number): { data: Record<string, Value>; stale: string[] } {
   const out: Record<string, Value> = {}
@@ -79,14 +86,24 @@ export function materializeData(data: Record<string, Value>, now: number): { dat
   for (const [k, v] of Object.entries(data)) {
     if (!isDataEnvelope(v)) { out[k] = v; continue }
     const at = v.fetchedAt as number
-    const win = parseDurationMs(typeof v.cache === 'string' ? v.cache : undefined)
+    const win = parseDuration(typeof v.cache === 'string' ? v.cache : undefined)
     const isStale = win !== undefined && now - at > win
     if (isStale) stale.push(k)
     const inner = v.value ?? null
-    out[k] = isObj(inner) ? { ...inner, fetchedAt: at, stale: isStale } : { value: inner, fetchedAt: at, stale: isStale }
+    if (isObj(inner)) {
+      const o: Record<string, Value> = { ...inner }
+      for (const [name, val] of [['fetchedAt', at], ['stale', isStale]] as const) {
+        if (!Object.prototype.hasOwnProperty.call(o, name)) Object.defineProperty(o, name, { value: val, enumerable: false, writable: true, configurable: true })
+      }
+      out[k] = o
+    } else out[k] = { value: inner, fetchedAt: at, stale: isStale }
+    dataInner.set(out[k] as object, inner)
   }
   return { data: out, stale }
 }
+
+/** A materialized `data.<key>` → the stored value it wraps, without `fetchedAt` / `stale` (`@run` key, stdin). */
+const dataInner = new WeakMap<object, Value>()
 
 export const TRUNCATION_MARKER = (budget: number): string => `…[обрізано за budget ${budget}]`
 const SCOPE_ORDER: Scope[] = ['static', 'profile', 'volatile']
@@ -96,6 +113,8 @@ const DEFAULT_RUN_CACHE = '5m'
 const MAX_INCLUDE_DEPTH = 3
 const MAX_TRACE_PER_SECTION = 500
 const DEBUG_VALUE_MAX = 2000
+/** Cells above which a trace shows `…` instead of the value: a trace preview must stay cheap. */
+const TRACE_CELLS_MAX = 4096
 
 /** Stable 32-bit FNV-1a hash, hex. */
 export function hashString(s: string): string {
@@ -108,15 +127,6 @@ export function hashString(s: string): string {
 }
 
 export function estimateTokens(text: string): number { return Math.ceil(text.length / 4) }
-
-/** `500ms`, `10s`, `5m`, `1h`, `1d` → ms; undefined when not a duration. */
-function parseDurationMs(s: string | undefined): number | undefined {
-  if (!s) return undefined
-  const m = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/.exec(s.trim())
-  if (!m) return undefined
-  const mult = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] ?? 's'] ?? 1000
-  return Number(m[1]) * mult
-}
 
 function stableJson(v: unknown): string {
   if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']'
@@ -133,8 +143,10 @@ export function runStub(lang: string, info: string | { ms: number; bytes: number
 /** Markdown whitespace normalization: trailing spaces, common indent, ≥2 blank lines → 1, outer blank lines. */
 export function normalizeMarkdown(text: string): string {
   let lines = text.replace(/\r\n?/g, '\n').split('\n').map(l => l.replace(/[ \t]+$/, ''))
-  const indents = lines.filter(l => l.trim()).map(l => /^[ \t]*/.exec(l)![0].length)
-  const ind = indents.length ? Math.min(...indents) : 0
+  // A loop, not Math.min(...spread): an included log of 200k lines would overflow the call stack.
+  let ind = Infinity
+  for (const l of lines) if (l.trim()) ind = Math.min(ind, /^[ \t]*/.exec(l)![0].length)
+  if (!Number.isFinite(ind)) ind = 0
   if (ind > 0) lines = lines.map(l => l.slice(Math.min(ind, /^[ \t]*/.exec(l)![0].length)))
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '').replace(/\n+$/, '')
 }
@@ -222,11 +234,21 @@ function unwrapCache(v: Value): { value: Value; ms?: number; bytes?: number } {
   return { value: v }
 }
 
-function parseStdout(stdout: string): Value {
+/**
+ * stdout → value: JSON objects, arrays, strings and literals become structure. A number is taken only when it
+ * prints back exactly (`42`, `-1.5`); `1.10` (a version), `1234e56` (a short SHA) or a 20-digit id stay text.
+ */
+export function parseStdout(stdout: string): Value {
   const t = stdout.replace(/\n+$/, '')
   const s = t.trim()
-  if (s && (s[0] === '{' || s[0] === '[' || s[0] === '"' || /^-?\d/.test(s) || s === 'true' || s === 'false' || s === 'null')) {
+  if (s && (s[0] === '{' || s[0] === '[' || s[0] === '"' || s === 'true' || s === 'false' || s === 'null')) {
     try { return JSON.parse(s) as Value } catch { /* plain text */ }
+  }
+  if (/^-?\d/.test(s)) {
+    try {
+      const v: unknown = JSON.parse(s)
+      if (typeof v === 'number' && Number.isFinite(v) && String(v) === s) return v
+    } catch { /* plain text */ }
   }
   return t
 }
@@ -237,9 +259,50 @@ function matchCallable(patterns: string[], path: string): boolean {
 
 function basename(p: string): string { return (p.split('/').pop() ?? p).replace(/\.[^.]+$/, '') }
 
+/**
+ * The code fence left open at the end of `text` (CommonMark: a fence closes only with the same character, at
+ * least as long, without an info string), or undefined.
+ */
+export function openFenceAt(text: string): string | undefined {
+  let open: { ch: string; len: number } | undefined
+  for (const line of text.split('\n')) {
+    const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if (!m) continue
+    const ch = m[1][0]
+    if (!open) {
+      if (ch === '`' && m[2].includes('`')) continue // not a fence: backticks in the info string
+      open = { ch, len: m[1].length }
+    } else if (ch === open.ch && m[1].length >= open.len && !m[2].trim()) open = undefined
+  }
+  return open ? open.ch.repeat(open.len) : undefined
+}
+
+/** `text` without leading and trailing newlines, in linear time (`/\n+$/` backtracks quadratically on long runs). */
+function trimNewlines(text: string): string {
+  let start = 0, end = text.length
+  while (start < end && text[start] === '\n') start++
+  while (end > start && text[end - 1] === '\n') end--
+  return text.slice(start, end)
+}
+
+/** A backtick fence longer than any backtick run inside `text` (at least ```), so the content cannot close it. */
+export function fenceFor(text: string): string {
+  let max = 0
+  for (const m of text.matchAll(/`+/g)) max = Math.max(max, m[0].length)
+  return '`'.repeat(Math.max(3, max + 1))
+}
+
 function truncate(text: string, budget: number | undefined): { text: string; truncated: boolean } {
   if (!budget || text.length <= budget) return { text, truncated: false }
-  return { text: text.slice(0, budget).replace(/\s+$/, '') + '\n' + TRUNCATION_MARKER(budget), truncated: true }
+  let end = budget
+  // Never split a surrogate pair.
+  const c = text.charCodeAt(end - 1)
+  if (c >= 0xd800 && c <= 0xdbff) end--
+  let kept = text.slice(0, end).replace(/\s+$/, '')
+  // A cut inside a code fence would leave it open and swallow every later section of the prompt.
+  const fence = openFenceAt(kept)
+  if (fence) kept += '\n' + fence
+  return { text: kept + '\n' + TRUNCATION_MARKER(budget), truncated: true }
 }
 
 const escCell = (s: string): string => s.replace(/\|/g, '\\|').replace(/\n+/g, ' ')
@@ -262,11 +325,16 @@ class Renderer {
   staleData = new Set<string>()
   /** Module path → content hash (null: no hash available), for the persisted `@call` cache key. */
   moduleHashes = new Map<string, string | null>()
+  /** `<section>\0<as>` → key of that `@run` as last computed (needs= resolves independent of source order). */
+  runKeys = new Map<string, string>()
+  /** Values masked in trace, diagnostics and reasons (env whitelist + opts.secrets). */
+  secrets: string[]
 
   constructor(host: RenderHostExt, opts: RenderOptionsExt, scope: Scope_, uses: Record<string, string>) {
     this.host = host
     this.opts = opts
     this.uses = uses
+    this.secrets = secretValues(scope, opts.secrets)
     const root = Object.create(null) as Scope_
     for (const [k, v] of Object.entries(scope)) root[k] = v
     if (isObj(root.data)) {
@@ -343,13 +411,30 @@ class Renderer {
     this.results.set(`section:${id}`, { value: out.rendered.included ? out.rendered.text : '', status: out.rendered.status, source: 'run' })
   }
 
+  /**
+   * Tool name of a lazy include: `get_<name>`. A name already taken by another ref, or one with no ASCII
+   * letter or digit (`правила`), gets a hash of the ref, so two lazies never share a tool.
+   */
+  lazyTool(name: string, description: string, ref: string): string {
+    const san = name.replace(/[^\w]/g, '_').slice(0, 40)
+    let tool = `get_${san}`
+    const taken = this.lazies.get(tool)
+    if (!/[A-Za-z0-9]/.test(san) || (taken && taken.ref !== ref)) tool = `get_${san}_${hashString(ref).slice(0, 6)}`
+    if (!this.lazies.has(tool)) this.lazies.set(tool, { description, ref })
+    return tool
+  }
+
+  /** Text with secret values masked (stderr, host error messages, trace values) — before any truncation. */
+  mask(text: string): string { return this.secrets.length ? maskSecrets(text, this.secrets) : text }
+
   async execute(needs: Need[]): Promise<void> {
     const fresh = needs.filter(n => !this.results.has(n.key))
     const runs = fresh.filter((n): n is Extract<Need, { kind: 'run' }> => n.kind === 'run')
     const calls = fresh.filter((n): n is Extract<Need, { kind: 'call' }> => n.kind === 'call')
     const others = fresh.filter(n => n.kind !== 'run' && n.kind !== 'call')
 
-    // One budget for all @run of the render (SPEC «Продуктивність»: 2 s per prompt.compose).
+    // One budget for every process the render starts — @run, @call, providers, @mcp (SPEC «Продуктивність»:
+    // 2 s per prompt.compose). A wave costs its slowest member, failed and timed-out ones included.
     const remaining = Math.max(0, (this.opts.runBudgetMs ?? 2000) - this.runSpentMs)
     const spent: number[] = []
     const byModule = new Map<string, Extract<Need, { kind: 'call' }>[]>()
@@ -357,9 +442,9 @@ class Renderer {
     await Promise.all([
       ...runs.map(n => this.execRun(n, remaining, spent)),
       ...[...byModule.entries()].map(([mod, list]) => this.execCalls(mod, list, remaining, spent)),
-      ...others.map(n => this.execOther(n)),
+      ...others.map(n => this.execOther(n, remaining, spent)),
     ])
-    this.runSpentMs += spent.length ? Math.max(...spent) : 0
+    this.runSpentMs += spent.reduce((a, b) => Math.max(a, b), 0)
   }
 
   async cached(key: string): Promise<{ value: Value; at: number; ms?: number; bytes?: number } | undefined> {
@@ -393,16 +478,18 @@ class Renderer {
       if (entry) return set({ value: entry.value, status: 'unverified', source: 'cache', at: entry.at, stale: true, detail: 'бюджет @run на рендер вичерпано, взято попереднє значення' })
       return set({ value: null, status: 'unverified', source: 'stub', error: 'skip', detail: `бюджет @run ${this.opts.runBudgetMs ?? 2000} мс на рендер вичерпано` })
     }
+    const t0 = this.host.now()
     try {
       const r = await this.host.run({ lang: n.lang, code: n.code, stdin: n.stdin, timeoutMs: remaining })
       spent.push(r.ms)
-      if (r.exitCode !== 0) return set({ ...this.failure(entry, `exit ${r.exitCode}; stderr: ${r.stderr.slice(0, 200)}`), ms: r.ms })
+      if (r.exitCode !== 0) return set({ ...this.failure(entry, `exit ${r.exitCode}; stderr: ${this.mask(r.stderr).slice(0, 200)}`), ms: r.ms })
       const value = parseStdout(r.stdout)
       const bytes = r.stdout.length
       try { await this.host.cacheSet?.(n.key, wrapCache(value, r.ms, bytes)) } catch { /* cache is best effort */ }
       set({ value, status: 'ok', source: 'run', ms: r.ms, bytes, at: this.host.now() })
     } catch (e) {
-      set(this.failure(entry, `помилка виконавця: ${String((e as Error)?.message ?? e).slice(0, 200)}`))
+      spent.push(this.host.now() - t0)
+      set(this.failure(entry, `помилка виконавця: ${this.mask(String((e as Error)?.message ?? e)).slice(0, 200)}`))
     }
   }
 
@@ -438,33 +525,69 @@ class Renderer {
       pending.push({ n, entry, cacheKey })
     }
     if (!pending.length || !this.host.call) return
+    const call = this.host.call.bind(this.host)
     const t0 = this.host.now()
-    try {
-      const values = await this.host.call({ path: module, calls: pending.map(p => ({ fn: p.n.fn, args: p.n.args, ...(Object.keys(p.n.kwargs).length ? { kwargs: p.n.kwargs } : {}) })) })
-      spent.push(this.host.now() - t0)
-      for (let i = 0; i < pending.length; i++) {
+    const batch = async (list: typeof pending, timeoutMs: number): Promise<void> => {
+      // `timeoutMs` is advisory: hosts that know it stop the batch at the render deadline.
+      const req = { path: module, calls: list.map(p => ({ fn: p.n.fn, args: p.n.args, ...(Object.keys(p.n.kwargs).length ? { kwargs: p.n.kwargs } : {}) })), timeoutMs }
+      const values = await call(req)
+      for (let i = 0; i < list.length; i++) {
         const v = values[i] ?? null
-        this.results.set(pending[i].n.key, { value: v, status: 'ok', source: 'run' })
-        try { await this.host.cacheSet?.(pending[i].cacheKey, wrapCache(v, 0, JSON.stringify(v).length)) } catch { /* best effort */ }
+        this.results.set(list[i].n.key, { value: v, status: 'ok', source: 'run' })
+        try { await this.host.cacheSet?.(list[i].cacheKey, wrapCache(v, 0, JSON.stringify(v).length)) } catch { /* best effort */ }
       }
-    } catch (e) {
-      for (const p of pending) this.results.set(p.n.key, this.failure(p.entry, `виклик ${p.n.label}: ${String((e as Error)?.message ?? e).slice(0, 200)}`))
     }
+    const fail = (p: (typeof pending)[number], e: unknown): void => {
+      this.results.set(p.n.key, this.failure(p.entry, `виклик ${p.n.label}: ${this.mask(String((e as Error)?.message ?? e)).slice(0, 200)}`))
+    }
+    try {
+      await batch(pending, remaining)
+    } catch (e) {
+      // RenderHost.call cannot report a per-call error: one raising call fails the whole batch. With budget
+      // left, retry each call on its own so a healthy sibling keeps its result. A module-wide failure (syntax or
+      // import error) fails every call with the batch's message: when the first two single retries do, the rest
+      // are failed without spawning one more interpreter each.
+      const msg = String((e as Error)?.message ?? e)
+      const same = (err: unknown): boolean => String((err as Error)?.message ?? err) === msg
+      let done = 0
+      let moduleWide = pending.length < 2
+      while (!moduleWide && done < Math.min(2, pending.length)) {
+        const left = remaining - (this.host.now() - t0)
+        if (left <= 0) break
+        const p = pending[done++]
+        try { await batch([p], left); break } catch (err) {
+          fail(p, err)
+          if (!same(err)) break
+          if (done === 2) moduleWide = true
+        }
+      }
+      const rest = pending.slice(done)
+      const left = remaining - (this.host.now() - t0)
+      if (!moduleWide && left > 0) {
+        await Promise.all(rest.map(p => batch([p], left).catch(err => fail(p, err))))
+      } else for (const p of rest) fail(p, e)
+    }
+    spent.push(this.host.now() - t0)
   }
 
-  async execOther(n: Need): Promise<void> {
+  async execOther(n: Need, remaining = Infinity, spent: number[] = []): Promise<void> {
     const set = (r: Ready): void => { this.results.set(n.key, r) }
+    const t0 = this.host.now()
+    const overBudget = (): Ready => ({ value: null, status: 'unverified', source: 'stub', detail: `бюджет ${this.opts.runBudgetMs ?? 2000} мс на рендер вичерпано` })
     try {
       switch (n.kind) {
         case 'provider': {
           if (!this.host.provider) return set({ value: null, status: 'unverified', source: 'stub' })
+          if (remaining <= 0) return set(overBudget())
           const [ns, ...rest] = n.path.split('.')
-          return set({ value: (await this.host.provider({ path: n.path, ns, fn: rest.join('.'), args: n.args, kwargs: n.kwargs })) ?? null, status: 'ok', source: 'run' })
+          const v = await this.host.provider({ path: n.path, ns, fn: rest.join('.'), args: n.args, kwargs: n.kwargs, ...(Number.isFinite(remaining) ? { timeoutMs: remaining } : {}) })
+          return set({ value: v ?? null, status: 'ok', source: 'run' })
         }
         case 'mcp': {
           const label = `${n.server}.${n.tool}`
           if (!this.host.trusted || !this.host.mcp) return set({ value: `[mcp: ${label}, unverified]`, status: 'unverified', source: 'stub', detail: this.host.trusted ? 'MCP недоступний' : 'репозиторій не довірений' })
-          return set({ value: (await this.host.mcp({ server: n.server, tool: n.tool, args: n.args })) ?? null, status: 'ok', source: 'run' })
+          if (remaining <= 0) return set({ ...overBudget(), value: `[mcp: ${label}, budget]` })
+          return set({ value: (await this.host.mcp({ server: n.server, tool: n.tool, args: n.args, ...(Number.isFinite(remaining) ? { timeoutMs: remaining } : {}) })) ?? null, status: 'ok', source: 'run' })
         }
         case 'file': {
           const text = await this.host.readFile(n.path)
@@ -481,7 +604,9 @@ class Renderer {
         }
       }
     } catch (e) {
-      set(this.failure(undefined, String((e as Error)?.message ?? e).slice(0, 200)))
+      set(this.failure(undefined, this.mask(String((e as Error)?.message ?? e)).slice(0, 200)))
+    } finally {
+      if (n.kind === 'provider' || n.kind === 'mcp') spent.push(this.host.now() - t0)
     }
   }
 }
@@ -508,6 +633,25 @@ class Interp {
   storedMeta: Record<string, { fetchedAt: number; cache?: string }> = {}
   /** Variables bound by `run` / `call`: the result's metadata, which a later `store` node persists with the value. */
   varMeta = new Map<string, { ready?: Ready; cache?: string } | 'pending'>()
+  /** Names whose value is not final in this pass: a pending run/call/mcp result, or a @let/@set computed from one. */
+  unready = new Set<string>()
+  /** Results looked up but not ready yet in this pass (grows on every miss). */
+  missCount = 0
+  /** The last `ev` read an `unready` name. */
+  lastUnready = false
+  /** > 0 inside a branch whose `@if` test is not final: its run/call/include needs are not registered (no side effects of an untaken branch). */
+  speculative = 0
+  /** The last `callFn` returned null because its result is not ready. */
+  callPending = false
+  /** `@run` blocked by `needs=` on a name nothing in this pass will produce; reported as G207 if the section ends so. */
+  blocked = new Set<string>()
+  /** @let/@set names derived from a failed run/call result (see `taint`). */
+  tainted = new Set<string>()
+  /** `data.*` keys this section writes; left out of its `@run` keys. */
+  ownStores?: Set<string>
+  loopDepth = 0
+  /** Frames that own `@let` bindings: the section frame and each `@fn` call frame. */
+  scopes = new WeakSet<object>()
   refs: { id: string; mode: IncludeMode }[] = []
   uses: Record<string, string>
   frame: Scope_
@@ -526,7 +670,49 @@ class Interp {
     this.budget = newBudget(r.opts.stepLimit ?? 10_000)
     this.uses = { ...r.uses }
     this.frame = Object.create(r.root) as Scope_
+    this.scopes.add(this.frame)
     this.env = { call: (p, a, k) => this.callFn(p, a, k), diagnostics: [], now: r.host.now() }
+  }
+
+  /** Register a need, unless the current branch is speculative (its `@if` test reads data that is not ready). */
+  need(key: string, n: Need): void {
+    if (this.speculative) { this.pendingData = true; return }
+    this.needs.set(key, n)
+  }
+
+  /** The frame a `@let` binds in: SPEC «Змінні» — visible in the whole section (or `@fn` call), not just its block. */
+  scopeOf(frame: Scope_): Scope_ {
+    let o: object = frame
+    while (o !== this.frame && !this.scopes.has(o)) {
+      const p = Object.getPrototypeOf(o) as object | null
+      if (!p || o === this.r.root) return this.frame
+      o = p
+    }
+    return o as Scope_
+  }
+
+  /** `ev` plus whether the value is final in this pass (no result miss, no `unready` name read). */
+  evp(src: string, frame: Scope_): { v: Value; pending: boolean } {
+    const miss = this.missCount
+    const v = this.ev(src, frame)
+    return { v, pending: this.missCount > miss || this.lastUnready }
+  }
+
+  /** `name` (a @let/@set) reads a failed run/call result, or a name tainted so; such a value is never stored. */
+  taint(name: string, src: string): void {
+    const p = parseExpr(src)
+    const bad = !!p.ast && freeVars(p.ast).some(k => {
+      const m = this.varMeta.get(k)
+      return this.tainted.has(k) || (m !== undefined && m !== 'pending' && !!m.ready && !storable(m.ready))
+    })
+    if (bad) this.tainted.add(name)
+    else this.tainted.delete(name)
+  }
+
+  /** Mark `name` as (not) final in this pass. */
+  markUnready(name: string, pending: boolean): void {
+    if (pending) this.unready.add(name)
+    else this.unready.delete(name)
   }
 
   diag(code: Diagnostic['code'], severity: Diagnostic['severity'], message: string, hint?: string): void {
@@ -548,12 +734,15 @@ class Interp {
   }
 
   ev(src: string, frame: Scope_): Value {
+    this.lastUnready = false
     const p = parseExpr(src)
     if (!p.ast) {
       for (const d of p.diagnostics) this.diag(d.code, d.severity, d.message, d.hint)
       return null
     }
     if (this.r.staleData.size) for (const k of dataKeys(p.ast)) if (this.r.staleData.has(k)) this.stale.add(`data.${k}`)
+    // Read by callFn during evaluation, and by evp after it.
+    this.lastUnready = this.unready.size > 0 && freeVars(p.ast).some(name => this.unready.has(name))
     const v = evalExpr(p.ast, frame, this.budget, this.env)
     this.flushEnvDiags()
     return v
@@ -566,7 +755,7 @@ class Interp {
 
   useReady(key: string): Ready | undefined {
     const r = this.r.results.get(key)
-    if (!r) { this.pendingData = true; return undefined }
+    if (!r) { this.pendingData = true; this.missCount++; return undefined }
     if (r.status === 'unverified') this.status = 'unverified'
     if (r.status === 'fail' && r.error === 'fail') this.status = 'fail'
     if (r.error === 'skip' && !this.skip) this.skip = r.detail ?? 'onError: skip'
@@ -577,21 +766,33 @@ class Interp {
   callFn(path: string, args: Value[], kwargs: Record<string, Value>): Value {
     const [ns, ...rest] = path.split('.')
     const fn = rest.join('.')
-    const json = stableJson([args, kwargs])
-    if (fn && Object.prototype.hasOwnProperty.call(this.uses, ns)) {
+    const json = stableJson(this.walk([args, kwargs] as Value))
+    this.callPending = false
+    const isUse = !!fn && Object.prototype.hasOwnProperty.call(this.uses, ns)
+    const h = this.r.host
+    const isProvider = !isUse && !!fn && !!h.provider && (!h.callables || matchCallable(h.callables, path))
+    if ((isUse || isProvider) && this.lastUnready) {
+      // The arguments read a value that is not ready yet: calling now would run the function with null input.
+      this.missCount++
+      this.pendingData = true
+      this.callPending = true
+      return null
+    }
+    if (isUse) {
       const module = this.uses[ns]
       const key = `call:${module}:${fn}:${json}`
       const ready = this.useReady(key)
       if (ready) return ready.value
-      this.needs.set(key, { kind: 'call', key, module, fn, label: path, args, kwargs, cacheMs: parseDurationMs(this.r.opts.runCacheDefault) })
+      this.callPending = true
+      this.need(key, { kind: 'call', key, module, fn, label: path, args, kwargs, cacheMs: parseDuration(this.r.opts.runCacheDefault) })
       return null
     }
-    const h = this.r.host
-    if (fn && h.provider && (!h.callables || matchCallable(h.callables, path))) {
+    if (isProvider) {
       const key = `prov:${path}:${json}`
       const ready = this.useReady(key)
       if (ready) return ready.value
-      this.needs.set(key, { kind: 'provider', key, path, args, kwargs })
+      this.callPending = true
+      this.need(key, { kind: 'provider', key, path, args, kwargs })
       return null
     }
     this.diag('G157', 'error', `«${path}» не є функцією, яку відкриває хост; доступ до файлів, процесів і мережі з виразу неможливий`, 'використати @run або провайдер')
@@ -616,6 +817,21 @@ class Interp {
     if (this.budget.steps > this.budget.limit) throw new StepLimitError(this.budget.limit)
   }
 
+  /** Charge the walk of an expression value (text output, JSON, cache keys) to the budget before doing it (H05). */
+  walk<T extends Value>(v: T): T {
+    chargeValue(this.budget, v)
+    return v
+  }
+
+  /** Charge the values bound in the frames between `frame` and the root scope (the root is host data, walked once). */
+  walkFrames(frame: Scope_): void {
+    let o: object | null = frame
+    while (o && o !== this.r.root && o !== Object.prototype) {
+      for (const v of Object.values(o)) this.walk(v as Value)
+      o = Object.getPrototypeOf(o) as object | null
+    }
+  }
+
   run(): void {
     const { sec, r } = this
     try {
@@ -634,14 +850,16 @@ class Interp {
       if (sig === 'stop' || this.skip) { this.exclude(this.skip ?? 'stop'); return }
       this.text = out.join('')
     } catch (e) {
-      if (e instanceof StepLimitError) {
-        this.diag('G155', 'error', `Перевищено ліміт кроків інтерпретатора (${this.budget.limit} на секцію)`, 'ця логіка має жити в провайдері')
-        this.failed = true
-        this.exclude('G155: ліміт кроків')
-        return
-      }
       if (e instanceof Stop) { this.exclude(this.skip ?? 'stop'); return }
-      throw e
+      // A value past the size limits, the step limit, or any other runtime failure (a RangeError from a walker)
+      // fails this section only: one bad section never rejects the whole render (totality, H06).
+      const what = e instanceof ValueLimitError ? e.message.replace(/^G155: /, '')
+        : e instanceof StepLimitError ? `перевищено ліміт кроків інтерпретатора (${this.budget.limit} на секцію)`
+        : `помилка виконання: ${e instanceof Error ? e.message : String(e)}`
+      this.diag('G155', 'error', what[0].toUpperCase() + what.slice(1), 'ця логіка має жити в провайдері')
+      this.failed = true
+      this.exclude(e instanceof ValueLimitError ? 'G155: ліміт розміру значення' : e instanceof StepLimitError ? 'G155: ліміт кроків' : 'G155: помилка виконання')
+      return
     }
   }
 
@@ -653,10 +871,17 @@ class Interp {
 
   finish(): SectionOut {
     const { sec } = this
-    for (const name of this.vars) this.addTrace('let', `${name} = ${JSON.stringify(lookup(this.frame, name)).slice(0, 200)}`)
+    for (const name of this.vars) {
+      if (name.startsWith(FN_TEMP)) continue
+      this.addTrace('let', `${name} = ${traceJson(maskValue(lookup(this.frame, name), this.r.secrets))}`)
+    }
     if (this.needs.size) {
       this.status = this.status === 'fail' ? 'fail' : 'unverified'
       this.diag('G207', 'warning', `Дані не готові після ${MAX_ROUNDS} проходів (needs=… без джерела?) — рендер з null`)
+    }
+    if (this.blocked.size) {
+      this.status = this.status === 'fail' ? 'fail' : 'unverified'
+      this.diag('G207', 'warning', `Дані не готові: ${[...this.blocked].join('; ')} — жоден @run/@call/@mcp секції їх не дає, рендер з null`, 'перевірити імена в needs=')
     }
     let text = normalizeMarkdown(this.text)
     let truncated = false
@@ -731,18 +956,30 @@ class Interp {
         this.emitLeaf(n.value, out)
         return
       case 'expr': {
-        const v = this.ev(n.expr, frame)
-        if (this.tracing) this.addTrace('debug', `{{ ${n.expr} }} = ${JSON.stringify(v).slice(0, 200)}`)
+        const v = this.walk(this.ev(n.expr, frame))
+        if (this.tracing) this.addTrace('debug', `{{ ${n.expr} }} = ${traceJson(maskValue(v, this.r.secrets))}`)
         this.emitLeaf(toText(v), out)
         return
       }
       case 'el': return this.el(n, frame, out)
       case 'if': {
-        const v = truthy(this.ev(n.test, frame))
+        const t = this.evp(n.test, frame)
+        const v = truthy(t.v)
         if (n.test !== 'true') this.addTrace('if', `${n.test} → ${v}`)
         const branch = v ? n.then : n.else
         if (!branch) return
-        return this.nodes(branch, Object.create(frame) as Scope_, out)
+        const f = Object.create(frame) as Scope_
+        // `@if true` is how mddsl expands an `@fn` call site: its frame owns the parameters and its own `@let`s.
+        if (n.test === 'true') this.scopes.add(f)
+        // A test on data that is not ready yet picks a branch from nulls: render it, but start nothing from it.
+        if (t.pending) this.speculative++
+        let sig: Signal
+        try { sig = this.nodes(branch, f, out) } finally { if (t.pending) this.speculative-- }
+        if ((sig === 'break' || sig === 'continue') && n.test === 'true' && !this.loopDepth) {
+          this.diag('G005', 'error', `@${sig} у @fn поза @each/@repeat — проігноровано`)
+          return undefined
+        }
+        return sig
       }
       case 'each': {
         const of = this.ev(n.of, frame)
@@ -751,14 +988,17 @@ class Interp {
         if (Array.isArray(of)) items = of
         else if (isObj(of)) items = Object.entries(of).map(([key, value]) => ({ key, value }))
         else { this.diag('G120', 'warning', `@each по не-списку: ${n.of}`); return }
-        for (let i = 0; i < items.length; i++) {
-          const f = Object.create(frame) as Scope_
-          f[n.as] = items[i]
-          if (n.index) f[n.index] = i
-          const s = this.nodes(n.children, f, out)
-          if (s === 'break') break
-          if (s === 'stop') return s
-        }
+        this.loopDepth++
+        try {
+          for (let i = 0; i < items.length; i++) {
+            const f = Object.create(frame) as Scope_
+            f[n.as] = items[i]
+            if (n.index) f[n.index] = i
+            const s = this.nodes(n.children, f, out)
+            if (s === 'break') break
+            if (s === 'stop') return s
+          }
+        } finally { this.loopDepth-- }
         return
       }
       case 'repeat': {
@@ -769,22 +1009,38 @@ class Interp {
         }
         if (v > 1000) { this.diag('G152', 'error', `Межа @repeat ${v} > 1000`, 'ця логіка має жити в провайдері'); return }
         const count = Math.max(0, Math.floor(v))
-        for (let i = 0; i < count; i++) {
-          const f = Object.create(frame) as Scope_
-          f.i = i
-          const s = this.nodes(n.children, f, out)
-          if (s === 'break') break
-          if (s === 'stop') return s
-        }
+        this.loopDepth++
+        try {
+          for (let i = 0; i < count; i++) {
+            const f = Object.create(frame) as Scope_
+            f.i = i
+            const s = this.nodes(n.children, f, out)
+            if (s === 'break') break
+            if (s === 'stop') return s
+          }
+        } finally { this.loopDepth-- }
         return
       }
       case 'break': return 'break'
       case 'continue': return 'continue'
-      case 'let': this.define(n.name, this.ev(n.value, frame), frame); this.vars.add(n.name); this.varMeta.delete(n.name); return
-      case 'set': this.assign(n.name, this.ev(n.value, frame), frame); this.vars.add(n.name); this.varMeta.delete(n.name); return
+      case 'let':
+      case 'set': {
+        const { v, pending } = this.evp(n.value, frame)
+        if (n.t === 'let') this.define(n.name, v, this.scopeOf(frame))
+        else this.assign(n.name, v, frame)
+        this.vars.add(n.name)
+        this.varMeta.delete(n.name)
+        this.markUnready(n.name, pending)
+        this.taint(n.name, n.value)
+        return
+      }
       case 'store': {
         const m = this.varMeta.get(n.name)
-        if (m === 'pending') return // the producing run/call has no result yet in this pass
+        if (m === 'pending' || this.unready.has(n.name)) return // the producing run/call has no result yet in this pass
+        // A failed run/call (stub, null, previous value served as unverified) never overwrites stored data,
+        // neither directly nor through a @let/@set derived from it.
+        if (m?.ready && !storable(m.ready)) return
+        if (!m && this.tainted.has(n.name)) return
         this.storeValue(n.key ?? n.name, lookup(frame, n.name), m?.ready, m?.cache)
         return
       }
@@ -802,8 +1058,9 @@ class Interp {
       case 'fence': {
         const { text, sig } = this.sub(n.children, frame)
         const title = n.title && n.title.includes('{{') ? this.tpl(n.title, frame) : n.title
-        const head = '```' + (n.lang ?? '') + (title ? ` title="${title}"` : '')
-        out.push('\n' + head + '\n' + text.replace(/^\n+|\n+$/g, '') + '\n```\n')
+        const body = trimNewlines(text)
+        const f = fenceFor(body)
+        out.push('\n' + f + (n.lang ?? '') + (title ? ` title="${title}"` : '') + '\n' + body + '\n' + f + '\n')
         return sig === 'stop' ? sig : undefined
       }
       case 'list': return this.listNode(!!n.ordered, n.children, frame, out)
@@ -814,7 +1071,7 @@ class Interp {
           this.step()
           const f = Object.create(frame) as Scope_
           f.row = row
-          lines.push('| ' + n.cells.map(c => escCell(toText(this.ev(c, f)))).join(' | ') + ' |')
+          lines.push('| ' + n.cells.map(c => escCell(toText(this.walk(this.ev(c, f))))).join(' | ') + ' |')
         }
         out.push('\n' + lines.join('\n') + '\n')
         return
@@ -822,9 +1079,11 @@ class Interp {
       case 'debug': {
         if (!this.r.opts.debug) return
         const parts: string[] = []
-        if (n.message) parts.push(this.tpl(n.message, frame))
+        const sec = this.r.secrets
+        // Mask before serializing and cutting: an escaped or truncated secret would no longer match.
+        if (n.message) parts.push(this.r.mask(this.tpl(n.message, frame)))
         for (const e of n.exprs) {
-          const v = this.ev(e, frame)
+          const v = maskValue(this.walk(this.ev(e, frame)), sec)
           parts.push(/^["']/.test(e.trim()) ? toText(v) : `${e}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
         }
         this.addTrace('debug', `[debug ${this.sec.id}] ${parts.join(' ')}`.slice(0, DEBUG_VALUE_MAX))
@@ -849,6 +1108,7 @@ class Interp {
   }
 
   tpl(src: string, frame: Scope_): string {
+    this.lastUnready = false
     const p = parseTemplate(src)
     for (const d of p.diagnostics) this.diag(d.code, d.severity, d.message)
     const s = renderTemplate(p.parts, frame, this.budget, this.env)
@@ -885,7 +1145,7 @@ class Interp {
       case 'b': case 'strong': s = `**${text}**`; break
       case 'i': case 'em': s = `*${text}*`; break
       case 'code': s = '`' + text + '`'; break
-      case 'pre': s = '\n```' + (n.attrs?.lang ?? '') + '\n' + text.replace(/^\n+|\n+$/g, '') + '\n```\n'; break
+      case 'pre': { const body = trimNewlines(text); const f = fenceFor(body); s = '\n' + f + (n.attrs?.lang ?? '') + '\n' + body + '\n' + f + '\n'; break }
       case 'p': s = '\n' + text.trim() + '\n\n'; break
       case 'a': s = n.attrs?.href ? `[${text}](${n.attrs.href})` : text; break
       default: s = text
@@ -895,80 +1155,101 @@ class Interp {
   }
 
   runNode(n: Extract<Node, { t: 'run' }>, frame: Scope_): Signal {
-    const key = 'run:' + hashString(n.lang + '\0' + n.code)
     const name = n.as ?? 'run'
+    this.walkFrames(frame)
+    const ctx = snapshot(frame, this.r.root)
+    const args = lookup(frame, 'args')
+    // A `@let` derived from a run/call with no result yet is null now and real next pass: running on the null
+    // would start the script twice (the key changes) and cache a wrong-input result. Wait, like @call's args.
+    // (The section's own run/call results are left out of the key instead, so they never hold a run back.)
+    if ([...this.unready].some(k => !this.varMeta.has(k) && Object.prototype.hasOwnProperty.call(ctx, k))) {
+      this.define(name, null)
+      this.varMeta.set(name, 'pending')
+      this.unready.add(name)
+      this.pendingData = true
+      this.blocked.add(`@run ${n.lang} as=${name}`)
+      return
+    }
+    this.ownStores ??= storeKeys(this.sec.children)
+    const key = runKey(n.lang, n.code, ctx, args, this.varMeta, this.ownStores)
+    this.r.runKeys.set(`${this.sec.id}\0${name}`, key)
+    const cache = n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE
     const ready = this.useReady(key)
     if (ready) {
       this.define(name, ready.value)
       this.readyNames.add(name)
+      this.unready.delete(name)
       this.addTrace('run', `${n.lang} as=${name}: ${ready.source}${ready.bytes !== undefined ? `, ${ready.bytes} B` : ''}${ready.detail ? ` — ${ready.detail}` : ''}`, { source: ready.source, ...(ready.ms !== undefined ? { ms: ready.ms } : {}) })
       if (ready.detail && ready.status !== 'ok') this.diag('G203', ready.status === 'fail' ? 'error' : 'warning', `@run ${n.lang} (${name}) не виконано: ${ready.detail.replace(/; stderr:.*$/s, '')}`)
       if (ready.stale) this.stale.add(`run:${name}`)
-      this.varMeta.set(name, { ready, cache: n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE })
-      if (n.store) this.storeValue(n.store, ready.value, ready, n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE)
+      this.varMeta.set(name, { ready, cache })
+      if (n.store && storable(ready)) this.storeValue(n.store, ready.value, ready, cache)
       if (ready.error) return 'stop'
       return
     }
     this.define(name, null)
     this.varMeta.set(name, 'pending')
+    this.unready.add(name)
     const waiting = (n.needs ?? []).filter(d => !this.readyNames.has(d) && !this.runReady(d))
-    if (waiting.length) return
-    const stdin = JSON.stringify({ ctx: snapshot(frame, this.r.root), args: lookup(frame, 'args') })
-    this.needs.set(key, { kind: 'run', key, lang: n.lang, code: n.code, stdin, cacheMs: parseDurationMs(n.cache ?? this.r.opts.runCacheDefault ?? DEFAULT_RUN_CACHE), label: name })
+    if (waiting.length) { this.blocked.add(`@run ${n.lang} as=${name} needs=${waiting.join(',')}`); return }
+    this.need(key, { kind: 'run', key, lang: n.lang, code: n.code, stdin: JSON.stringify({ ctx: isObj(ctx.data) ? { ...ctx, data: dataForStdin(ctx.data) } : ctx, args }), cacheMs: parseDuration(cache), label: name })
     return
   }
 
   callNode(n: Extract<Node, { t: 'call' }>, frame: Scope_): Signal {
-    const args = n.args.map(a => this.ev(a, frame))
+    let argsPending = false
+    const evArg = (src: string): Value => { const r = this.evp(src, frame); if (r.pending) argsPending = true; return r.v }
+    const args = n.args.map(evArg)
     const kwargs: Record<string, Value> = {}
-    for (const [k, v] of Object.entries(n.kwargs ?? {})) kwargs[k] = this.ev(v, frame)
+    for (const [k, v] of Object.entries(n.kwargs ?? {})) kwargs[k] = evArg(v)
     const [ns, ...rest] = n.fn.split('.')
     const fn = rest.join('.')
+    const pending = (): Signal => {
+      this.define(n.as, null)
+      this.varMeta.set(n.as, 'pending')
+      this.unready.add(n.as)
+      return undefined
+    }
+    if (argsPending) {
+      // An argument comes from a run/call that has no result yet: wait instead of calling with null.
+      this.pendingData = true
+      this.blocked.add(`@call ${n.fn} as=${n.as}`)
+      return pending()
+    }
     let key: string
     if (Object.prototype.hasOwnProperty.call(this.uses, ns)) {
       const module = this.uses[ns]
-      key = `call:${module}:${fn}:${stableJson([args, kwargs])}`
+      key = `call:${module}:${fn}:${stableJson(this.walk([args, kwargs] as Value))}`
       const ready = this.useReady(key)
       if (!ready) {
-        this.define(n.as, null)
-        this.varMeta.set(n.as, 'pending')
-        this.needs.set(key, { kind: 'call', key, module, fn, label: n.fn, args, kwargs, cacheMs: parseDurationMs(n.cache ?? this.r.opts.runCacheDefault) })
-        return
+        this.need(key, { kind: 'call', key, module, fn, label: n.fn, args, kwargs, cacheMs: parseDuration(n.cache ?? this.r.opts.runCacheDefault) })
+        return pending()
       }
       this.define(n.as, ready.value)
       this.readyNames.add(n.as)
+      this.unready.delete(n.as)
       this.varMeta.set(n.as, { ready, ...(n.cache ? { cache: n.cache } : {}) })
       this.addTrace('call', `${n.fn} as=${n.as}: ${ready.source}${ready.detail ? ` — ${ready.detail}` : ''}`, { source: ready.source })
       if (ready.stale) this.stale.add(`call:${n.as}`)
-      if (n.store) this.storeValue(n.store, ready.value, ready, n.cache)
+      if (n.store && storable(ready)) this.storeValue(n.store, ready.value, ready, n.cache)
       return ready.error ? 'stop' : undefined
     }
+    this.lastUnready = false
     const v = this.callFn(n.fn, args, kwargs)
+    if (this.callPending) return pending()
     this.define(n.as, v)
-    if (this.needs.has(`prov:${n.fn}:${stableJson([args, kwargs])}`)) this.varMeta.set(n.as, 'pending')
-    else {
-      this.varMeta.set(n.as, {})
-      this.readyNames.add(n.as)
-      this.addTrace('call', `${n.fn} as=${n.as}`, { source: 'run' })
-      if (n.store) this.storeValue(n.store, v)
-    }
+    const ready = this.r.results.get(`prov:${n.fn}:${stableJson([args, kwargs])}`)
+    this.varMeta.set(n.as, ready ? { ready } : {})
+    this.readyNames.add(n.as)
+    this.unready.delete(n.as)
+    this.addTrace('call', `${n.fn} as=${n.as}`, { source: 'run' })
+    if (n.store && (!ready || storable(ready))) this.storeValue(n.store, v)
     return
   }
 
   /** True when a `@run as=<name>` of this section already has a result (independent of source order). */
   runReady(name: string): boolean {
-    if (!this.runKeys) {
-      this.runKeys = new Map()
-      const scan = (list: Node[]): void => {
-        for (const x of list) {
-          if (x.t === 'run') this.runKeys!.set(x.as ?? 'run', 'run:' + hashString(x.lang + '\0' + x.code))
-          if (x.t === 'if') { scan(x.then); if (x.else) scan(x.else) }
-          if ('children' in x && Array.isArray(x.children)) scan(x.children)
-        }
-      }
-      scan(this.sec.children)
-    }
-    const key = this.runKeys.get(name)
+    const key = this.r.runKeys.get(`${this.sec.id}\0${name}`)
     return key !== undefined && this.r.results.has(key)
   }
 
@@ -977,8 +1258,7 @@ class Interp {
   }
 
   lazy(name: string, description: string, ref: string, out: string[]): void {
-    const tool = `get_${name.replace(/[^\w]/g, '_')}`
-    if (!this.r.lazies.has(tool)) this.r.lazies.set(tool, { description, ref })
+    const tool = this.r.lazyTool(name, description, ref)
     this.emitLeaf(`- ${description} — інструмент \`${tool}\`\n`, out)
   }
 
@@ -1002,7 +1282,7 @@ class Interp {
         if (n.mode === 'lazy') { this.lazy(name, n.description ?? name, n.ref, out); this.addTrace('include', `${n.ref} lazy`); return }
         const key = `file:${n.ref}`
         const ready = this.useReady(key)
-        if (!ready) { this.needs.set(key, { kind: 'file', key, path: n.ref }); return }
+        if (!ready) { this.need(key, { kind: 'file', key, path: n.ref }); return }
         if (typeof ready.value !== 'string') { this.diag('G210', 'warning', `Файл для @include не знайдено: ${n.ref}`); return }
         this.addTrace('include', `${n.ref} inline, ${ready.value.length} символів`)
         this.emitLeaf(budgeted(ready.value), out)
@@ -1033,7 +1313,7 @@ class Interp {
       case 'rule': {
         const key = `item:${n.source}:${n.ref}`
         const ready = this.useReady(key)
-        if (!ready) { this.needs.set(key, { kind: 'item', key, itemKind: n.source, name: n.ref }); return }
+        if (!ready) { this.need(key, { kind: 'item', key, itemKind: n.source, name: n.ref }); return }
         if (!isObj(ready.value)) { this.diag('G211', 'warning', `${n.source} «${n.ref}» не знайдено`); return }
         const it = ready.value
         const desc = n.description ?? (typeof it.description === 'string' ? it.description : undefined)
@@ -1048,19 +1328,95 @@ class Interp {
         const [server, ...rest] = n.ref.split('.')
         const tool = rest.join('.')
         const args: Record<string, Value> = {}
-        for (const [k, v] of Object.entries(n.args ?? {})) args[k] = this.ev(v, frame)
-        const key = `mcp:${n.ref}:${stableJson(args)}`
+        let argsPending = false
+        for (const [k, v] of Object.entries(n.args ?? {})) { const r = this.evp(v, frame); args[k] = r.v; if (r.pending) argsPending = true }
+        const key = `mcp:${n.ref}:${stableJson(this.walk(args))}`
         const name = n.as ?? tool
-        const ready = this.useReady(key)
-        if (!ready) { this.define(name, null); this.needs.set(key, { kind: 'mcp', key, server, tool, args }); return }
+        const ready = argsPending ? undefined : this.useReady(key)
+        if (!ready) {
+          this.define(name, null)
+          this.unready.add(name)
+          if (argsPending) { this.pendingData = true; this.blocked.add(`@mcp ${n.ref} as=${name}`) }
+          else this.need(key, { kind: 'mcp', key, server, tool, args })
+          return
+        }
         this.define(name, ready.value)
         this.readyNames.add(name)
+        this.unready.delete(name)
         this.addTrace('mcp', `${n.ref} as=${name}: ${ready.source}${ready.detail ? ` — ${ready.detail}` : ''}`, { source: ready.source })
         return ready.error ? 'stop' : undefined
       }
     }
     return undefined
   }
+}
+
+/** Scope roots that change every turn without changing what a script computes; not part of the `@run` key. */
+const RUN_KEY_SKIP = new Set(['ctx', 'session', 'budgets'])
+
+/** Prefix of the temporaries mddsl binds `@fn` arguments to (evaluated in the caller's frame). */
+const FN_TEMP = '__fn'
+
+/**
+ * Key of a `@run` result (in-render and persisted cache): the code plus the input it reads on stdin — `args`,
+ * loop items, `@let`s and the rest of the scope. Left out: per-turn noise (`ctx`, `session`, `budgets`, the
+ * gate decision beyond profile/tier/off, `data.*` freshness metadata and the keys the section itself stores), which
+ * the `cache=` window governs, and the results of the section's own run/call/mcp (`varMeta`), which are null in
+ * the first pass and would make every later run of the section start twice.
+ */
+function runKey(lang: string, code: string, ctx: Record<string, Value>, args: Value, varMeta: ReadonlyMap<string, unknown>, ownStores: ReadonlySet<string>): string {
+  const input: Record<string, Value> = {}
+  for (const [k, v] of Object.entries(ctx)) {
+    if (RUN_KEY_SKIP.has(k) || varMeta.has(k)) continue
+    if (k === 'gate' && isObj(v)) input[k] = { profile: v.profile ?? null, tier: v.tier ?? null, off: v.off ?? null }
+    else if (k === 'data' && isObj(v)) input[k] = dataValues(v, ownStores)
+    else input[k] = v
+  }
+  return 'run:' + hashString(lang + '\0' + code) + hashString(stableJson([input, args]))
+}
+
+/**
+ * `data.*` as the `@run` key sees it: stored values only (a refresh that moves `fetchedAt` but keeps the value
+ * keeps the key) and without the keys the section itself stores (its own result would re-key the next turn).
+ */
+function dataValues(data: Record<string, Value>, ownStores: ReadonlySet<string>): Record<string, Value> {
+  const out: Record<string, Value> = {}
+  for (const [k, v] of Object.entries(data)) {
+    if (ownStores.has(k)) continue
+    out[k] = isObj(v) && dataInner.has(v) ? dataInner.get(v)! : v
+  }
+  return out
+}
+
+/** `data.*` for a script's stdin: an object value carries its `fetchedAt` / `stale` (non-enumerable in the scope). */
+function dataForStdin(data: Record<string, Value>): Record<string, Value> {
+  const out: Record<string, Value> = {}
+  for (const [k, v] of Object.entries(data)) {
+    if (!isObj(v) || !dataInner.has(v) || Object.prototype.propertyIsEnumerable.call(v, 'fetchedAt')) { out[k] = v; continue }
+    out[k] = { ...v, fetchedAt: v.fetchedAt ?? null, stale: v.stale ?? false }
+  }
+  return out
+}
+
+/** `data.*` keys a section writes (`@store`, `store=` on run/call). */
+function storeKeys(nodes: readonly Node[], out = new Set<string>()): Set<string> {
+  for (const n of nodes) {
+    if (n.t === 'store') out.add(n.key ?? n.name)
+    else if ((n.t === 'run' || n.t === 'call') && n.store) out.add(n.store)
+    if (n.t === 'if') { storeKeys(n.then, out); if (n.else) storeKeys(n.else, out) }
+    else if ('children' in n && Array.isArray(n.children)) storeKeys(n.children, out)
+  }
+  return out
+}
+
+/** A result that may be persisted with `store`: really produced (or served from a fresh cache), not a stub or failure. */
+function storable(r: Ready): boolean {
+  return r.status === 'ok' && r.source !== 'stub' && !r.error
+}
+
+/** A trace preview of a value: bounded work even for a huge (or shared-structure) value. */
+function traceJson(v: Value): string {
+  return valueCells(v) > TRACE_CELLS_MAX ? '…' : JSON.stringify(v).slice(0, 200)
 }
 
 function snapshot(frame: Scope_, root: Scope_): Record<string, Value> {
@@ -1090,11 +1446,35 @@ export function secretValues(scope: Scope_, extra: readonly string[] = []): stri
 const MIN_SECRET_LEN = 4
 export const MASK = '***'
 
-/** Replace every occurrence of a secret value with `***` (longest first). */
+/**
+ * Replace every occurrence of a secret value with `***` (longest first), also in its JSON-escaped form (a
+ * secret with a quote, a backslash or a newline inside serialized trace text).
+ */
 export function maskSecrets(text: string, secrets: readonly string[]): string {
   let out = text
-  for (const s of secrets) if (s && out.includes(s)) out = out.split(s).join(MASK)
+  for (const s of secrets) {
+    if (!s) continue
+    if (out.includes(s)) out = out.split(s).join(MASK)
+    const esc = JSON.stringify(s).slice(1, -1)
+    if (esc !== s && out.includes(esc)) out = out.split(esc).join(MASK)
+  }
   return out
+}
+
+/**
+ * A copy of `v` with secrets masked in every string (keys included). Mask a value with this before
+ * `JSON.stringify` and before truncation: the JSON stays valid and a cut secret cannot leak its prefix.
+ */
+export function maskValue(v: Value, secrets: readonly string[]): Value {
+  if (!secrets.length) return v
+  if (typeof v === 'string') return maskSecrets(v, secrets)
+  if (Array.isArray(v)) return v.map(x => maskValue(x, secrets))
+  if (isObj(v)) {
+    const out: Record<string, Value> = {}
+    for (const [k, x] of Object.entries(v)) out[maskSecrets(k, secrets)] = maskValue(x, secrets)
+    return out
+  }
+  return v
 }
 
 // ───────────────────────── debug log (.claude/gate.debug.log) ─────────────────────────
@@ -1176,9 +1556,12 @@ export async function renderPrompt(prompts: CompiledPrompt[] | SectionNode[], sc
   const uses: Record<string, string> = { ...(opts.uses ?? {}) }
   for (const p of prompts as (CompiledPrompt | SectionNode)[]) {
     if (isCompiled(p)) {
-      Object.assign(uses, p.uses ?? {})
-      all.push(...p.sections)
-      if (p.skill) all.push({ id: p.skill.name, scope: 'volatile', children: p.skill.body, ...(p.skill.tiers ? { tier: p.skill.tiers } : {}) })
+      // A prompt's `uses` bind only its own sections (as frontmatter `use:` does in mddsl): two files may bind
+      // the same namespace to different modules.
+      const own: Node[] = Object.entries(p.uses ?? {}).map(([name, path]) => ({ t: 'use', name, path }))
+      const bind = (s: SectionNode): SectionNode => (own.length ? { ...s, children: [...own, ...s.children] } : s)
+      all.push(...p.sections.map(bind))
+      if (p.skill) all.push(bind({ id: p.skill.name, scope: 'volatile', children: p.skill.body, ...(p.skill.tiers ? { tier: p.skill.tiers } : {}) }))
     } else all.push(p)
   }
   const r = new Renderer(host, opts, scope, uses)
@@ -1219,10 +1602,12 @@ export async function renderPrompt(prompts: CompiledPrompt[] | SectionNode[], sc
     .join('\n\n')
   const storedEntries: Record<string, Value> = {}
   for (const [k, v] of Object.entries(stored)) storedEntries[k] = dataEnvelope(v, storedMeta[k]?.fetchedAt ?? host.now(), storedMeta[k]?.cache)
-  const secrets = secretValues(scope, opts.secrets)
+  const secrets = r.secrets
   if (secrets.length) {
     for (const t of trace) t.detail = maskSecrets(t.detail, secrets)
     for (const d of diagnostics) d.message = maskSecrets(d.message, secrets)
+    // `reason` carries assert messages and run stderr; it reaches --trace, the status line and the journal.
+    for (const s of rendered) if (s.reason) s.reason = maskSecrets(s.reason, secrets)
   }
   return { sections: rendered, text, trace, diagnostics, ms: host.now() - t0, stored, storedEntries }
 }

@@ -21,6 +21,12 @@ class DataError extends Error {
 
 const isObj = (v: unknown): v is Record<string, Json> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
+/** Own property only: a key such as `constructor` or `__proto__` never reads the prototype chain. */
+const getOwn = (o: Record<string, Json>, k: string): Json | undefined => (Object.hasOwn(o, k) ? o[k] : undefined)
+
+/** Defines an own enumerable key: `__proto__` becomes an ordinary key instead of replacing the prototype. */
+const setOwn = (o: Record<string, Json>, k: string, v: Json): void => { Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true }) }
+
 // ───────────────────────── YAML ─────────────────────────
 
 interface YLine { indent: number; text: string; no: number }
@@ -124,7 +130,7 @@ function parseFlow(src: string, line: number): Json {
         ws()
         if (src[i] !== ':') throw new DataError(`очікувалось «:» у ${src}`, line)
         i++
-        out[String(k)] = value(false)
+        setOwn(out, String(k), value(false))
         ws()
         if (src[i] === ',') { i++; continue }
         if (src[i] === '}') { i++; return out }
@@ -276,7 +282,14 @@ export function parseYaml(text: string): ParseOutcome {
       if (x.indent > indent) throw new DataError('невірний відступ у списку', x.no)
       if (!(x.text === '-' || x.text.startsWith('- '))) break
       const content = x.text === '-' ? '' : x.text.slice(2).replace(/^ +/, '')
-      if (!content) { const [v, n] = valueAfter('', j, indent, x.no); out.push(v); j = n; continue }
+      if (!content) {
+        // An empty item (`-`, `- # note`) is null unless a deeper-indented block follows: a sibling `- c` at the
+        // same indent is the next item, not this item's value (that rule is for `key:` values only).
+        const k = nextContent(j + 1)
+        if (k < lines.length && info(k)!.indent > indent) { const [v, n] = valueAfter('', j, indent, x.no); out.push(v); j = n }
+        else { out.push(null); j = j + 1 }
+        continue
+      }
       const col = indent + (x.text.length - content.length)
       if ((content === '-' || content.startsWith('- ') || YAML_KEY.test(content)) && content[0] !== '[' && content[0] !== '{') {
         lines[j] = ' '.repeat(col) + content
@@ -312,7 +325,7 @@ export function parseYaml(text: string): ParseOutcome {
       if (key === '<<') throw new DataError('злиття ключів YAML («<<») не підтримується', x.no)
       if (Object.prototype.hasOwnProperty.call(out, key)) throw new DataError(`ключ «${key}» повторюється`, x.no)
       const [v, n] = valueAfter(x.text.slice(m[0].length), j, indent, x.no)
-      out[key] = v
+      setOwn(out, key, v)
       j = n
     }
     return [out, j]
@@ -501,14 +514,14 @@ export function parseToml(text: string): ParseOutcome {
     let t = table
     for (let k = 0; k < path.length - 1; k++) {
       const p = path[k]!
-      const next = t[p]
-      if (next === undefined) { const n: Record<string, Json> = {}; t[p] = n; if (!inline) defined.add(n); t = n; continue }
+      const next = getOwn(t, p)
+      if (next === undefined) { const n: Record<string, Json> = {}; setOwn(t, p, n); if (!inline) defined.add(n); t = n; continue }
       if (!isObj(next) || frozen.has(next)) fail(`ключ «${path.slice(0, k + 1).join('.')}» уже має значення`)
       t = next as Record<string, Json>
     }
     const last = path[path.length - 1]!
     if (Object.prototype.hasOwnProperty.call(t, last)) fail(`ключ «${path.join('.')}» визначено двічі`)
-    t[last] = v
+    setOwn(t, last, v)
   }
 
   const tableAt = (path: string[], array: boolean): Record<string, Json> => {
@@ -516,16 +529,16 @@ export function parseToml(text: string): ParseOutcome {
     for (let k = 0; k < path.length; k++) {
       const p = path[k]!
       const last = k === path.length - 1
-      let next = t[p]
+      let next = getOwn(t, p)
       if (last && array) {
-        if (next === undefined) { next = []; t[p] = next }
+        if (next === undefined) { next = []; setOwn(t, p, next) }
         if (!Array.isArray(next) || frozen.has(next)) fail(`«${path.join('.')}» не є масивом таблиць`)
         const n: Record<string, Json> = {}
         ;(next as Json[]).push(n)
         defined.add(n)
         return n
       }
-      if (next === undefined) { const n: Record<string, Json> = {}; t[p] = n; next = n; if (last) defined.add(n); t = n; continue }
+      if (next === undefined) { const n: Record<string, Json> = {}; setOwn(t, p, n); next = n; if (last) defined.add(n); t = n; continue }
       if (Array.isArray(next) && !frozen.has(next)) { const lastEl = next[next.length - 1]; if (!isObj(lastEl)) fail(`«${p}» не є таблицею`); t = lastEl as Record<string, Json>; continue }
       if (!isObj(next) || frozen.has(next)) fail(`«${path.slice(0, k + 1).join('.')}» уже має значення`)
       const tbl = next as Record<string, Json>

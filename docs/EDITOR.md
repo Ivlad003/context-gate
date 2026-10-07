@@ -42,15 +42,15 @@
 Збірка: `npm run build:editors` (або `npm --prefix packages/lsp run build`) → `packages/lsp/dist/index.cjs`
 (CommonJS, `typescript` — зовнішній, береться у tsserver).
 
-Конфіг плагіна: `cliPath` (рядок або argv), `disabled`, `compiledDiagnostics` (типово `true`; VS Code-розширення
+Конфіг плагіна: `disabled`, `compiledDiagnostics` (типово `true`; VS Code-розширення
 вимикає, бо публікує свіжі діагностики збірки саме). Для TSX рівня 2 плагін запускає трансформер збірки над відкритим
-текстом і показує його G160 наживо.
+текстом і показує його G160 наживо. `cliPath`/`cliEnv` з `tsconfig.json` репозиторію плагін ігнорує (S12): команду CLI задає лише редактор (у VS Code `contextGate.cliPath` — налаштування рівня machine, недоступне в недовіреному workspace; preview і quick-variant там вимкнено).
 
 Підключення без VS Code — у `.claude/prompt/tsconfig.json` (його пише `init`/`build`; рядок-позначку першим рядком
 прибери, якщо редагуєш файл сам, інакше `build` його оновлює):
 
 ```json
-{ "compilerOptions": { "plugins": [{ "name": "@context-gate/lsp", "cliPath": "node /шлях/до/context-gate/dist/cli.js" }] } }
+{ "compilerOptions": { "plugins": [{ "name": "@context-gate/lsp" }] } }
 ```
 
 і пакет у `node_modules/@context-gate/lsp` (наприклад `npm i -D /шлях/до/context-gate/packages/lsp` після збірки).
@@ -154,10 +154,12 @@ node packages/editor-web/src/main.ts <id> [--root .] [--port 0] [--cli "node dis
 `<id>` — id файлу (`main` → `main.prompt.tsx` / `main.md`) або id секції, оголошеної в одному з файлів.
 З `--json` друкує один рядок `{"url","port","file"}` і завершується, коли батьківський процес закриває stdin.
 Програмно: `startEditorServer({ root, id, port?, cli? }) → { url, port, token, file, close() }`.
-CLI за замовчуванням — `CONTEXT_GATE_CLI` або `npx context-gate`.
+CLI за замовчуванням — `CONTEXT_GATE_CLI`, вбудований `dist/cli.js` плагіна, або `npx --no context-gate` (npx нічого не встановлює з реєстру, S4).
 
-Сторінка — CodeMirror 6 з `esm.sh` (TSX/Markdown, автокомпліт, lint, hover через API нижче); без мережі —
-простий `<textarea>` з тим самим набором кнопок. Праворуч: preview секції, trace, REPL виразів.
+Сторінка — CodeMirror 6 з `esm.sh` із закріпленими версіями (TSX/Markdown, автокомпліт, lint, hover через API нижче); без мережі
+або з `--no-cdn` (`CONTEXT_GATE_EDITOR_CDN=0`, жодного стороннього коду, esm.sh прибрано з CSP) — простий `<textarea>` з тим самим
+набором кнопок. Переводи рядків CRLF зберігаються; крос-сайтові запити (`Sec-Fetch-Site: cross-site`) відхиляються;
+`PUT` з `etag: null` лише створює файл. Праворуч: preview секції, trace, REPL виразів.
 
 | Endpoint | Що робить |
 | --- | --- |

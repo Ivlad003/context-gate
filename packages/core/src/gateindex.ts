@@ -82,12 +82,24 @@ export function sampleValue(v: unknown, depth = 0): unknown {
   return null
 }
 
+/** `env` (the gate.json whitelist) is secret: the index keeps its names and value types, never the values. */
+function maskedEnv(v: unknown): unknown {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return typeof v === 'string' ? '***' : sampleValue(v)
+  const out: Record<string, unknown> = {}
+  for (const k of Object.keys(v as Record<string, unknown>).slice(0, 30)) out[k] = '***'
+  return out
+}
+
+function withMaskedEnv(o: Record<string, unknown>): Record<string, unknown> {
+  return 'env' in o ? { ...o, env: maskedEnv(o.env) } : o
+}
+
 /** `vars`: each top-level scope name with its type and a sampled value (`args` left out: per-call). */
 export function varsOf(scope: Record<string, unknown> | undefined): Record<string, { type: string; value: unknown }> {
   const out: Record<string, { type: string; value: unknown }> = {}
   for (const [k, v] of Object.entries(scope ?? {})) {
     if (k === 'args' || typeof v === 'function') continue
-    out[k] = { type: typeOfValue(v), value: sampleValue(v) }
+    out[k] = { type: typeOfValue(v), value: k === 'env' ? maskedEnv(v) : k === 'providers' && v && typeof v === 'object' && !Array.isArray(v) ? sampleValue(withMaskedEnv(v as Record<string, unknown>)) : sampleValue(v) }
   }
   return out
 }

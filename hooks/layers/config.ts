@@ -4,6 +4,7 @@
 
 
 import { defaultConfig, envMaskValues, filterEnv, loadConfig, tierForModel } from '../../packages/core/src/config.ts'
+import type { GateConfig } from '../../packages/core/src/types.ts'
 import { json } from '../state.ts'
 import { type Io, type Runtime, debug, initRoot, join } from '../ctx.ts'
 
@@ -19,7 +20,7 @@ export async function loadGateConfig(io: Io, rt: Runtime): Promise<void> {
     rt.cfg = config
   } else {
     rt.config = undefined
-    rt.cfg = defaultConfig()
+    rt.cfg = withLayerSwitches(defaultConfig(), text)
     const first = diagnostics.find((d) => d.severity === 'error') ?? diagnostics[0]
     rt.disabled.gate = `${GATE_JSON}: ${first ? `${first.code} ${first.message}` : 'помилка конфігурації'} — skill-gate вимкнено`
     debug(io, rt.disabled.gate)
@@ -35,15 +36,38 @@ export async function loadGateConfig(io: Io, rt: Runtime): Promise<void> {
   await writeConfigStatus(io, rt)
 }
 
+/** A schema error disables layer 2 only: a well-typed `cursorRules` switch of the broken file still holds, so a
+ *  disabled cursor-rules layer stays off (L02). */
+function withLayerSwitches(base: GateConfig, text: string | undefined): GateConfig {
+  let raw: unknown
+  try { raw = text === undefined ? undefined : JSON.parse(text) } catch { return base }
+  const cr = raw && typeof raw === 'object' ? (raw as { cursorRules?: unknown }).cursorRules : undefined
+  if (!cr || typeof cr !== 'object' || Array.isArray(cr)) return base
+  const out: NonNullable<GateConfig['cursorRules']> = { ...(base.cursorRules ?? {}) }
+  for (const k of ['enabled', 'nested', 'strictWrite'] as const) {
+    const v = (cr as Record<string, unknown>)[k]
+    if (typeof v === 'boolean') out[k] = v
+  }
+  return { ...base, cursorRules: out }
+}
+
 export async function writeConfigStatus(io: Io, rt: Runtime): Promise<void> {
   const errors = rt.configDiagnostics.filter((d) => d.severity === 'error').length
   await io.update('config', () => json({ ok: rt.config !== undefined && errors === 0, disabled: { ...rt.disabled }, diagnostics: rt.configDiagnostics.length }))
 }
 
-/** Lazily bootstrap the session (session.start does it eagerly; a hot reload or a test may skip it). */
+/** Lazily bootstrap the session (session.start does it eagerly; a hot reload or a test may skip it). Concurrent hooks
+ *  on a fresh runtime await the one bootstrap in flight: none of them sees an empty config and skips the gates (L03). */
 export async function ensureSession(io: Io, rt: Runtime): Promise<void> {
   if (rt.ready) return
-  rt.ready = true
+  if (!rt.boot) {
+    const p: Promise<void> = bootstrap(io, rt).finally(() => { if (rt.boot === p) rt.boot = undefined })
+    rt.boot = p
+  }
+  await rt.boot
+}
+
+async function bootstrap(io: Io, rt: Runtime): Promise<void> {
   try {
     await initRoot(io, rt)
     await loadGateConfig(io, rt)
@@ -56,6 +80,7 @@ export async function ensureSession(io: Io, rt: Runtime): Promise<void> {
     if (rt.options.profile) {
       await io.update('manual', (m) => (m.profile !== undefined || m.off ? m : json({ ...m, profile: rt.options.profile })))
     }
+    rt.ready = true
   } catch (err) {
     rt.ready = false
     debug(io, `bootstrap failed: ${String((err as Error)?.message ?? err)}`)

@@ -115,12 +115,12 @@ test('Each: string children, function child proxy, build-time arrays', () => {
     t: 'each', of: 'cursor.always', as: 'r', children: [{ t: 'el', tag: 'li', children: [{ t: 'expr', expr: 'r.body' }] }],
   })
   // Template literals, nested paths, calls, indexes, index parameter, formatting whitespace around the function.
-  assert.deepEqual(h(Each, { of: 'commits' }, '\n  ', (c: any, n: any) => h('li', null, `${c.type}(${c.scope}): `, c.subject, ' #', n, ' ', c.files.at(0), ' ', c.tags[0], ' ', c.items.join(', ')), '\n'), {
+  assert.deepEqual(h(Each, { of: 'commits' }, '\n  ', (c: any, n: any) => h('li', null, `${c.type}(${c.scope}): `, c.subject, ' #', n, ' ', c.files.at(0), ' ', c.tags[0]), '\n'), {
     t: 'each', of: 'commits', as: 'c', index: 'n',
     children: [{ t: 'el', tag: 'li', children: [
       { t: 'expr', expr: 'c.type' }, { t: 'text', value: '(' }, { t: 'expr', expr: 'c.scope' }, { t: 'text', value: '): ' }, { t: 'expr', expr: 'c.subject' },
       { t: 'text', value: ' #' }, { t: 'expr', expr: 'n' }, { t: 'text', value: ' ' }, { t: 'expr', expr: 'c.files.at(0)' }, { t: 'text', value: ' ' },
-      { t: 'expr', expr: 'c.tags.at(0)' }, { t: 'text', value: ' ' }, { t: 'expr', expr: 'c.items.join(", ")' },
+      { t: 'expr', expr: 'c.tags.at(0)' },
     ] }],
   })
   // Destructured parameter: falls back to `it`, properties still resolve.
@@ -140,6 +140,7 @@ test('G160: build-time values and JS operators in expression positions', () => {
     ['operator inside Each fn', () => h(Each, { of: 'xs' }, (r: any) => h(If, { test: r.n > 1 }, 'x'))],
     ['object in text', () => section({ a: 1 })],
     ['array of with node children', () => h(Each, { of: [1, 2] }, 'x')],
+    ['JS method on an Each item (M80)', () => h(Each, { of: 'commits' }, (c: any) => h('li', null, c.items.join(', ')))],
   ]
   for (const [name, fn] of cases) {
     fn()

@@ -10,14 +10,15 @@ import { compiledDiagnosticsFor, findRoot, isPromptFile, loadModel, toPosix } fr
 import { level2Diagnostics } from './level2.ts'
 import { relative } from 'node:path'
 import { codeInfo } from '../../core/src/codes.ts'
-import { cliArgv } from './runcli.ts'
+import { cliArgv, spawnPlan } from './runcli.ts'
 
 type TSModule = typeof TS
 
 export interface PluginConfig {
-  /** CLI command (`npx context-gate` by default), string or argv array. */
+  /** CLI command (`npx --no context-gate` by default), string or argv array. Only from the editor
+   * (`onConfigurationChanged`): a `tsconfig.json` plugin entry belongs to the repo and is not trusted with it. */
   cliPath?: string | string[]
-  /** Extra environment for the CLI (VS Code's bundled CLI runs Electron with ELECTRON_RUN_AS_NODE=1). */
+  /** Extra environment for the CLI (VS Code's bundled CLI runs Electron with ELECTRON_RUN_AS_NODE=1). Editor only, as `cliPath`. */
   cliEnv?: Record<string, string>
   /** Turn the decorations off without uninstalling. */
   disabled?: boolean
@@ -49,7 +50,12 @@ function completionKind(ts: TSModule, k: string): TS.ScriptElementKind {
 
 export function createPlugin(ts: TSModule, info: TS.server.PluginCreateInfo): TS.LanguageService {
   const ls = info.languageService
-  const cfg = (): PluginConfig => ({ ...globalConfig, ...(info.config as PluginConfig | undefined) })
+  // S12: what runs as a command (`cliPath`, `cliEnv`) comes only from the editor's settings, never from the
+  // repo's tsconfig.json, whose other options still apply.
+  const cfg = (): PluginConfig => {
+    const { cliPath: _p, cliEnv: _e, ...repo } = (info.config ?? {}) as PluginConfig
+    return { ...globalConfig, ...repo, ...(globalConfig.cliPath !== undefined ? { cliPath: globalConfig.cliPath } : {}), ...(globalConfig.cliEnv ? { cliEnv: globalConfig.cliEnv } : {}) }
+  }
   const log = (m: string): void => { try { info.project.projectService.logger.info(`[context-gate] ${m}`) } catch { /* no logger */ } }
   const textOf = (fileName: string): string | undefined => {
     const snap = info.languageServiceHost.getScriptSnapshot(fileName)
@@ -166,9 +172,10 @@ export function createPlugin(ts: TSModule, info: TS.server.PluginCreateInfo): TS
   proxy.applyCodeActionCommand = ((action: unknown, ...rest: unknown[]) => {
     const one = Array.isArray(action) ? undefined : (action as { type?: string; root?: string; argv?: string[] })
     if (!one || one.type !== COMMAND_TYPE || !one.argv) return (ls.applyCodeActionCommand as (...a: unknown[]) => unknown)(action, ...rest)
-    const [bin, ...args] = [...cliArgv(cfg().cliPath), ...one.argv.slice(1)]
+    const plan = spawnPlan([...cliArgv(cfg().cliPath), ...one.argv.slice(1)])
+    if ('error' in plan) return Promise.resolve({ successMessage: `context-gate: ${plan.error}` })
     const env = cfg().cliEnv
-    const r = spawnSync(bin!, args, { cwd: one.root, encoding: 'utf8', timeout: 120_000, ...(env ? { env: { ...process.env, ...env } } : {}) })
+    const r = spawnSync(plan.file, plan.args, { cwd: one.root, encoding: 'utf8', timeout: 120_000, ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}), ...(env ? { env: { ...process.env, ...env } } : {}) })
     const ok = r.status === 0
     return Promise.resolve(ok ? { successMessage: `context-gate: ${one.argv.slice(1).join(' ')} — пропозицію записано в proposals/` } : { successMessage: `context-gate: помилка (${r.status ?? r.error?.message}): ${(r.stderr || r.stdout || '').slice(0, 500)}` })
   }) as TS.LanguageService['applyCodeActionCommand']

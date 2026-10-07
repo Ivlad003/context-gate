@@ -122,7 +122,9 @@ test('report: counts when vs classifier vs manual, denies per tool, rules never 
   assert.deepEqual(r.rulesNeverDelivered, ['api', 'react'])
   assert.deepEqual(r.rulesDelivered, { always: 1 })
   assert.deepEqual(r.escalations, { count: 1, byTier: { quick: 1 } })
-  assert.deepEqual(r.shadow, { proposed: 2, matched: 1, differed: 1 })
+  // The `when:paths` decision's proposal has no reference (M2: its profile did not come from the proposal); the
+  // manual choice of another profile is a mismatch.
+  assert.deepEqual(r.shadow, { proposed: 2, labeled: 1, matched: 0, differed: 1, unlabeled: 1, rate: 0 })
   const md = (await cli(root, ['report'])).out
   assert.match(md, /\| mcp__postgres__query \| 2 \|/)
   assert.match(md, /- api\n- react/)
@@ -236,10 +238,13 @@ test('bench: bench/repos.json is the repo list (examples + bench/repos/*); dirs 
   assert.ok(listed.filter((r) => r.dir.startsWith('bench/repos/')).length >= 5)
   assert.deepEqual(benchTargets(REPO, []).slice(0, 1).map((t) => [t.name, t.dir, t.profile]), [['basic', join(REPO, 'examples/basic'), 'frontend']])
   assert.deepEqual(benchTargets(REPO, ['examples/basic']).map((t) => t.dir), [join(REPO, 'examples/basic')])
-  const r = await cli(REPO, ['bench', '--json'])
+  // Building the stale TSX of a bench repo runs its code: only with trust (Р2).
+  const r = await cli(REPO, ['bench', '--json', '--trust-repo'])
   assert.equal(r.code, 0, r.err)
   const rows = JSON.parse(r.out)
   assert.equal(rows.length, listed.length)
   assert.equal(rows[0].repo, 'basic')
   assert.ok(rows[0].promptTokens > 0)
+  const untrusted = JSON.parse((await cli(REPO, ['bench', 'examples/basic', '--json'])).out)
+  assert.match(untrusted[0].note ?? '', /H013/)
 })

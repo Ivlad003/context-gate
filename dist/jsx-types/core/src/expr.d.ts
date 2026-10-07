@@ -96,6 +96,13 @@ export declare function newBudget(limit?: number): Budget;
 export declare class StepLimitError extends Error {
     constructor(limit: number);
 }
+/**
+ * A value or string past the size limits (`MAX_VALUE_CELLS`, `MAX_STRING_LENGTH`, `MAX_VALUE_DEPTH`). A StepLimitError,
+ * so every host that already turns the step limit into G155 stops the section instead of hanging or hitting a RangeError.
+ */
+export declare class ValueLimitError extends StepLimitError {
+    constructor(what: string);
+}
 export interface EvalEnv {
     /** Resolver for `ns.fn(...)` calls. Absent → G157. Returns null while a value is not ready. */
     call?: (path: string, args: Value[], kwargs: Record<string, Value>) => Value;
@@ -106,15 +113,36 @@ export interface EvalEnv {
 export declare const isObj: (v: Value | undefined) => v is {
     [k: string]: Value;
 };
+/** Cells of the largest value an expression may build (1 per scalar, list, object and key; strings per 64 chars). */
+export declare const MAX_VALUE_CELLS: number;
+/** Longest string an expression may build; V8's own limit (~2^29) throws a RangeError far above it. */
+export declare const MAX_STRING_LENGTH: number;
+/** Deepest value an expression may build or walk: deeper values would overflow the walkers' recursion. */
+export declare const MAX_VALUE_DEPTH = 256;
+/** Cells of a value (see MAX_VALUE_CELLS); Infinity when it is deeper than MAX_VALUE_DEPTH. */
+export declare function valueCells(v: Value): number;
+/**
+ * Charge the budget for walking `v` (serializing, hashing, comparing it): one step per CELLS_PER_STEP cells.
+ * Hosts call it before `toText`/`JSON.stringify` of a value an expression produced. Too deep → ValueLimitError.
+ */
+export declare function chargeValue(budget: Budget, v: Value): void;
 export declare function truthy(v: Value): boolean;
 /** Text form of a value inside the prompt. */
 export declare function toText(v: Value | undefined): string;
-export declare function deepEqual(a: Value, b: Value): boolean;
+/** Structural equality. With a budget, comparing two composites is charged by their cells (see chargeValue). */
+export declare function deepEqual(a: Value, b: Value, budget?: Budget): boolean;
 /** Dotted path lookup on a value (`cost.chars`); '' → the value itself. */
 export declare function getPath(v: Value, path: string): Value;
 /** Variable lookup along the frame chain (frames are prototype-linked objects); never reaches Object.prototype. */
 export declare function lookup(scope: Scope_, name: string): Value;
-/** Render a parsed template to text in `scope`. */
+/**
+ * Linear-time `RegExp#test` (no flags) for hosts that match user patterns outside expressions: null when the pattern
+ * is invalid or unsupported (G107 in `env.diagnostics`); the scan is charged to `budget`.
+ */
+export declare function regexTest(pattern: string, subject: string, budget?: Budget, env?: EvalEnv): boolean | null;
+/** Markdown code fence around `body`: one backtick longer than the longest backtick run inside (CommonMark). */
+export declare function fenceText(body: string, lang?: string): string;
+/** Render a parsed template to text in `scope`. Output and value walks are charged; past MAX_STRING_LENGTH → G155. */
 export declare function renderTemplate(parts: TemplatePart[], scope: Scope_, budget: Budget, env?: EvalEnv): string;
 /** Evaluate an expression AST. Total: every step counts against `budget` (StepLimitError past the limit). */
 export declare function evalExpr(ast: ExprAst, scope: Scope_, budget: Budget, env?: EvalEnv): Value;

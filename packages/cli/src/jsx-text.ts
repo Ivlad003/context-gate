@@ -8,7 +8,21 @@
 // (after `(`, `,`, `=`, `:`, `?`, `[`, `{`, `}`, `;`, `!`, `&`, `|`, `>`, `=>`, `return`, ...).
 // On anything it cannot follow it returns `ok: false` and the caller falls back to plain JSX rules.
 
-const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', mdash: '—', ndash: '–', hellip: '…', laquo: '«', raquo: '»', copy: '©' }
+// HTML named entities that occur in prose and docs (esbuild decodes the full HTML5 table in JSX text; text runs
+// rewritten here bypass it, so the common ones are decoded here; an unlisted name stays as written).
+const ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0', mdash: '—', ndash: '–', hellip: '…', laquo: '«', raquo: '»', copy: '©',
+  reg: '®', trade: '™', deg: '°', plusmn: '±', times: '×', divide: '÷', minus: '−', middot: '·', bull: '•', sect: '§', para: '¶',
+  ge: '≥', le: '≤', ne: '≠', asymp: '≈', equiv: '≡', infin: '∞', sum: '∑', prod: '∏', radic: '√', part: '∂', isin: '∈', notin: '∉',
+  and: '∧', or: '∨', cap: '∩', cup: '∪', sub: '⊂', sup: '⊃', forall: '∀', exist: '∃', empty: '∅', nabla: '∇', prop: '∝', ang: '∠',
+  larr: '←', rarr: '→', uarr: '↑', darr: '↓', harr: '↔', lArr: '⇐', rArr: '⇒', uArr: '⇑', dArr: '⇓', hArr: '⇔', crarr: '↵',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', sbquo: '‚', bdquo: '„', prime: '′', Prime: '″', lsaquo: '‹', rsaquo: '›',
+  euro: '€', pound: '£', yen: '¥', cent: '¢', curren: '¤', permil: '‰', dagger: '†', Dagger: '‡', loz: '◊', spades: '♠', clubs: '♣', hearts: '♥', diams: '♦',
+  ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009', zwnj: '\u200c', zwj: '\u200d', shy: '\u00ad', iexcl: '¡', iquest: '¿', brvbar: '¦', not: '¬', macr: '¯',
+  sup1: '¹', sup2: '²', sup3: '³', frac14: '¼', frac12: '½', frac34: '¾', micro: 'µ', ordf: 'ª', ordm: 'º', acute: '´', cedil: '¸', uml: '¨',
+  alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', lambda: 'λ', mu: 'μ', pi: 'π', sigma: 'σ', tau: 'τ', phi: 'φ', omega: 'ω',
+  Delta: 'Δ', Sigma: 'Σ', Omega: 'Ω', Pi: 'Π', Lambda: 'Λ', Gamma: 'Γ', Phi: 'Φ', Theta: 'Θ', theta: 'θ',
+}
 
 function decodeEntities(s: string): string {
   return s.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, e: string) => {
@@ -16,8 +30,23 @@ function decodeEntities(s: string): string {
       const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
       return Number.isFinite(code) ? String.fromCodePoint(code) : m
     }
-    return ENTITIES[e] ?? m
+    return Object.hasOwn(ENTITIES, e) ? ENTITIES[e]! : m
   })
+}
+
+/**
+ * Text that starts on its tag's line and wraps (`<li>Review the diff before⏎          committing</li>`): its
+ * continuation lines lose their common source indentation here, where it is known to be authored text. At run
+ * time `@context-gate/jsx` cannot tell such a piece from a data string (code, YAML) that must keep its nesting,
+ * so it only dedents pieces that start on their own line (M81). A run after `{expr}` is left to it.
+ */
+function dedentWrapped(raw: string): string {
+  if (raw.startsWith('\n') || !raw.includes('\n')) return raw
+  const lines = raw.split('\n')
+  let min = Infinity
+  for (let k = 1; k < lines.length; k++) if (lines[k]!.trim()) min = Math.min(min, /^[ \t]*/.exec(lines[k]!)![0].length)
+  if (min === Infinity || min === 0) return raw
+  return lines.map((l, k) => (k === 0 || !l.trim() ? (k === 0 ? l : l.slice(Math.min(l.length, min))) : l.slice(min))).join('\n')
 }
 
 const JSX_PRECEDE = new Set(['(', ',', '=', ':', '?', '[', '{', '}', ';', '!', '&', '|', '>', '', '+', '-', '*', '%', '~', '^'])
@@ -165,15 +194,18 @@ export function preserveJsxText(src: string): PreserveResult {
 
   /** JSX children until the matching closing tag. */
   function children(): void {
+    let afterExpr = false
     for (;;) {
       const s = i
       while (i < n && src[i] !== '<' && src[i] !== '{') i++
       if (i > s) {
         const raw = src.slice(s, i)
+        const text = afterExpr ? raw : dedentWrapped(raw)
         // Newlines are repeated as JS whitespace inside the container so line numbers (and source maps) stay intact.
-        edits.push({ start: s, end: i, text: `{${JSON.stringify(decodeEntities(raw))}${'\n'.repeat(raw.split('\n').length - 1)}}` })
+        edits.push({ start: s, end: i, text: `{${JSON.stringify(decodeEntities(text))}${'\n'.repeat(raw.split('\n').length - 1)}}` })
       }
       if (i >= n) fail('незакритий JSX-елемент')
+      afterExpr = src[i] === '{'
       if (src[i] === '{') { i++; js(true); continue }
       // `<`
       let j = i + 1

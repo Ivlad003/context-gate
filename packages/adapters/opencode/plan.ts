@@ -43,13 +43,15 @@ export interface Step { log: DecisionLogEntry[] }
 
 /** `session` hook `prompt`: one turn decision per user prompt. Mutates `event.prompt`. */
 export function onPrompt(data: GateData, s: OcSession, event: OcPromptEvent, now: number): Step {
-  const f = applyFlag(s.gate, event.prompt.text ?? '')
+  const f = applyFlag(s.gate, event.prompt.text ?? '', data.config)
   if (f.flag) event.prompt.text = f.text
   const files = mentionedFiles(data, s.gate, f.text)
   const d = decideTurn(data, s.gate, 'opencode', { now })
   const log = [...d.log]
-  // Tier preload through prompt({ skills }): attached once per context, not on every prompt.
-  const want = d.gate.skills.preload.filter((n) => !s.preloaded.includes(n))
+  // Tier preload through prompt({ skills }): attached once per context, not on every prompt; only for the
+  // applied gate (M03) and not when the runner already put it into the system prompt.
+  const preload = d.applied && !d.gate.off && data.env.CONTEXT_GATE_PRELOAD !== 'system' ? d.gate.skills.preload : []
+  const want = preload.filter((n) => !s.preloaded.includes(n))
   if (want.length) {
     const skills = event.prompt.skills ?? []
     for (const id of want) if (!skills.some((x) => x.id === id)) skills.push({ id })
@@ -122,6 +124,21 @@ function appendContent(content: unknown, text: string): unknown {
   return [content, { type: 'text', text }]
 }
 
+/**
+ * A task subagent runs as a child session (M27): it starts with the parent's prompt-level overrides, committed
+ * profile and model, so `[gate:backend]` / `[gate:off]` in the parent hold for its subagents too. Delivered
+ * rules and preload are per context and are not copied.
+ */
+export function inheritSession(child: OcSession, parent: OcSession): void {
+  const p = parent.gate
+  const clone = <T>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)) as T)
+  if (p.manual) child.gate.manual = clone(p.manual)
+  child.gate.gate = clone(p.gate)
+  if (p.model) child.gate.model = p.model
+  if (p.current) child.gate.current = clone(p.current)
+  if (p.last) child.gate.last = clone(p.last)
+}
+
 /** `session` hook `compaction`: delivered rules and preloaded skills are gone from the context. */
 export function onCompaction(s: OcSession): void {
   resetSession(s.gate)
@@ -134,13 +151,51 @@ export function skillPermissionRules(gate: Pick<Gate, 'skills' | 'shadow' | 'off
   return gate.skills.off.map((name) => ({ action: 'skill', resource: name, effect: 'deny' as const }))
 }
 
-/** MCP server names from an `opencode.json` text (`mcp` keys), tolerant of `//` comments (jsonc). */
-export function mcpServersFromConfig(text: string | undefined): string[] {
+/** JSONC → JSON: drops line and block comments, then trailing commas, outside strings (opencode.jsonc). */
+export function stripJsonc(text: string): string {
+  const scan = (src: string, step: (i: number, out: string[]) => number): string => {
+    const out: string[] = []
+    let i = 0
+    while (i < src.length) {
+      if (src[i] === '"') {
+        let j = i + 1
+        while (j < src.length && src[j] !== '"') j += src[j] === '\\' ? 2 : 1
+        out.push(src.slice(i, j + 1))
+        i = j + 1
+      } else i = step(i, out)
+    }
+    return out.join('')
+  }
+  const noComments = scan(text, (i, out) => {
+    if (text[i] === '/' && text[i + 1] === '/') { const nl = text.indexOf('\n', i); return nl < 0 ? text.length : nl }
+    if (text[i] === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); return end < 0 ? text.length : end + 2 }
+    out.push(text[i])
+    return i + 1
+  })
+  return scan(noComments, (i, out) => {
+    if (noComments[i] === ',') {
+      let j = i + 1
+      while (j < noComments.length && /\s/.test(noComments[j])) j++
+      if (noComments[j] === '}' || noComments[j] === ']') return i + 1
+    }
+    out.push(noComments[i])
+    return i + 1
+  })
+}
+
+/** MCP server names from an `opencode.json` / `opencode.jsonc` text (`mcp` keys). Undefined when unparsable,
+ * so the caller can say MCP gating is off instead of silently allowing everything (L12). */
+export function mcpServersFromConfigChecked(text: string | undefined): string[] | undefined {
   if (!text) return []
   try {
-    const json = JSON.parse(text.replace(/^\s*\/\/.*$/gm, '')) as { mcp?: Record<string, unknown> }
-    return json.mcp && typeof json.mcp === 'object' ? Object.keys(json.mcp) : []
+    const json = JSON.parse(stripJsonc(text)) as { mcp?: Record<string, unknown> }
+    return json?.mcp && typeof json.mcp === 'object' ? Object.keys(json.mcp) : []
   } catch {
-    return []
+    return undefined
   }
+}
+
+/** MCP server names from an `opencode.json` text (`mcp` keys), JSONC tolerant; [] when unparsable. */
+export function mcpServersFromConfig(text: string | undefined): string[] {
+  return mcpServersFromConfigChecked(text) ?? []
 }

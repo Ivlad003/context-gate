@@ -4,7 +4,8 @@
 
 import type { ArgSpec, IncludeMode, Node, Scope, SectionNode, Tier as TierName } from '../../core/src/types.ts'
 import {
-  builtin, callerLocation, dedentBlock, exprLiteral, exprOf, interpolate, isExprRef, isMarker, normalize, rawText, ref, report, toNodes, EXPR,
+  builtin, callerLocation, claimDiagnostics, dedentBlock, exprLiteral, exprOf, interpolate, isExprRef, isMarker, loopBody, normalize, numberLiteral,
+  rawText, ref, report, toNodes, EXPR,
   type Child, type ExprRef, type JsxValue, type PromptMarker, type SectionMarker, type ElseMarker,
 } from './core.ts'
 
@@ -88,6 +89,7 @@ export const Prompt = builtin('Prompt', (props: PromptProps): PromptMarker => {
     out.skill = { name, description: props.description ?? '', args: props.args ?? {}, invoke, body }
     if (props.tiers) out.skill.tiers = tierList(props.tiers)
   }
+  claimDiagnostics(out, props.children)
   return out
 })
 
@@ -172,14 +174,24 @@ export const Each = builtin('Each', (props: EachProps): JsxValue => {
       report('G160', 'error', '<Each of={масив}> з дочірніми вузлами: дані збірки не можна передати в рантайм-цикл.', 'передай функцію-дитину або винеси дані у провайдер')
       return []
     }
-    return props.of.map((item, i) => normalize(fn(item, i), '<Each>')) as JsxValue
+    return props.of.map((item, i) => loopBody(fn(item, i), '<Each>')) as JsxValue
   }
   const names = fn ? paramNames(fn) : []
   const as = props.as ?? (names[0] || 'it')
   const node: Node = { t: 'each', of: req(exprOf(props.of, '<Each> of'), 'Each', 'of'), as, children: [] }
   const index = props.index ?? (fn && fn.length >= 2 ? names[1] || 'i' : undefined)
   if (index) node.index = index
-  node.children = toNodes(fn ? fn(ref(as), index ? ref(index) : undefined) : child, '<Each>')
+  let body: unknown = child
+  if (fn) {
+    try {
+      body = fn(ref(as, true), index ? ref(index, true) : undefined)
+    } catch (err) {
+      // The item is a reference, not a value: `([k, v]) => …` or `[...f]` cannot iterate it at build time.
+      report('G160', 'error', `<Each of="${node.of}">: елемент рантайм-циклу не можна деструктурувати чи перебрати на збірці (${(err as Error)?.message ?? err}).`, `звертайся до полів: ${as}.key, ${as}.value, ${as}.at(0)`)
+      body = []
+    }
+  }
+  node.children = loopBody(body, '<Each>')
   return node
 })
 
@@ -197,7 +209,7 @@ export const Store = builtin('Store', (props: { name: string; to?: string }): No
 
 export const Repeat = builtin('Repeat', (props: { n: Expr | number; children?: Child }): Node => {
   if (typeof props.n === 'number' && props.n > 1000) report('G152', 'error', `<Repeat n={${props.n}}>: понад 1 000 ітерацій.`, 'провайдер повертає готовий список')
-  return { t: 'repeat', n: req(exprOf(props.n, '<Repeat> n'), 'Repeat', 'n'), children: toNodes(props.children, '<Repeat>') }
+  return { t: 'repeat', n: req(exprOf(props.n, '<Repeat> n'), 'Repeat', 'n'), children: loopBody(props.children, '<Repeat>') }
 })
 
 export const Break = builtin('Break', (): Node => ({ t: 'break' }))
@@ -309,16 +321,21 @@ export interface McpProps {
 }
 
 function mcpArg(v: unknown, key: string): string {
+  const where = `<Mcp> args.${key}`
   if (typeof v === 'string') {
     const m = /^\s*\{\{\s*([\s\S]*?)\s*\}\}\s*$/.exec(v)
-    return m ? m[1]! : JSON.stringify(v)
+    if (m) return m[1]!
+    // A partial placeholder (`repo:{{ args.repo }} is:open`) is a template: concatenate its parts.
+    const parts = interpolate(v)
+    if (parts.some((n) => n.t === 'expr')) return parts.map((n) => (n.t === 'expr' ? `(${n.expr})` : exprLiteral(n.t === 'text' ? n.value : ''))).join(' + ')
+    return exprLiteral(v)
   }
   if (isExprRef(v)) return v[EXPR]
-  if (typeof v === 'number' || typeof v === 'boolean' || v === null) return JSON.stringify(v)
-  if (Array.isArray(v) || (typeof v === 'object' && v !== null)) {
-    try { return JSON.stringify(v) } catch { /* fallthrough */ }
-  }
-  return exprOf(v, `<Mcp> args.${key}`) ?? 'null'
+  if (typeof v === 'number') return numberLiteral(v, where)
+  if (typeof v === 'boolean' || v === null) return JSON.stringify(v)
+  if (Array.isArray(v)) return `[${v.map((x, i) => mcpArg(x, `${key}[${i}]`)).join(', ')}]`
+  // The expression language has no object literals (`{` is G101 at render).
+  return exprOf(v, where) ?? 'null'
 }
 
 export const Mcp = builtin('Mcp', (props: McpProps): Node => {
@@ -434,5 +451,7 @@ export const Examples = builtin('Examples', (props: { glob: string; n?: number; 
 /** Context-budget warning: shown when `ctx.percent` passes the soft budget. */
 export const HealthWarning = builtin('HealthWarning', (props: { threshold?: Expr; children?: Child }): Node => {
   const then = props.children === undefined ? interpolate('Контекст {{ ctx.percent }}% — відповідай стисло, без повторів уже сказаного.') : toNodes(props.children, '<HealthWarning>')
-  return { t: 'if', test: `ctx.percent > ${exprOf(props.threshold, '<HealthWarning> threshold') ?? 'budgets.soft'}`, then }
+  const threshold = exprOf(props.threshold, '<HealthWarning> threshold') ?? 'budgets.soft'
+  // `data.limit ?? 70` binds looser than `>`: anything but a plain path or number is parenthesized.
+  return { t: 'if', test: `ctx.percent > ${/^[\w$.]+$/.test(threshold) ? threshold : `(${threshold})`}`, then }
 })

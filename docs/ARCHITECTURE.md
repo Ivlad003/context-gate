@@ -110,7 +110,8 @@ shared/*, *.json, *.md ──────┘  (Node, esbuild,           ├─ c
 ### 1.5 Skills як промпти
 
 - `<Prompt as="skill" name args invoke tiers>`: збірка пише `.claude/skills/<name>/SKILL.md` з рядком
-  `` !`node "${CLAUDE_PLUGIN_ROOT}/dist/cli.js" run <name> --args "$ARGUMENTS" --ctx-from live` ``; з mod-ом тіло
+  `` !`if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then set -- node "$CLAUDE_PLUGIN_ROOT/dist/cli.js"; else set -- npx --no-install context-gate; fi; "$@" run <name> --args '$ARGUMENTS' --ctx-from live` ``
+  (`build.ts skillCommand`: аргументи в одинарних лапках, без плагіна — встановлений пакет); з mod-ом тіло
   рендериться в `skill.prompt` з аргументами з `tool.call {tool:'Skill'}` (PROBE: `skill.prompt` без args).
 - Помилка аргументів → секція `usage` як текст для моделі (код 0). Fallback (Р6): попередньо відрендерене тіло з
   дефолтними аргументами, позначене `static`.

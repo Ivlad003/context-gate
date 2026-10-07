@@ -53,21 +53,22 @@ export function healthLine(h: ContextGateRenderHealth | null, buildError?: { cod
   return `prompt ${fmtK(tokens)} (static ${pct}%) · ◌ ${h.unverified}`
 }
 
-const drawnMark = new WeakMap<Runtime, boolean>()
+const drawnMark = new WeakMap<Runtime, string>()
 
 /** Pinned status line: health in interactive sessions; the whole line headless (no AbovePrompt).
- * A change of the build marker also redraws the band (it reads `rt`, which no atom subscribes to). */
+ * A change of the build or config marker also redraws the band (it reads `rt`, which no atom subscribes to). */
 export async function refreshStatus(io: Io, rt: Runtime): Promise<void> {
   try {
     const err = buildErrorOf(rt)
-    if ((drawnMark.get(rt) ?? false) !== !!err) {
-      drawnMark.set(rt, !!err)
+    const mark = `${err ? 'build' : ''}|${configMark(rt) ?? ''}`
+    if ((drawnMark.get(rt) ?? '|') !== mark) {
+      drawnMark.set(rt, mark)
       try { io.ui.invalidate('ui.render') } catch { /* no surface */ }
     }
     const health = healthLine(await io.read('health'), err)
     if (rt.surface === null) {
-      const line = gateLine(await io.read('gate'), await io.read('tier'), await io.read('ctxPercent'))
-      io.ui.status(health ? `${line} · ${health}` : line)
+      const line = [gateLine(await io.read('gate'), await io.read('tier'), await io.read('ctxPercent')), health ?? '', configMark(rt) ?? ''].filter(Boolean).join(' · ')
+      io.ui.status(line)
     } else {
       io.ui.status(health)
     }
@@ -90,12 +91,21 @@ export async function resetAuto(io: Io, recompute: (trigger: string) => Promise<
 
 type Els = { Box: (p: Record<string, unknown>) => unknown; Text: (p: Record<string, unknown>) => unknown; Markdown: (p: { text: string }) => unknown; Button: (p: { key: string; label: string; variant?: 'primary'; onPress: () => void }) => unknown }
 
-/** The band's one line: highlighted once the soft context threshold is crossed or a prompt build failed. */
+/** The marker of a layer switched off by an invalid gate.json: otherwise the band reads like «no profile matched» (O7). */
+export const CONFIG_MARK = '⚠ gate.json'
+
+function configMark(rt: Runtime): string | undefined {
+  return rt.disabled?.gate ? CONFIG_MARK : undefined
+}
+
+/** The band's one line: highlighted once the soft context threshold is crossed, a prompt build failed or gate.json
+ * is invalid (`/gate why` says why). */
 export function bandProps(rt: Runtime, gate: ContextGateDecision | null, tier: string | null, ctx: number | null): { text: string; hot: boolean } {
   const soft = rt.cfg ? budgetFor(rt.cfg, gate?.tier ?? tier ?? 'standard').softContextPct : 70
   const err = buildErrorOf(rt)
-  const line = gateLine(gate, tier, ctx)
-  return { text: err ? `${line} · ${BUILD_MARK}` : line, hot: (ctx !== null && ctx >= soft) || !!err }
+  const cfgErr = configMark(rt)
+  const line = [gateLine(gate, tier, ctx), err ? BUILD_MARK : '', cfgErr ?? ''].filter(Boolean).join(' · ')
+  return { text: line, hot: (ctx !== null && ctx >= soft) || !!err || !!cfgErr }
 }
 
 /** `/gate why` pane: disabled layers, the last decisions, prompt sections, and the two buttons. */

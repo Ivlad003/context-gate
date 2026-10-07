@@ -3,10 +3,17 @@
 
 import { parseMarkdownPrompt, splitTopLevel } from '../../core/src/mddsl.ts'
 import { checkExpr, completeExpr, hoverExpr, inferShape, type Bindings, type CompletionResult, type ExprHover } from './exprcheck.ts'
-import { placeholderRanges, type FileDiag } from './analyze.ts'
+import { isUnclosed, placeholderRanges, type FileDiag } from './analyze.ts'
 import type { CtxModel, Shape } from './model.ts'
 
-export interface MdSite { start: number; end: number; text: string; line: number }
+export interface MdSite {
+  start: number
+  end: number
+  text: string
+  line: number
+  /** An unclosed `{{`: literal text for the core, so only completion and hover use it. */
+  unclosed?: boolean
+}
 
 export interface MdFacts { sites: MdSite[]; bindings: { name: string; of?: string; kind: 'item' | 'value' | 'number' }[] }
 
@@ -24,7 +31,17 @@ export function scanMarkdown(text: string): MdFacts {
   let i = 0
   if (lines[0]?.trim() === '---') {
     const end = lines.findIndex((l, k) => k > 0 && l.trim() === '---')
-    if (end > 0) { for (; i <= end; i++) off += lines[i]!.length + 1 }
+    if (end > 0) {
+      // Front-matter `use:` namespaces (`gitx: scripts/git-extra.js`) are bound like `@use`.
+      let inUse = false
+      for (; i <= end; i++) {
+        const l = lines[i]!
+        if (/^use:\s*$/.test(l)) inUse = true
+        else if (inUse && /^\s+/.test(l)) { const m = /^\s+([A-Za-z_][\w-]*)\s*:/.exec(l); if (m) facts.bindings.push({ name: m[1]!, kind: 'value' }) }
+        else inUse = false
+        off += l.length + 1
+      }
+    }
   }
   let inRun = false
   let inFence = false
@@ -32,11 +49,14 @@ export function scanMarkdown(text: string): MdFacts {
     const line = lines[i]!
     const base = off
     off += line.length + 1
-    const add = (a: number, b: number): void => { const [x, y] = trimRange(line, a, b); facts.sites.push({ start: base + x, end: base + y, text: line.slice(x, y), line: i + 1 }) }
+    const add = (a: number, b: number, unclosed?: boolean): void => {
+      const [x, y] = trimRange(line, a, b)
+      facts.sites.push({ start: base + x, end: base + y, text: line.slice(x, y), line: i + 1, ...(unclosed ? { unclosed } : {}) })
+    }
     const t = line.trim()
     if (inRun) { if (t === '@end') inRun = false; continue }
     if (/^(```|~~~)/.test(t)) { inFence = !inFence; }
-    if (!inFence) for (const [a, b] of placeholderRanges(line)) add(a, b)
+    if (!inFence) for (const [a, b] of placeholderRanges(line)) add(a, b, isUnclosed(line, b))
     if (inFence || !t.startsWith('@')) continue
     const lead = line.indexOf('@')
     const dm = /^@([A-Za-z_][\w-]*)\s*/.exec(line.slice(lead))
@@ -120,14 +140,18 @@ export function analyzeMarkdown(text: string, path: string, model: CtxModel): Fi
   const out: FileDiag[] = []
   const lineStarts = [0]
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') lineStarts.push(i + 1)
-  for (const d of parseMarkdownPrompt(text, { path }).diagnostics) {
-    if (/^G1(0\d)$/.test(d.code)) continue // reported per expression below
+  // Syntax errors are reported per expression below, but only where the scan has a site on that line (front-matter
+  // `when`, @call/@mcp/@fn arguments and fenced `{{ }}` have none, so the core's copy stays).
+  const siteLines = new Set(facts.sites.filter((s) => !s.unclosed).map((s) => s.line))
+  for (const d of parseMarkdownPrompt(text, { path, ...(model.tiers.length ? { tiers: model.tiers } : {}) }).diagnostics) {
+    if (/^G1(0\d)$/.test(d.code) && d.line !== undefined && siteLines.has(d.line)) continue
     const line = Math.min(Math.max(1, d.line ?? 1), lineStarts.length)
     const start = lineStarts[line - 1]!
     const end = line < lineStarts.length ? lineStarts[line]! - 1 : text.length
     out.push({ start, length: Math.max(1, end - start), code: d.code, severity: d.severity, message: d.message, ...(d.hint ? { hint: d.hint } : {}) })
   }
   for (const s of facts.sites) {
+    if (s.unclosed) continue
     for (const d of checkExpr(s.text, model, bound)) out.push({ start: s.start + d.start, length: Math.max(1, d.end - d.start), code: d.code, severity: d.severity, message: d.message, ...(d.hint ? { hint: d.hint } : {}) })
   }
   return out.sort((a, b) => a.start - b.start)

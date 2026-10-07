@@ -10,7 +10,7 @@ import { DIRECTIVES, directiveAt, directiveDoc, directivePrefixAt, frontmatterLi
 const repo = new URL('..', import.meta.url).pathname
 
 test('cliArgv and buildRunArgs', () => {
-  assert.deepEqual(cliArgv(undefined), ['npx', 'context-gate'])
+  assert.deepEqual(cliArgv(undefined), ['npx', '--no', 'context-gate'])
   assert.deepEqual(cliArgv('node "/a b/cli.js"'), ['node', '/a b/cli.js'])
   assert.deepEqual(buildRunArgs({ section: 'workflow' }, { dryScripts: true }), ['run', '--only', 'workflow', '--json', '--dry-scripts'])
   assert.deepEqual(buildRunArgs({ section: 'w', tier: 'quick', profile: 'backend', ctxFrom: 'session:latest' }, { dryScripts: false }), ['run', '--only', 'w', '--json', '--tier', 'quick', '--profile', 'backend', '--ctx-from', 'session:latest'])

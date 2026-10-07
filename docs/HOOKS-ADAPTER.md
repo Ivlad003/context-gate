@@ -11,9 +11,14 @@ npm run build:hooks-adapter                                  # → dist/hooks-ad
 node dist/hooks-adapter.js install --profile frontend --tier standard
 node dist/hooks-adapter.js install --print                   # show the merged settings, write nothing
 node dist/hooks-adapter.js install --uninstall
+node dist/hooks-adapter.js install --with-mod --model-switch # run next to an enabled mod; register PostModelSwitch
 ```
 
-Don't run it next to the mod in the same session: both would deliver the same rules.
+**Next to the mod.** While the `context-gate` plugin is enabled in settings (`enabledPlugins` `context-gate@*`;
+local, then project, then user settings, the most specific scope wins), every hook stays quiet and shows one
+`systemMessage` on `SessionStart(startup)`, so the two never deliver the same rules twice. `install` refuses in that
+case (exit 1) unless `--with-mod`, which embeds `--with-mod` in the hook command; `CONTEXT_GATE_HOOKS=force` also
+overrides. `install` warns when the script lives in the npx cache.
 
 ## Files
 
@@ -40,8 +45,10 @@ The stdin and stdout shapes follow `ClassicHookInputs` / `ClassicResultFields` i
 
 | Event (matcher) | Reads | Answers |
 | --- | --- | --- |
-| `SessionStart` | `source`, `model` | `additionalContext`: Always rules (framed `Contents of <path> (Cursor rule <id>):`), the preloaded skill bodies of the tier (`tiers[*].preload`), and a status line when the gate applies |
-| `UserPromptSubmit` | `prompt` | `additionalContext`: Manual rules from `@id` and `/rule <id…>`, Auto Attached rules of `@file` mentions (issue #98796); handles `[gate:<profile>]`, `[gate:off]`, `[gate:auto]`, `[gate:new]` |
+| `SessionStart` | `source`, `model` | `additionalContext`: Always rules (framed `Contents of <path> (Cursor rule <id>):`), the preloaded skill bodies of the tier (`tiers[*].preload`, only for the applied gate and not on `resume`/`fork`), and a status line when the gate applies. `compact` re-decides the profile only when `classify.recheckOn` contains `compact`. A `fork` with no state is seeded from its parent session (found in the first 256 KB of `transcript_path`) |
+| `UserPromptSubmit` | `prompt` | `additionalContext`: Manual rules from `@id` and `/rule <id…>`, Auto Attached rules of `@file` mentions (issue #98796; the files count as read), Always rules a new profile enables; handles `[gate:<profile>]`, `[gate:off]`, `[gate:auto]`, `[gate:new]`. `[gate:x]` with a profile gate.json does not declare is stripped and ignored with a `G502` `systemMessage`. Prompts with `source` `system`, `loop_wakeup`, `schedule_wakeup` or `poll_event` are no turn and change nothing |
+| `SubagentStart` | `agent_id` | `additionalContext`: the allowed Always rules, once per agent |
+| `PostModelSwitch` (only with `install --model-switch`) | `to_model` | re-decides the tier without advancing a turn; delivers the new tier's preload when the gate applies |
 | `PostToolUse` (`Read\|Edit\|Write\|NotebookEdit`) | `tool_input.file_path` / `notebook_path` | `additionalContext`: Auto Attached rules for the path, once per session and agent |
 | `PreToolUse` (`mcp__.*\|Edit\|Write\|NotebookEdit`) | `tool_name`, `tool_input` | `permissionDecision: "deny"` with `permissionDecisionReason` for MCP tools outside the profile, for read-before-write, and for `strictWrite` |
 
@@ -51,6 +58,9 @@ Output examples:
 {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Contents of .cursor/rules/react.mdc (Cursor rule react):\n…"}}
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"postgres вимкнено профілем frontend. Користувач може увімкнути: [gate:backend] у промпті або /gate +backend з mod. Або напиши [gate:off] у промпті."}}
 ```
+
+The deny hint names a declared profile that contains the enabling group (or the group itself when it is a
+profile), else `[gate:off]`; never a bare group name.
 
 Claude Code may reject an unknown slash command before `UserPromptSubmit` fires. When `/rule <id>` is refused, write
 `@<id>` instead, or put `/rule <id>` on a later line of the prompt.
@@ -69,6 +79,8 @@ that don't fit become one line each: `також діє: <path>, прочита�
 Rule delivery always works. MCP `deny` and gating rules by profile apply only when one of these holds:
 
 - `CONTEXT_GATE_PROFILE=<profile>` is set (like `/gate <profile>`; shiftwork sets it from the ticket),
+- `CONTEXT_GATE_ADD` / `CONTEXT_GATE_REMOVE` are set (the ticket's `**Skills:** +a -b`, applied on top of the
+  committed profile),
 - the prompt carries `[gate:<profile>]` (kept for the rest of the session),
 - `classify.mode` is `auto` in `gate.json`, or `CONTEXT_GATE_MODE=auto`.
 
@@ -81,12 +93,14 @@ Hysteresis runs on `UserPromptSubmit` only. `PreToolUse` and `PostToolUse` read 
 advancing a turn. There is no classifier in this adapter: a settings hook has no `$.model`.
 
 The model comes from the `SessionStart` input, else `CONTEXT_GATE_MODEL`, else `ANTHROPIC_MODEL`.
+`CONTEXT_GATE_PRELOAD=system` means the runner already put the tier preload into the system prompt: SessionStart and
+PostModelSwitch skip it. `CONTEXT_GATE_TICKET` is recorded in decision entries.
 
 ### read-before-write
 
 This builtin gate is active when `gates[]` has `{ "name": "read-before-write", "on": "write", "builtin": true }` and
-the model's tier is in its `tiers` (no `tiers` means every tier). An `Edit`, `NotebookEdit` or `Write` of an existing
-file that this session hasn't read is denied. Writing a new file is allowed. A denial is logged as `gate-failed`.
+the model's tier is in its `tiers` (no `tiers` means every declared tier except premium, as in the mod). An `Edit`, `NotebookEdit` or `Write` of an existing
+file that this session hasn't read is denied. Writing a new file is allowed. A denial is logged as `gate-failed` with `data.gate: "read-before-write"`.
 Every evaluation of the gate is also a `gate-attempt` entry (`outcome: "pass" | "block"`, core
 `journal.ts gateAttemptEntry`), which `context-gate health` and `report` turn into `H011`.
 
@@ -115,6 +129,11 @@ set. It holds:
 - `gate`: the `GateState` of `decideGate` (profile, hysteresis).
 - the prompt-level manual override, the model, and the last logged decision.
 
+The read-modify-write runs under an `O_EXCL` lock file (`<state>.lock`, 2 s wait, a lock older than 10 s is
+broken). Without the lock the write does a three-way merge with the file on disk: additions and removals to
+`seen`/`read`/`paths` from both sides are kept, and the disk value wins for any scalar this process did not change.
+Unchanged state is not written; a failed write is logged with `CONTEXT_GATE_DEBUG=1` and never drops the hook output.
+
 Reading a `.mdc` file in full counts as delivering that rule. A partial read (`offset`, `limit`, `pages`) does not.
 
 ## Journal
@@ -126,18 +145,25 @@ text. `data.adapter` is `"claude-code-hooks"`.
 
 ## install
 
-`install` merges into `.claude/settings.local.json` and first backs the file up to
-`settings.local.json.bak-<timestamp>`.
+`install` merges into `.claude/settings.local.json` (written atomically) and first backs the file up to
+`~/.cache/context-gate/backups/` (or `$CONTEXT_GATE_CACHE_DIR/backups/`).
 
-- **`hooks`**: the four entries above. The command is `node <abs path>/dist/hooks-adapter.js` with timeout 10 s. A
-  re-install replaces earlier entries whose command contains `hooks-adapter.js`. Other hooks stay.
+- **`hooks`**: the entries above (`SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PreToolUse`, `SubagentStart`,
+  plus `PostModelSwitch` with `--model-switch`). The command is `node <abs path>/dist/hooks-adapter.js` with timeout
+  10 s. Removal works per hook: only our own commands (`<node> <…/>hooks-adapter.js[ flags]`) are replaced, and a
+  matcher is dropped only when nothing of the user's is left in it.
 - **`skillOverrides`**: `decideGate` runs for `--profile` and `--tier` (or `--model`) over the repo's and user's
   skills. A `nameOnly` skill becomes `"name-only"`. An `off` skill becomes `"user-invocable-only"`, so `/name` still
   works, or `"off"` with `--hard`. Skills that are on get no key. Keys for skills we don't know are kept. This is the
   static half of the gate: the listing can't change during a session in this mode, so the profile set at install
-  time sticks until the next `install`.
+  time sticks until the next `install`. Without `--profile`, `--tier` or `--model` and with `classify.mode` other than
+  `auto`, install writes no `skillOverrides` (shadow hides nothing) and says why. Every part of `--profile` must be
+  declared in gate.json, else `error G502` with the known profiles, exit 1, and nothing is written. The keys install
+  wrote are recorded in `~/.cache/context-gate/installs/`; a re-install or uninstall changes only recorded keys whose
+  value is unchanged, so a key the user set by hand is never overwritten or removed.
 
-`--no-skill-overrides` writes the hooks only. `--print` writes nothing.
+`--no-skill-overrides` writes the hooks only. `--print` writes nothing. `install` and `plan` errors go to stderr with
+exit 1; hook mode stays exit 0 and silent.
 
 The `skillOverrides` values (`on`, `name-only`, `user-invocable-only`, `off`) were checked against the settings
 schema in Claude Code 2.1.291.

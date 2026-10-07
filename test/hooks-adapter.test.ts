@@ -69,7 +69,7 @@ const ctxText = (o: unknown): string => ((o as { hookSpecificOutput?: { addition
 const decision = (o: unknown): string | undefined => (o as { hookSpecificOutput?: { permissionDecision?: string } })?.hookSpecificOutput?.permissionDecision
 
 test('SessionStart injects Always rules and preload for the quick tier', () => {
-  const { outs, state, logs } = run([ev({ hook_event_name: 'SessionStart', source: 'startup', model: 'claude-haiku-4-5' })])
+  const { outs, state, logs } = run([ev({ hook_event_name: 'SessionStart', source: 'startup', model: 'claude-haiku-4-5' })], ctx({ env: { CONTEXT_GATE_MODE: 'auto' } }))
   const t = ctxText(outs[0])
   assert.match(t, /Contents of \.cursor\/rules\/project\.mdc \(Cursor rule project\):\nМонорепозиторій/)
   assert.match(t, /Preloaded skill tdd/)

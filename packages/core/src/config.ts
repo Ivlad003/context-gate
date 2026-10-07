@@ -5,11 +5,14 @@
 import type { BudgetPct, Diagnostic, GateConfig, ItemSourceConfig, ModelSpec, ProfileConfig, Tier, TierConfig, TierThresholds } from './types.ts'
 import { diag } from './codes.ts'
 import { parseDuration } from './duration.ts'
-import { compileGlob } from './glob.ts'
+import { compileGlob, globError, splitNegation } from './glob.ts'
+import { RESERVED_GATE_WORDS, promptFlagAction } from './gatecmd.ts'
 
 // ───────────────────────── Defaults ─────────────────────────
 
 export const DEFAULT_TIER: Tier = 'standard'
+/** gate.json format version this build understands (`version` in gate.json; a newer one → G317). */
+export const CONFIG_VERSION = 1
 export const DEFAULT_BUDGET: Required<BudgetPct> = { softContextPct: 70, hardContextPct: 85 }
 
 export function defaultConfig(): GateConfig {
@@ -90,12 +93,24 @@ export function binaryOf(cmd: string): string {
   return cmd.split(/[\\/]/).pop() ?? ''
 }
 
-/** May repo config start `argv`? Its binary (basename of `argv[0]`) must be on the effective whitelist (Р2). Trust
+/** System binary dirs a repo cannot write to: an absolute `argv[0]` there is judged by its basename. On Windows only
+ * `System32` itself (not `C:\\Windows\\Temp`, which users can write) and `Program Files` (admin-only) qualify. */
+const SYSTEM_BIN = /^(?:\/(?:usr\/(?:local\/)?)?s?bin\/|\/opt\/homebrew\/bin\/|[A-Za-z]:[\\/]Windows[\\/]System32[\\/]|[A-Za-z]:[\\/]Program Files(?: \(x86\))?[\\/](?:[^\\/]+[\\/])*)[^\\/]+$/i
+
+/** May repo config start `argv`? Its binary (basename of `argv[0]`) must be on the effective whitelist (Р2). A
+ * command with a path is allowed only when that exact path is whitelisted or it lies in a system bin dir
+ * (`/usr/bin/git`): `./tools/git` or `/tmp/x/node` is a repo-chosen executable that merely shares a name. Trust
  * is a separate check; see `commandGateDecision` for both. */
 export function commandAllowed(argv: readonly string[], whitelist: readonly string[] | ReadonlySet<string>): boolean {
-  const bin = binaryOf(argv[0] ?? '')
+  const cmd = argv[0] ?? ''
+  const has = (x: string) => (Array.isArray(whitelist) ? whitelist.includes(x) : (whitelist as ReadonlySet<string>).has(x))
+  const bin = binaryOf(cmd)
   if (!bin) return false
-  return Array.isArray(whitelist) ? whitelist.includes(bin) : (whitelist as ReadonlySet<string>).has(bin)
+  if (/[\\/]/.test(cmd)) {
+    if (has(cmd)) return true
+    if (!SYSTEM_BIN.test(cmd) || cmd.split(/[\\/]/).includes('..')) return false
+  }
+  return has(bin)
 }
 
 /**
@@ -118,6 +133,7 @@ export const gateJsonSchema = {
   additionalProperties: false,
   properties: {
     $schema: str,
+    version: { type: 'integer', minimum: 1, description: 'gate.json format version (1). A newer version than the installed context-gate understands is reported (G317).' },
     groups: { ...groupMap, description: 'Unified groups: name → kind-prefixed globs (`skill:react-*`, `tool:mcp__figma__*`, `agent:ui-reviewer`, `rule:api-*`).' },
     skillGroups: { ...groupMap, description: 'Legacy (G310): group → skill name globs.' },
     mcpGroups: { ...groupMap, description: 'Legacy (G310): group → MCP server name globs.' },
@@ -192,7 +208,7 @@ export const gateJsonSchema = {
         type: 'object', additionalProperties: false, required: ['name', 'on'],
         properties: {
           name: str, on: { enum: ['write', 'commit', 'turn', 'prompt'] }, builtin: bool, tiers: { type: 'array', items: tierRef },
-          run: strArr, pass: str, message: str, provider: str, onlyNew: bool, baseline: str,
+          run: strArr, pass: str, message: str, provider: str, onlyNew: bool, baseline: str, failClosed: { type: 'boolean', description: 'A gate that cannot run blocks instead of passing (S6).' },
         },
       },
     },
@@ -202,7 +218,7 @@ export const gateJsonSchema = {
     },
     prompt: {
       type: 'object', additionalProperties: false,
-      properties: { dir: str, runCacheDefault: duration, build: { enum: ['auto', 'never'] }, commitCompiled: bool, persist: bool, packages: { ...strArr, description: 'Prompt library packages whose exported skills `build` builds.' }, transform: { enum: ['level1', 'level2'], description: 'TSX level 2: native TS expressions in runtime props (Р1).' }, skillBody: { enum: ['live', 'static', 'both'], description: 'SKILL.md body: live render line, pre-rendered static body, or both (Р6).' } },
+      properties: { dir: str, runCacheDefault: duration, build: { enum: ['auto', 'never'] }, commitCompiled: bool, persist: bool, packages: { ...strArr, description: 'Prompt library packages whose exported skills `build` builds.' }, transform: { enum: ['level1', 'level2'], description: 'TSX level 2: native TS expressions in runtime props (Р1).' }, skillBody: { enum: ['live', 'static', 'both'], description: 'SKILL.md body: live render line, pre-rendered static body, or both (Р6).' }, volatile: { enum: ['system', 'context'], description: '`scope: volatile` sections: end of the system prompt (default) or the prompt context, which keeps the system prompt cacheable (P1).' } },
     },
     health: { type: 'object', additionalProperties: { type: 'number' }, description: 'Code (H001…) → threshold.' },
     debug: bool,
@@ -348,16 +364,6 @@ function semanticChecks(raw: Record<string, unknown>, out: Diagnostic[]): void {
   if (isObj(esc) && Array.isArray(esc.order)) {
     for (const t of esc.order) if (typeof t === 'string' && !tierNames.has(t)) out.push(diag('G305', `$.escalation.order: tier "${t}" не оголошено в tiers`))
   }
-  const budgets = raw.budgets
-  if (isObj(budgets)) {
-    const check = (b: unknown, p: string) => {
-      if (isObj(b) && typeof b.softContextPct === 'number' && typeof b.hardContextPct === 'number' && b.softContextPct >= b.hardContextPct) {
-        out.push(diag('G312', `${p}: softContextPct ${b.softContextPct} ≥ hardContextPct ${b.hardContextPct}`))
-      }
-    }
-    check(budgets.default, '$.budgets.default')
-    if (isObj(budgets.tiers)) for (const [t, b] of Object.entries(budgets.tiers)) check(b, `$.budgets.tiers.${t}`)
-  }
   // Group references (new format only; legacy refs are checked in normalizeConfig).
   const groupNames = new Set([...Object.keys(isObj(raw.groups) ? raw.groups : {}), ...Object.keys(isObj(raw.skillGroups) ? raw.skillGroups : {}), ...Object.keys(isObj(raw.mcpGroups) ? raw.mcpGroups : {})])
   for (const [name, p] of Object.entries(profiles)) {
@@ -372,6 +378,131 @@ function semanticChecks(raw: Record<string, unknown>, out: Diagnostic[]): void {
       }
     }
   }
+  tierRefChecks(raw, tierNames, out)
+  globChecks(raw, out)
+  profileNameChecks(profiles, out)
+  out.push(...configPathDiagnostics(raw))
+  if (typeof raw.version === 'number' && raw.version > CONFIG_VERSION) {
+    out.push(diag('G317', `$.version: gate.json версії ${raw.version}, а ця версія context-gate розуміє ${CONFIG_VERSION}. Онови context-gate; нові ключі ігноруються`, { severity: 'warning' }))
+  }
+}
+
+/** Tier names used outside `models`/`escalation` (G305), the default `models` against custom `tiers`, and the
+ * effective (merged) budget thresholds (G312). */
+function tierRefChecks(raw: Record<string, unknown>, tierNames: ReadonlySet<string>, out: Diagnostic[]): void {
+  const unknownTier = (t: unknown, where: string) => {
+    if (typeof t === 'string' && !tierNames.has(t)) out.push(diag('G305', `${where}: tier "${t}" не оголошено в tiers`))
+  }
+  if (Array.isArray(raw.gates)) raw.gates.forEach((g, i) => { if (isObj(g) && Array.isArray(g.tiers)) for (const t of g.tiers) unknownTier(t, `$.gates[${i}].tiers`) })
+  if (isObj(raw.brief) && Array.isArray(raw.brief.tiers)) for (const t of raw.brief.tiers) unknownTier(t, '$.brief.tiers')
+  const budgets = isObj(raw.budgets) ? raw.budgets : undefined
+  const budgetTiers = budgets && isObj(budgets.tiers) ? budgets.tiers : {}
+  for (const t of Object.keys(budgetTiers)) unknownTier(t, '$.budgets.tiers')
+  // Custom `tiers` without `models`: the default model map and the fallback tier must exist (else every model
+  // lands in an undeclared tier and its groups are dead).
+  if (isObj(raw.tiers) && !isObj(raw.models)) {
+    const targets = new Set([...Object.values(defaultConfig().models).map((v) => (typeof v === 'string' ? v : v.tier ?? '')), DEFAULT_TIER])
+    const missing = [...targets].filter((t) => t && !tierNames.has(t))
+    if (missing.length) out.push(diag('G305', `$.tiers: власні tier без models — моделі за замовчуванням ведуть у неоголошені tier ${missing.join(', ')}. Додай models або ці tier`))
+  }
+  // G312 on the effective values: DEFAULT_BUDGET ← budgets.default ← budgets.tiers[t].
+  if (budgets) {
+    const merged = (b: unknown): Required<BudgetPct> => ({ ...DEFAULT_BUDGET, ...pctOf(budgets.default), ...pctOf(b) })
+    const check = (eff: Required<BudgetPct>, p: string) => {
+      if (eff.softContextPct >= eff.hardContextPct) out.push(diag('G312', `${p}: softContextPct ${eff.softContextPct} ≥ hardContextPct ${eff.hardContextPct} (з урахуванням значень за замовчуванням)`))
+    }
+    check(merged(undefined), '$.budgets.default')
+    for (const [t, b] of Object.entries(budgetTiers)) check(merged(b), `$.budgets.tiers.${t}`)
+  }
+}
+
+function pctOf(b: unknown): BudgetPct {
+  const out: BudgetPct = {}
+  if (isObj(b) && typeof b.softContextPct === 'number') out.softContextPct = b.softContextPct
+  if (isObj(b) && typeof b.hardContextPct === 'number') out.hardContextPct = b.hardContextPct
+  return out
+}
+
+/** Globs that cannot compile (`[z-a]`), the accidental negation form `kind:!x`, negated `preload` entries and
+ * `when.paths` with only negative globs (G315, warnings). */
+function globChecks(raw: Record<string, unknown>, out: Diagnostic[]): void {
+  const bad = (g: unknown, where: string) => {
+    if (typeof g !== 'string') return
+    const err = globError(g)
+    if (err) out.push(diag('G315', `${where}: невірний glob ${JSON.stringify(g)}: ${err}; він нічого не матчить`, { severity: 'warning' }))
+  }
+  for (const [name, pats] of Object.entries(isObj(raw.groups) ? raw.groups : {})) {
+    if (!Array.isArray(pats)) continue
+    for (const p of pats) {
+      if (typeof p !== 'string') continue
+      bad(p.replace(/^!*(?:(?:skill|tool|agent|rule|section|datum):)?!*/, ''), `$.groups.${name}`)
+      if (/^!*(?:skill|tool|agent|rule|section|datum):!/.test(p.trim())) {
+        out.push(diag('G315', `$.groups.${name}: ${JSON.stringify(p)} — заперечення пишеться на початку запису (${JSON.stringify('!' + p.trim().replace(':!', ':'))}); читається саме так`, { severity: 'warning' }))
+      }
+    }
+  }
+  for (const [name, t] of Object.entries(isObj(raw.tiers) ? raw.tiers : {})) {
+    if (!isObj(t) || !Array.isArray(t.preload)) continue
+    for (const p of t.preload) {
+      if (typeof p !== 'string') continue
+      if (splitNegation(p.trim()).negated || /^skill:!/.test(p.trim())) out.push(diag('G315', `$.tiers.${name}.preload: ${JSON.stringify(p)} — заперечення в preload не підтримується, запис ігнорується`, { severity: 'warning' }))
+      else bad(p.replace(/^skill:/, ''), `$.tiers.${name}.preload`)
+    }
+  }
+  for (const [name, p] of Object.entries(isObj(raw.profiles) ? raw.profiles : {})) {
+    if (!isObj(p) || !isObj(p.when) || !Array.isArray(p.when.paths)) continue
+    const paths = p.when.paths.filter((x): x is string => typeof x === 'string')
+    for (const g of paths) bad(g, `$.profiles.${name}.when.paths`)
+    if (paths.length && paths.every((g) => splitNegation(g.trim()).negated)) out.push(diag('G315', `$.profiles.${name}.when.paths: лише негативні globs — профіль ніколи не спрацює за шляхами`, { severity: 'warning' }))
+  }
+  for (const [key, v] of Object.entries(isObj(raw.models) ? raw.models : {})) bad(isObj(v) && typeof v.match === 'string' ? v.match : key, `$.models.${key}`)
+}
+
+/** Profile names `/gate <name>` cannot reach (subcommands, pipe stages) or that read as a union (`c++`) (G316). */
+function profileNameChecks(profiles: Record<string, unknown>, out: Diagnostic[]): void {
+  for (const name of Object.keys(profiles)) {
+    if (name.includes('+')) out.push(diag('G316', `$.profiles.${name}: «+» у назві профілю позначає об'єднання профілів; перейменуй профіль`, { severity: 'warning' }))
+    // `[gate:off]`, `[gate:auto]`, `[gate:new]` are commands too, so only `/gate profile <name>` is left for those.
+    if (RESERVED_GATE_WORDS.includes(name)) out.push(diag('G316', `$.profiles.${name}: «/gate ${name}» — це підкоманда; профіль вмикається лише як /gate profile ${name}${promptFlagAction(name) ? '' : ` або [gate:${name}]`}`, { severity: 'warning' }))
+    if (/\s/.test(name) || name.includes(',') || name.includes(']')) out.push(diag('G316', `$.profiles.${JSON.stringify(name)}: назва з пробілом, комою чи «]» недоступна для /gate і [gate:…]`, { severity: 'warning' }))
+  }
+}
+
+// ───────────────────────── Path containment (S2) ─────────────────────────
+
+/** Why a repo-config path may not be used, or undefined: it must be relative to the repo root, without `..`,
+ * absolute/drive/UNC forms or NUL. The adapters still resolve symlinks (realpath) before reading. */
+export function repoPathProblem(p: string): string | undefined {
+  if (!p.trim()) return 'порожній шлях'
+  if (p.includes('\0')) return 'шлях містить NUL'
+  const s = p.replace(/\\/g, '/')
+  if (s.startsWith('/') || /^[A-Za-z]:/.test(s) || s.startsWith('~/') || s === '~') return 'абсолютний шлях'
+  if (s.split('/').includes('..')) return 'шлях виходить за корінь репозиторію (..)'
+  return undefined
+}
+
+/**
+ * Config paths that read or write files relative to the repo root (`prompt.dir`, `itemSources[].dir`,
+ * `ruleSources[].dir`, `gates[].baseline`, `debugLog.path`, `providers.*.path`): each must stay inside the
+ * repo (G314, error: an untrusted repo could read files outside it into the prompt or overwrite the user's
+ * files). Part of `validateConfig`; exported for adapters that check a single value.
+ */
+export function configPathDiagnostics(raw: Record<string, unknown>): Diagnostic[] {
+  const out: Diagnostic[] = []
+  const check = (v: unknown, where: string) => {
+    if (typeof v !== 'string') return
+    const why = repoPathProblem(v)
+    if (why) out.push(diag('G314', `${where}: ${JSON.stringify(v)} — ${why}. Дозволено лише шляхи всередині репозиторію`, { severity: 'error' }))
+  }
+  if (isObj(raw.prompt)) check(raw.prompt.dir, '$.prompt.dir')
+  for (const key of ['itemSources', 'ruleSources'] as const) {
+    const list = raw[key]
+    if (Array.isArray(list)) list.forEach((src, i) => { if (isObj(src)) check(src.dir, `$.${key}[${i}].dir`) })
+  }
+  if (Array.isArray(raw.gates)) raw.gates.forEach((g, i) => { if (isObj(g)) check(g.baseline, `$.gates[${i}].baseline`) })
+  if (isObj(raw.debugLog)) check(raw.debugLog.path, '$.debugLog.path')
+  for (const [name, p] of Object.entries(isObj(raw.providers) ? raw.providers : {})) if (isObj(p)) check(p.path, `$.providers.${name}.path`)
+  return out
 }
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -520,9 +651,13 @@ export function migrateConfig(raw: unknown): { json?: Record<string, unknown>; d
 
 // ───────────────────────── Lookups ─────────────────────────
 
-/** Strip harness suffixes like `[1m]` and provider prefixes like `us.anthropic.`. */
+/** Strip harness suffixes like `[1m]`, ARN and gateway paths (`arn:aws:bedrock:…:inference-profile/…`,
+ * `anthropic/claude-…`, `openrouter/anthropic/…`: the last path segment) and Bedrock prefixes such as
+ * `us.`, `global.`, `apac.`, `us-gov.` before `anthropic.`. */
 export function normalizeModelId(model: string): string {
-  return model.trim().replace(/\[[^\]]*\]$/, '').replace(/^(?:[a-z]{2}\.)?anthropic\./, '')
+  let id = model.trim().replace(/\[[^\]]*\]$/, '')
+  if (id.includes('/')) id = id.slice(id.lastIndexOf('/') + 1)
+  return id.replace(/^(?:[a-z][a-z0-9-]*\.)?anthropic\./, '')
 }
 
 export interface ModelAttrs { contextWindow?: number; costPer1k?: number }
@@ -573,11 +708,17 @@ export function tierForModel(cfg: Pick<GateConfig, 'models' | 'tiers'>, modelId:
     if (t) return { tier: t, reason: `модель ${id} ${how}: ${attrText(a)} → поріг tier ${t}`, matched: key, fallback: false }
     return { tier: DEFAULT_TIER, reason: `модель ${id} ${how}: атрибути (${attrText(a) || '—'}) не відповідають порогам жодного tier → ${DEFAULT_TIER}`, matched: key, fallback: true }
   }
-  const exact = models[id]
-  if (exact !== undefined && (typeof exact === 'string' || !exact.match)) return resolve(id, '→', exact)
+  // The raw id (minus `[1m]`) is tried too, so a `models` key written for a gateway alias (`gw/fast`) still matches.
+  const raw = modelId.trim().replace(/\[[^\]]*\]$/, '')
+  const ids = raw === id ? [id] : [id, raw]
+  for (const x of ids) {
+    const exact = Object.prototype.hasOwnProperty.call(models, x) ? models[x] : undefined
+    if (exact !== undefined && (typeof exact === 'string' || !exact.match)) return resolve(x, '→', exact)
+  }
   for (const [key, v] of Object.entries(models)) {
     const glob = typeof v === 'string' ? key : (v.match ?? key)
-    if (compileGlob(glob, { nocase: true })(id)) return resolve(key, `~ ${glob}`, v)
+    const m = compileGlob(glob, { nocase: true })
+    if (ids.some((x) => m(x))) return resolve(key, `~ ${glob}`, v)
   }
   if (attrs) {
     const t = inferTier(cfg, attrs)
@@ -621,11 +762,35 @@ export function envMaskValues(env: Readonly<Record<string, string>>): string[] {
   return Object.values(env).filter((v) => v.length >= 4).sort((a, b) => b.length - a.length)
 }
 
-/** Replace every mask value in `text` with `***`. */
+/** Replace every mask value in `text` with `***`, also in its JSON-escaped form (a value with `"` or `\\`
+ * inside serialized JSON). For JSON prefer `maskSecretsDeep` before serializing: a text replace of a value
+ * such as `true` or `null` can hit the JSON structure itself. */
 export function maskSecrets(text: string, values: readonly string[]): string {
   let out = text
-  for (const v of values) if (v) out = out.split(v).join('***')
+  for (const v of values) {
+    if (!v) continue
+    out = out.split(v).join('***')
+    const esc = JSON.stringify(v).slice(1, -1)
+    if (esc !== v) out = out.split(esc).join('***')
+  }
   return out
+}
+
+/** Structural masking: every string (and object key) containing a mask value has it replaced with `***`;
+ * numbers, booleans and null are kept, so serializing the result is always valid JSON. */
+export function maskSecretsDeep<T>(value: T, values: readonly string[]): T {
+  const vs = values.filter(Boolean)
+  if (!vs.length) return value
+  const str = (s: string) => { let o = s; for (const v of vs) o = o.split(v).join('***'); return o }
+  const walk = (v: unknown, depth: number): unknown => {
+    if (typeof v === 'string') return str(v)
+    if (!v || typeof v !== 'object' || depth > 64) return v
+    if (Array.isArray(v)) return v.map((x) => walk(x, depth + 1))
+    const out: Record<string, unknown> = {}
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[str(k)] = walk(x, depth + 1)
+    return out
+  }
+  return walk(value, 0) as T
 }
 
 export function budgetFor(cfg: Pick<GateConfig, 'budgets'>, tier: Tier): Required<BudgetPct> {

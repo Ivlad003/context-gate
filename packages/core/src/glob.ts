@@ -30,9 +30,13 @@ export function expandBraces(pattern: string): string[] {
     if (range) {
       const a = Number(range[1]), b = Number(range[2])
       const step = a <= b ? 1 : -1
+      // `{001..050}` keeps the padding (bash, minimatch): pad to the wider end when either has a leading zero.
+      const padded = /^-?0\d/.test(range[1]) || /^-?0\d/.test(range[2])
+      const width = padded ? Math.max(range[1].replace('-', '').length, range[2].replace('-', '').length) : 0
+      const fmt = (i: number) => (width ? (i < 0 ? '-' : '') + String(Math.abs(i)).padStart(width, '0') : String(i))
       alts = []
       for (let i = a; step > 0 ? i <= b : i >= b; i += step) {
-        alts.push(String(i))
+        alts.push(fmt(i))
         if (alts.length > MAX_EXPANSIONS) break
       }
     } else {
@@ -137,9 +141,11 @@ function globToSource(pat: string, matchBase: boolean): string {
         const atEnd = j === n || pat[j] === '/'
         if (atStart && atEnd) {
           if (j === n) { src += '.*'; i = j; continue }
-          // `**/` → zero or more directories
+          // `**/` → zero or more directories; a run `**/**/…` is one `**/` (avoids exponential backtracking)
           src += '(?:.*/)?'
           i = j + 1
+          while (pat.startsWith('**/', i)) i += 3
+          if (pat.slice(i) === '**') { src += '.*'; i = n }
           continue
         }
         src += '[^/]*'
@@ -164,7 +170,8 @@ function globToSource(pat: string, matchBase: boolean): string {
         if (c === '^' || c === '\\' || c === '[' || c === ']') cls += '\\' + c
         else cls += c
       }
-      src += neg ? `[^/${cls}]` : `[${cls}]`
+      // A class never matches `/` (a range such as `[.-0]` would otherwise span it).
+      src += neg ? `[^/${cls}]` : `(?!/)[${cls}]`
       i = end + 1
       continue
     }
@@ -181,10 +188,30 @@ export function globToRegExp(pattern: string, opts: GlobOptions = {}): RegExp {
   const hit = cache.get(key)
   if (hit) return hit
   const alts = expandBraces(pattern).map((p) => globToSource(p, !!opts.matchBase))
-  const re = new RegExp(`^(?:${alts.join('|')})$`, opts.nocase ? 'i' : '')
+  let re: RegExp
+  try {
+    re = new RegExp(`^(?:${alts.join('|')})$`, opts.nocase ? 'i' : '')
+  } catch {
+    // An invalid glob (a reversed class range `[z-a]`) matches nothing instead of throwing on the hot path;
+    // `globError` reports it at load time (G015 in .mdc, G315 in gate.json).
+    re = NEVER
+  }
   if (cache.size > 5000) cache.clear()
   cache.set(key, re)
   return re
+}
+
+const NEVER = /(?!)/
+
+/** Why a glob cannot be compiled (a reversed class range such as `[z-a]`), or undefined when it is valid. */
+export function globError(pattern: string): string | undefined {
+  const { pattern: p } = splitNegation(pattern.trim())
+  try {
+    new RegExp(`^(?:${expandBraces(p).map((x) => globToSource(x, false)).join('|')})$`)
+    return undefined
+  } catch (e) {
+    return (e as Error).message
+  }
 }
 
 /** Split leading `!` (each one toggles negation). */
@@ -248,6 +275,15 @@ function collapse(p: string): string {
   }
   if (abs && out.length === 1 && out[0] === '') return '/'
   return out.join('/')
+}
+
+/** True for a repo-relative POSIX path: not absolute, no drive, not climbing out with `..`. Paths outside the
+ * root never match repo globs (Cursor rules, `when.paths`): `normalizePath` keeps them absolute, and a
+ * `**\/*.json` would otherwise match `/home/u/.claude/settings.json`. */
+export function isRepoRelative(path: string): boolean {
+  const s = path.replace(/\\/g, '/')
+  if (s.startsWith('/') || DRIVE.test(s) || s.startsWith('//')) return false
+  return !collapse(s).split('/').includes('..')
 }
 
 /** Normalise `path` to a POSIX path relative to `root`. Absolute paths outside root stay absolute (POSIX slashes). */

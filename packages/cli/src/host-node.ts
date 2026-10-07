@@ -2,16 +2,17 @@
 // Untrusted repo → no process and no MCP (the core renders `unverified` stubs); binaries outside the
 // user whitelist are refused; cache lives in `~/.cache/context-gate/<repo>/` (XDG_CACHE_HOME respected).
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import type { Diagnostic, ExecutorConfig, GateConfig, Value } from '../../core/src/types.ts'
 import type { ProviderCallRequest, RenderHostExt } from '../../core/src/render.ts'
 import { parseDuration } from '../../core/src/duration.ts'
 import { splitFrontmatter } from './build.ts'
-import { DEFAULT_EXECUTORS, executorFor, executorInvocation, executorsOf as coreExecutorsOf, parseShimOutput, shimCommand, type ShimCall, type ShimResponse } from '../../core/src/shims.ts'
+import { DEFAULT_EXECUTORS, executorEnv, executorFor, executorInvocation, executorsOf as coreExecutorsOf, parseShimOutput, shimCommand, type ShimCall, type ShimResponse } from '../../core/src/shims.ts'
 import { binaryWhitelist, readUserSettings, type UserSettings } from './settings.ts'
 import { commandAllowed } from '../../core/src/config.ts'
-import { posix, readJson, readText, runProcess, sha256, writeJson } from './util.ts'
+import { posix, readJson, readText, runProcess, safeJoin, sha256, writeJson } from './util.ts'
 
 export { DEFAULT_EXECUTORS }
 
@@ -33,6 +34,9 @@ export interface NodeHostOptions {
   /** Repo narrowing of the user whitelist (`allowBinaries` in gate.json). */
   narrowBinaries?: string[]
 }
+
+/** Largest `@run` input passed as the CONTEXT_GATE_INPUT env string (bytes); bigger inputs go to a file. */
+export const INPUT_ENV_MAX = 64 * 1024
 
 export interface LazyTool { name: string; description: string; ref: string }
 
@@ -78,10 +82,9 @@ export class NodeHost implements RenderHostExt {
     this.notes.push(d)
   }
 
-  /** Absolute path inside the repo, or undefined when it escapes the root. */
+  /** Absolute path inside the repo, or undefined when it escapes the root (`..`, absolute, or a symlink out of it). */
   abs(path: string): string | undefined {
-    const p = resolve(this.root, path)
-    return p === this.root || p.startsWith(this.root + sep) ? p : undefined
+    return safeJoin(this.root, path)
   }
 
   async readFile(path: string): Promise<string | undefined> {
@@ -109,14 +112,32 @@ export class NodeHost implements RenderHostExt {
     }
     const inv = executorInvocation(ex, req.code, req.stdin)
     const timeout = Math.min(parseDuration(ex.timeout) ?? 10_000, req.timeoutMs > 0 ? req.timeoutMs : Infinity)
+    // The input also goes to the env for executors that take the code on stdin (deno). One env string is capped
+    // (Linux MAX_ARG_STRLEN 128 KiB, Windows 32 K for the block): above INPUT_ENV_MAX it goes to a temp file
+    // named by CONTEXT_GATE_INPUT_FILE instead, so a big scope never fails the spawn with E2BIG.
+    let inputDir: string | undefined
+    const inputEnv: Record<string, string> = {}
+    if (Buffer.byteLength(req.stdin) <= INPUT_ENV_MAX) inputEnv.CONTEXT_GATE_INPUT = req.stdin
+    else {
+      try {
+        inputDir = mkdtempSync(join(tmpdir(), 'context-gate-input-'))
+        writeFileSync(join(inputDir, 'input.json'), req.stdin)
+        inputEnv.CONTEXT_GATE_INPUT_FILE = join(inputDir, 'input.json')
+      } catch { inputDir = undefined }
+    }
     this.processes++
-    const r = await runProcess(inv.argv, {
-      cwd: this.root,
-      stdin: inv.stdin,
-      timeoutMs: timeout,
-      env: { ...(ex.env ?? {}), CONTEXT_GATE_INPUT: req.stdin, CONTEXT_GATE_ROOT: this.root },
-    })
-    return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, ms: r.ms }
+    try {
+      const r = await runProcess(inv.argv, {
+        cwd: this.root,
+        stdin: inv.stdin,
+        timeoutMs: timeout,
+        // A repo executor cannot redirect a bare command through PATH or preload code (S5/L33).
+        env: { ...executorEnv(ex.env).env, ...inputEnv, CONTEXT_GATE_ROOT: this.root },
+      })
+      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, ms: r.ms }
+    } finally {
+      if (inputDir) rmSync(inputDir, { recursive: true, force: true })
+    }
   }
 
   // ───────────────────────── call (shims) ─────────────────────────
@@ -138,8 +159,9 @@ export class NodeHost implements RenderHostExt {
     return parseShimOutput(cmd, r, calls)
   }
 
-  async call(req: { path: string; calls: { fn: string; args: Value[]; kwargs?: Record<string, Value> }[] }): Promise<Value[]> {
-    const r = await this.shim(req.path, req.calls)
+  async call(req: { path: string; calls: { fn: string; args: Value[]; kwargs?: Record<string, Value> }[]; timeoutMs?: number }): Promise<Value[]> {
+    // The render passes what is left of its budget: the shim never outlives the render deadline (M62).
+    const r = await this.shim(req.path, req.calls, req.timeoutMs !== undefined && req.timeoutMs > 0 ? Math.min(req.timeoutMs, 10_000) : 10_000)
     const err = r.errors.find((e) => e)
     if (err) throw new Error(err)
     return r.results
@@ -147,7 +169,8 @@ export class NodeHost implements RenderHostExt {
 
   /** Exported function names of a module (G158 validation); undefined when the shim can't tell. */
   async listExports(path: string): Promise<string[] | undefined> {
-    const key = `exports:${path}`
+    // Keyed by the module's hash: an added or removed export is seen on the next run (no stale G158).
+    const key = `exports:${path}#${this.fileHash(path)}`
     const hit = await this.cacheGet(key)
     if (hit && Array.isArray(hit.value)) return hit.value as string[]
     const r = await this.shim(path, [{ fn: '__exports__', args: [] }])

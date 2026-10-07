@@ -93,7 +93,7 @@ for c in req['calls']:
             results.append(sorted(n for n, v in vars(mod).items() if callable(v) and not n.startswith('_') and getattr(v, '__module__', None) == mod.__name__)); errors.append(None); continue
         f = getattr(mod, c['fn'], None)
         if not callable(f): raise Exception('функції ' + c['fn'] + ' немає в модулі')
-        results.append(json.loads(json.dumps(f(*c.get('args', []), **(c.get('kwargs') or {})), default=conv))); errors.append(None)
+        results.append(json.loads(json.dumps(f(*c.get('args', []), **(c.get('kwargs') or {})), default=conv, allow_nan=False))); errors.append(None)
     except Exception as e:
         results.append(None); errors.append(str(e))
 print(json.dumps({'results': results, 'errors': errors}, default=conv))
@@ -105,9 +105,16 @@ print(json.dumps({'results': results, 'errors': errors}, default=conv))
  */
 export const BASH_SHIM = `
 file="$1"; shift
+__cg_argv=("$@"); set --
 __cg_before="$(compgen -A function | sort)"
 # shellcheck disable=SC1090
 source "$file" >/dev/null || { printf 'E\\x1fsource failed\\0'; exit 0; }
+# The module's \`set -euo pipefail\` must not end the batch: the loop runs without it, and each call gets the
+# module's options back inside its own subshell, so a failing call reports its exit code and the next one still runs.
+# (\`set +o\` runs in a command substitution, which drops errexit, so errexit is read from \$- here.)
+__cg_opts="$(set +o)"; case $- in *e*) __cg_opts="$__cg_opts; set -e" ;; esac
+set +e +u +o pipefail
+set -- \${__cg_argv[@]+"\${__cg_argv[@]}"}
 while [ "$#" -gt 0 ]; do
   fn="$1"; n="$2"; shift 2
   args=("\${@:1:$n}"); shift "$n"
@@ -116,7 +123,7 @@ while [ "$#" -gt 0 ]; do
     continue
   fi
   if ! declare -F "$fn" >/dev/null; then printf 'E\\x1fфункції %s немає в модулі\\0' "$fn"; continue; fi
-  out="$("$fn" "\${args[@]}")"; code=$?
+  out="$(eval "$__cg_opts"; "$fn" \${args[@]+"\${args[@]}"})"; code=$?
   if [ "$code" -eq 0 ]; then printf 'O\\x1f%s\\0' "$out"; else printf 'E\\x1fexit %s\\0' "$code"; fi
 done
 `
@@ -134,7 +141,14 @@ export function bashArgv(req: ShimRequest): string[] {
 function parseLoose(s: string): Value {
   const t = s.replace(/\n+$/, '')
   const x = t.trim()
-  if (x && /^[{["\-\d]|^(true|false|null)$/.test(x)) { try { return JSON.parse(x) as Value } catch { /* text */ } }
+  if (x && /^[{["]|^(true|false|null)$/.test(x)) { try { return JSON.parse(x) as Value } catch { /* text */ } }
+  // A number only when it prints back exactly (render.ts parseStdout, M60): `1.10`, `1e3` and long ids stay text.
+  if (/^-?\d/.test(x)) {
+    try {
+      const v: unknown = JSON.parse(x)
+      if (typeof v === 'number' && Number.isFinite(v) && String(v) === x) return v
+    } catch { /* text */ }
+  }
   return t
 }
 
@@ -273,4 +287,18 @@ export function missingExports(path: string, called: Iterable<string>, exports: 
   const out: { code: 'G158'; severity: 'error'; message: string; path: string }[] = []
   for (const fn of called) if (!exports.includes(fn)) out.push({ code: 'G158', severity: 'error', message: `Функції ${fn} немає в модулі ${path} (експорти: ${exports.join(', ') || '—'})`, path })
   return out
+}
+
+/** S5/L33: variables that change which code an allowed binary runs; a repo's `executors[].env` may not set them. */
+export const UNSAFE_EXECUTOR_ENV = /^(PATH|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|BASH_ENV|ENV|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|LD_.*|DYLD_.*)$/i
+
+/** `executors[].env` without the unsafe keys; `dropped` names them for a debug line. */
+export function executorEnv(env: Record<string, string> | undefined): { env: Record<string, string>; dropped: string[] } {
+  const out: Record<string, string> = {}
+  const dropped: string[] = []
+  for (const [k, v] of Object.entries(env ?? {})) {
+    if (UNSAFE_EXECUTOR_ENV.test(k)) dropped.push(k)
+    else out[k] = v
+  }
+  return { env: out, dropped }
 }

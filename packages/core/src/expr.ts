@@ -46,6 +46,25 @@ const OPS1 = '!~+-*/%()[],.?:|=<>'
 const isIdStart = (c: string): boolean => /[A-Za-z_$]/.test(c)
 const isIdChar = (c: string): boolean => /[A-Za-z0-9_$]/.test(c)
 
+const SIMPLE_ESCAPES: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' }
+
+/**
+ * Decode one escape whose backslash is at `j`: the JSON/JS escapes the TSX compiler emits (`\uXXXX`, `\u{…}`,
+ * `\xHH`, `\b`, `\f`, `\v`, `\0`, …); any other character stands for itself (`\"`, `\\`, `\/`).
+ */
+function unescape(src: string, j: number): { out: string; next: number } {
+  const e = src[j + 1]
+  if (e === '0' && /[0-9]/.test(src[j + 2] ?? '')) return { out: e, next: j + 2 }
+  if (hasOwn(SIMPLE_ESCAPES, e)) return { out: SIMPLE_ESCAPES[e], next: j + 2 }
+  if (e === 'x' && /^[0-9a-fA-F]{2}$/.test(src.slice(j + 2, j + 4))) return { out: String.fromCharCode(parseInt(src.slice(j + 2, j + 4), 16)), next: j + 4 }
+  if (e === 'u') {
+    if (/^[0-9a-fA-F]{4}$/.test(src.slice(j + 2, j + 6))) return { out: String.fromCharCode(parseInt(src.slice(j + 2, j + 6), 16)), next: j + 6 }
+    const m = /^\{([0-9a-fA-F]{1,6})\}/.exec(src.slice(j + 2, j + 11))
+    if (m && parseInt(m[1], 16) <= 0x10ffff) return { out: String.fromCodePoint(parseInt(m[1], 16)), next: j + 2 + m[0].length }
+  }
+  return { out: e, next: j + 2 }
+}
+
 function tokenize(src: string, diags: Diagnostic[]): Tok[] {
   const toks: Tok[] = []
   let i = 0
@@ -54,10 +73,13 @@ function tokenize(src: string, diags: Diagnostic[]): Tok[] {
     const c = src[i]
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; afterDot = false; continue }
     const start = i
-    // Member segment right after `.`/`?.` without spaces: dashes allowed (`data.api-endpoints`).
+    // Member segment right after `.`/`?.` without spaces. Dashes are allowed only in a store key directly under the
+    // root `data` (`data.api-endpoints`), so `items.length-1` stays arithmetic; other dashed keys use `x["a-b"]`.
     if (afterDot && (isIdChar(c))) {
+      const n = toks.length
+      const dashed = n >= 2 && toks[n - 2].t === 'id' && toks[n - 2].v === 'data' && !(n >= 3 && toks[n - 3].t === 'op' && (toks[n - 3].v === '.' || toks[n - 3].v === '?.'))
       let j = i
-      while (j < src.length && (isIdChar(src[j]) || (src[j] === '-' && j + 1 < src.length && isIdChar(src[j + 1]) && j > i))) j++
+      while (j < src.length && (isIdChar(src[j]) || (dashed && src[j] === '-' && j + 1 < src.length && isIdChar(src[j + 1]) && j > i))) j++
       toks.push({ t: 'id', v: src.slice(i, j), pos: start })
       i = j
       afterDot = false
@@ -87,9 +109,9 @@ function tokenize(src: string, diags: Diagnostic[]): Tok[] {
       while (j < src.length) {
         const d = src[j]
         if (d === '\\' && j + 1 < src.length) {
-          const e = src[j + 1]
-          out += e === 'n' ? '\n' : e === 't' ? '\t' : e === 'r' ? '\r' : e
-          j += 2
+          const u = unescape(src, j)
+          out += u.out
+          j = u.next
           continue
         }
         if (d === c) { closed = true; j++; break }
@@ -126,6 +148,9 @@ function tokenize(src: string, diags: Diagnostic[]): Tok[] {
 // ───────────────────────── Pratt parser ─────────────────────────
 
 class ParseFail extends Error {}
+
+const MAX_EXPR_DEPTH = 200
+const MAX_EXPR_HEIGHT = 1000
 
 const BIN_BP: Record<string, number> = {
   '??': 3, '||': 4, '&&': 5, '==': 6, '!=': 6, '~': 6, '<': 7, '<=': 7, '>': 7, '>=': 7, in: 7, '+': 8, '-': 8, '*': 9, '/': 9, '%': 9,
@@ -164,10 +189,26 @@ class Parser {
     return 0
   }
 
+  depth = 0
+  /** Tree height on the current path: nesting plus left-associative steps (`1+1+…`, `a.b.b…`, `x | f | f…`). */
+  height = 0
+
   expr(rbp: number): ExprAst {
-    let left = this.nud()
-    while (rbp < this.lbp(this.peek())) left = this.led(left)
-    return left
+    // Bounded nesting: `((((…` must give a diagnostic, not a stack overflow out of parseExpr.
+    if (++this.depth > MAX_EXPR_DEPTH) this.fail(`Вираз вкладений глибше за ${MAX_EXPR_DEPTH} рівнів`)
+    const h = this.height
+    try {
+      let left = this.nud()
+      // The led loop builds a left spine iteratively; freeVars/evalExpr walk it recursively, so bound its height too.
+      while (rbp < this.lbp(this.peek())) {
+        if (++this.height > MAX_EXPR_HEIGHT) this.fail(`Вираз довший за ${MAX_EXPR_HEIGHT} операцій в одному ланцюжку`)
+        left = this.led(left)
+      }
+      return left
+    } finally {
+      this.depth--
+      this.height = h
+    }
   }
 
   nud(): ExprAst {
@@ -397,6 +438,17 @@ export class StepLimitError extends Error {
   constructor(limit: number) { super(`G155: перевищено ліміт кроків ${limit}`) }
 }
 
+/**
+ * A value or string past the size limits (`MAX_VALUE_CELLS`, `MAX_STRING_LENGTH`, `MAX_VALUE_DEPTH`). A StepLimitError,
+ * so every host that already turns the step limit into G155 stops the section instead of hanging or hitting a RangeError.
+ */
+export class ValueLimitError extends StepLimitError {
+  constructor(what: string) {
+    super(0)
+    this.message = `G155: ${what}`
+  }
+}
+
 export interface EvalEnv {
   /** Resolver for `ns.fn(...)` calls. Absent → G157. Returns null while a value is not ready. */
   call?: (path: string, args: Value[], kwargs: Record<string, Value>) => Value
@@ -412,6 +464,98 @@ function step(b: Budget, n = 1): void {
 
 const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k)
 export const isObj = (v: Value | undefined): v is { [k: string]: Value } => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+// ───────────────────────── Value size ─────────────────────────
+// The budget charges one step per AST node, but a value can be far bigger than the steps that built it: `[x, x]`
+// shares `x`, so 40 doublings make a DAG with 2^40 leaves in ~120 steps. Every value the evaluator builds is
+// therefore measured in cells (its size as a tree, shared parts counted per use) and capped, and code that walks a
+// value (==, in, where, sort/unique keys, text output) is charged by its cells. Measures of composites (evaluator-built
+// and host values alike) are memoized, so measuring a DAG costs its distinct nodes, not its tree size.
+
+/** Cells of the largest value an expression may build (1 per scalar, list, object and key; strings per 64 chars). */
+export const MAX_VALUE_CELLS = 1 << 20
+/** Longest string an expression may build; V8's own limit (~2^29) throws a RangeError far above it. */
+export const MAX_STRING_LENGTH = 1 << 26
+/** Deepest value an expression may build or walk: deeper values would overflow the walkers' recursion. */
+export const MAX_VALUE_DEPTH = 256
+const CHARS_PER_CELL = 64
+/** Cells walked per budget step. */
+const CELLS_PER_STEP = 64
+
+const sizeMemo = new WeakMap<object, { cells: number; height: number }>()
+
+function strCells(s: string): number { return 1 + Math.floor(s.length / CHARS_PER_CELL) }
+
+/** Tree size and height of a value; Infinity past MAX_VALUE_DEPTH. Memoized (a host value is walked once). */
+function measure(v: Value, depth = 0): { cells: number; height: number } {
+  if (v === null || typeof v !== 'object') return { cells: typeof v === 'string' ? strCells(v) : 1, height: 0 }
+  const hit = sizeMemo.get(v)
+  if (hit) return hit
+  if (depth >= MAX_VALUE_DEPTH) return { cells: Infinity, height: Infinity }
+  let cells = 1, height = 0
+  if (Array.isArray(v)) {
+    for (const x of v) { const m = measure(x, depth + 1); cells += m.cells; height = Math.max(height, m.height + 1) }
+  } else {
+    for (const k of Object.keys(v)) { const m = measure(v[k] ?? null, depth + 1); cells += strCells(k) + m.cells; height = Math.max(height, m.height + 1) }
+  }
+  const r = { cells, height }
+  // Host values (store, @run data) are never mutated either (@set rebinds), so their measure is memoized too and each
+  // is walked once per process, not once per pipe stage. Over-cap measures are not memoized: own() must still refuse them.
+  if (height < MAX_VALUE_DEPTH && cells <= MAX_VALUE_CELLS) sizeMemo.set(v, r)
+  return r
+}
+
+/** Cells of a value (see MAX_VALUE_CELLS); Infinity when it is deeper than MAX_VALUE_DEPTH. */
+export function valueCells(v: Value): number { return measure(v).cells }
+
+/**
+ * Charge the budget for walking `v` (serializing, hashing, comparing it): one step per CELLS_PER_STEP cells.
+ * Hosts call it before `toText`/`JSON.stringify` of a value an expression produced. Too deep → ValueLimitError.
+ */
+export function chargeValue(budget: Budget, v: Value): void {
+  if (v === null || typeof v !== 'object') return
+  const { cells, height } = measure(v)
+  if (height > MAX_VALUE_DEPTH) throw new ValueLimitError(`значення глибше за ${MAX_VALUE_DEPTH} рівнів`)
+  step(budget, Math.floor(cells / CELLS_PER_STEP))
+}
+
+/**
+ * Register a composite the evaluator just built: measure it from its items (memoized ones cost nothing, host ones
+ * are charged), enforce the size and depth caps, memoize. Scalars and strings pass through.
+ */
+function own(v: Value, budget: Budget): Value {
+  if (v === null || typeof v !== 'object' || sizeMemo.has(v)) {
+    if (typeof v === 'string' && v.length > MAX_STRING_LENGTH) throw new ValueLimitError(`рядок довший за ${MAX_STRING_LENGTH} символів`)
+    return v
+  }
+  let cells = 1, height = 0, walked = 0
+  const add = (x: Value, keyCells: number): void => {
+    const fresh = x !== null && typeof x === 'object' && !sizeMemo.has(x)
+    const m = measure(x)
+    if (fresh) walked += m.cells
+    cells += keyCells + m.cells
+    height = Math.max(height, m.height + 1)
+  }
+  if (Array.isArray(v)) for (const x of v) add(x, 0)
+  else for (const k of Object.keys(v)) add(v[k] ?? null, strCells(k))
+  step(budget, Math.floor(walked / CELLS_PER_STEP))
+  if (height > MAX_VALUE_DEPTH) throw new ValueLimitError(`значення глибше за ${MAX_VALUE_DEPTH} рівнів`)
+  if (cells > MAX_VALUE_CELLS) throw new ValueLimitError(`значення більше за ${MAX_VALUE_CELLS} комірок`)
+  sizeMemo.set(v, { cells, height })
+  return v
+}
+
+/** Throw before building a string longer than MAX_STRING_LENGTH (instead of V8's RangeError); charge its copy. */
+function checkLength(len: number, budget: Budget): void {
+  if (len > MAX_STRING_LENGTH) throw new ValueLimitError(`рядок довший за ${MAX_STRING_LENGTH} символів`)
+  step(budget, Math.floor(len / (CHARS_PER_CELL * CELLS_PER_STEP)))
+}
+
+/** `toText` with the walk charged to the budget. */
+function text(v: Value | undefined, budget: Budget): string {
+  if (v !== null && v !== undefined && typeof v === 'object') chargeValue(budget, v)
+  return toText(v)
+}
 
 export function truthy(v: Value): boolean {
   if (v === null || v === false || v === 0 || v === '') return false
@@ -430,13 +574,21 @@ export function toText(v: Value | undefined): string {
   return JSON.stringify(v)
 }
 
-export function deepEqual(a: Value, b: Value): boolean {
+/** Structural equality. With a budget, comparing two composites is charged by their cells (see chargeValue). */
+export function deepEqual(a: Value, b: Value, budget?: Budget): boolean {
   if (a === b) return true
   if (a === null || b === null || typeof a !== typeof b) return false
-  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => deepEqual(x, b[i]))
+  if (budget && typeof a === 'object') { chargeValue(budget, a); chargeValue(budget, b) }
+  return eq(a, b)
+}
+
+function eq(a: Value, b: Value): boolean {
+  if (a === b) return true
+  if (a === null || b === null || typeof a !== typeof b) return false
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => eq(x, b[i]))
   if (isObj(a) && isObj(b)) {
     const ka = Object.keys(a), kb = Object.keys(b)
-    return ka.length === kb.length && ka.every(k => hasOwn(b, k) && deepEqual(a[k], b[k]))
+    return ka.length === kb.length && ka.every(k => hasOwn(b, k) && eq(a[k], b[k]))
   }
   return false
 }
@@ -470,29 +622,325 @@ export function lookup(scope: Scope_, name: string): Value {
   return null
 }
 
-function compare(a: Value, b: Value): number {
-  if (a === null && b === null) return 0
-  if (a === null) return 1
-  if (b === null) return -1
+/** Order of two non-null values: numbers numerically, anything else by text form. */
+function compareKeys(a: Value, b: Value, budget: Budget): number {
   if (typeof a === 'number' && typeof b === 'number') return a - b
-  const sa = typeof a === 'string' ? a : toText(a)
-  const sb = typeof b === 'string' ? b : toText(b)
+  const sa = typeof a === 'string' ? a : text(a, budget)
+  const sb = typeof b === 'string' ? b : text(b, budget)
   return sa < sb ? -1 : sa > sb ? 1 : 0
 }
 
-const regexCache = new Map<string, RegExp | null>()
-function regex(pattern: string, env: EvalEnv): RegExp | null {
-  if (regexCache.has(pattern)) return regexCache.get(pattern) ?? null
-  let re: RegExp | null = null
-  if (pattern.length > 500) {
-    env.diagnostics?.push({ code: 'G107', severity: 'warning', message: 'Регулярний вираз довший за 500 символів' })
-  } else {
-    try { re = new RegExp(pattern) } catch {
-      env.diagnostics?.push({ code: 'G107', severity: 'warning', message: `Невірний регулярний вираз «${pattern}»` })
+// ───────────────────────── Linear-time regex ─────────────────────────
+// `~` and `grep` take patterns and subjects from prompts and data, so V8's backtracking RegExp could hang the render
+// on `(a+)+$` with no way to preempt it. A pattern is validated by RegExp (same syntax errors), then compiled for a
+// Pike VM: one pass over the subject, O(subject × program), charged to the step budget. Supported: the JS syntax
+// without flags except backreferences and lookaround (G107).
+
+/** Flat [lo, hi, lo, hi, …] UTF-16 code unit ranges. */
+type Ranges = number[]
+type RNode =
+  | { t: 'set'; r: Ranges; neg: boolean }
+  | { t: 'assert'; a: 'bol' | 'eol' | 'wb' | 'nwb' }
+  | { t: 'cat'; xs: RNode[] }
+  | { t: 'alt'; xs: RNode[] }
+  | { t: 'rep'; x: RNode; min: number; max: number }
+type Inst =
+  | { op: 'set'; r: Ranges; neg: boolean }
+  | { op: 'assert'; a: 'bol' | 'eol' | 'wb' | 'nwb' }
+  | { op: 'split'; x: number; y: number }
+  | { op: 'jmp'; x: number }
+  | { op: 'match' }
+
+const RE_DIGIT: Ranges = [48, 57]
+const RE_WORD: Ranges = [48, 57, 65, 90, 95, 95, 97, 122]
+const RE_SPACE: Ranges = [9, 13, 32, 32, 160, 160, 0x1680, 0x1680, 0x2000, 0x200a, 0x2028, 0x2029, 0x202f, 0x202f, 0x205f, 0x205f, 0x3000, 0x3000, 0xfeff, 0xfeff]
+const RE_LINE_END: Ranges = [10, 10, 13, 13, 0x2028, 0x2029]
+const RE_MAX_PATTERN = 500
+/** Instructions after expanding counted repeats (`(a{100}){100}`). */
+const RE_MAX_PROGRAM = 5000
+/** Subject chars × program instructions per budget step. */
+const RE_COST_PER_STEP = 1 << 10
+
+class ReUnsupported extends Error {}
+
+function complement(r: Ranges): Ranges {
+  const out: Ranges = []
+  let lo = 0
+  for (let i = 0; i < r.length; i += 2) { if (r[i] > lo) out.push(lo, r[i] - 1); lo = r[i + 1] + 1 }
+  if (lo <= 0xffff) out.push(lo, 0xffff)
+  return out
+}
+
+function reParse(p: string): RNode {
+  let i = 0
+  const hex = (n: number): number | undefined => {
+    const h = p.slice(i, i + n)
+    if (h.length !== n || !/^[0-9a-fA-F]+$/.test(h)) return undefined
+    i += n
+    return parseInt(h, 16)
+  }
+  /** Escape after `\`: a code unit, a set (\d \w \s and negations) or, outside classes, \b / \B. */
+  const escape = (inClass: boolean): number | { r: Ranges; neg: boolean } | 'wb' | 'nwb' => {
+    const c = p[i++]
+    switch (c) {
+      case 'd': return { r: RE_DIGIT, neg: false }
+      case 'D': return { r: RE_DIGIT, neg: true }
+      case 'w': return { r: RE_WORD, neg: false }
+      case 'W': return { r: RE_WORD, neg: true }
+      case 's': return { r: RE_SPACE, neg: false }
+      case 'S': return { r: RE_SPACE, neg: true }
+      case 'b': return inClass ? 8 : 'wb'
+      case 'B': return inClass ? 66 : 'nwb'
+      case 'n': return 10
+      case 'r': return 13
+      case 't': return 9
+      case 'v': return 11
+      case 'f': return 12
+      case 'x': return hex(2) ?? 120
+      case 'u': return hex(4) ?? 117
+      case 'c': {
+        const l = p[i]
+        if (l && /[A-Za-z]/.test(l)) { i++; return l.charCodeAt(0) % 32 }
+        i--
+        return 92
+      }
+      case 'k': throw new ReUnsupported('\\k')
+    }
+    if (/[0-9]/.test(c)) {
+      if (c === '0' && !/[0-9]/.test(p[i] ?? '')) return 0
+      throw new ReUnsupported('backreference')
+    }
+    return c.charCodeAt(0)
+  }
+  const classSet = (): RNode => {
+    let neg = false
+    if (p[i] === '^') { neg = true; i++ }
+    const r: Ranges = []
+    const push = (x: number | { r: Ranges; neg: boolean }): void => {
+      if (typeof x === 'number') r.push(x, x)
+      else r.push(...(x.neg ? complement(x.r) : x.r))
+    }
+    const atom = (): number | { r: Ranges; neg: boolean } => {
+      const c = p[i++]
+      if (c !== '\\') return c.charCodeAt(0)
+      const e = escape(true)
+      return e === 'wb' || e === 'nwb' ? 0 : e
+    }
+    while (i < p.length && p[i] !== ']') {
+      const a = atom()
+      if (p[i] === '-' && i + 1 < p.length && p[i + 1] !== ']') {
+        i++
+        const b = atom()
+        if (typeof a === 'number' && typeof b === 'number') { r.push(a, b); continue }
+        push(a); r.push(45, 45); push(b)
+        continue
+      }
+      push(a)
+    }
+    i++
+    // Sort and merge so the set can be complemented and scanned in order.
+    const pairs: [number, number][] = []
+    for (let k = 0; k < r.length; k += 2) pairs.push([r[k], r[k + 1]])
+    pairs.sort((x, y) => x[0] - y[0])
+    const merged: Ranges = []
+    for (const [lo, hi] of pairs) {
+      const n = merged.length
+      if (n && lo <= merged[n - 1] + 1) merged[n - 1] = Math.max(merged[n - 1], hi)
+      else merged.push(lo, hi)
+    }
+    return { t: 'set', r: merged, neg }
+  }
+  const quant = (): [number, number] | undefined => {
+    const c = p[i]
+    let q: [number, number]
+    if (c === '*') q = [0, Infinity]
+    else if (c === '+') q = [1, Infinity]
+    else if (c === '?') q = [0, 1]
+    else if (c === '{') {
+      const m = /^\{(\d+)(,(\d*))?\}/.exec(p.slice(i))
+      if (!m) return undefined
+      const min = Number(m[1])
+      q = [min, m[2] === undefined ? min : m[3] === '' ? Infinity : Number(m[3])]
+      i += m[0].length - 1
+    } else return undefined
+    i++
+    if (p[i] === '?') i++
+    return q
+  }
+  const atom = (): RNode => {
+    const c = p[i++]
+    if (c === '.') return { t: 'set', r: RE_LINE_END, neg: true }
+    if (c === '^') return { t: 'assert', a: 'bol' }
+    if (c === '$') return { t: 'assert', a: 'eol' }
+    if (c === '[') return classSet()
+    if (c === '(') {
+      if (p[i] === '?') {
+        if (p[i + 1] === ':') i += 2
+        else if (p[i + 1] === '<' && p[i + 2] !== '=' && p[i + 2] !== '!') i = p.indexOf('>', i) + 1
+        else throw new ReUnsupported('lookaround')
+      }
+      const x = alt()
+      i++
+      return x
+    }
+    if (c === '\\') {
+      const e = escape(false)
+      if (e === 'wb' || e === 'nwb') return { t: 'assert', a: e }
+      return typeof e === 'number' ? { t: 'set', r: [e, e], neg: false } : { t: 'set', ...e }
+    }
+    const code = c.charCodeAt(0)
+    return { t: 'set', r: [code, code], neg: false }
+  }
+  const cat = (): RNode => {
+    const xs: RNode[] = []
+    while (i < p.length && p[i] !== '|' && p[i] !== ')') {
+      const a = atom()
+      const q = quant()
+      xs.push(q ? { t: 'rep', x: a, min: q[0], max: q[1] } : a)
+    }
+    return { t: 'cat', xs }
+  }
+  function alt(): RNode {
+    const xs = [cat()]
+    while (p[i] === '|') { i++; xs.push(cat()) }
+    return xs.length === 1 ? xs[0] : { t: 'alt', xs }
+  }
+  return alt()
+}
+
+function reCompile(root: RNode): Inst[] {
+  const prog: Inst[] = []
+  const emit = (inst: Inst): number => {
+    if (prog.length >= RE_MAX_PROGRAM) throw new ReUnsupported('too big')
+    return prog.push(inst) - 1
+  }
+  const comp = (n: RNode): void => {
+    switch (n.t) {
+      case 'set': emit({ op: 'set', r: n.r, neg: n.neg }); return
+      case 'assert': emit({ op: 'assert', a: n.a }); return
+      case 'cat': for (const x of n.xs) comp(x); return
+      case 'alt': {
+        const ends: number[] = []
+        n.xs.forEach((x, k) => {
+          if (k === n.xs.length - 1) { comp(x); return }
+          const s = emit({ op: 'split', x: prog.length + 1, y: -1 })
+          comp(x)
+          ends.push(emit({ op: 'jmp', x: -1 }))
+          ;(prog[s] as { y: number }).y = prog.length
+        })
+        for (const e of ends) (prog[e] as { x: number }).x = prog.length
+        return
+      }
+      case 'rep': {
+        for (let k = 0; k < n.min; k++) comp(n.x)
+        if (n.max === Infinity) {
+          const s = emit({ op: 'split', x: prog.length + 1, y: -1 })
+          comp(n.x)
+          emit({ op: 'jmp', x: s })
+          ;(prog[s] as { y: number }).y = prog.length
+          return
+        }
+        const splits: number[] = []
+        for (let k = n.min; k < n.max; k++) { splits.push(emit({ op: 'split', x: prog.length + 1, y: -1 })); comp(n.x) }
+        for (const s of splits) (prog[s] as { y: number }).y = prog.length
+      }
     }
   }
-  regexCache.set(pattern, re)
-  return re
+  comp(root)
+  emit({ op: 'match' })
+  return prog
+}
+
+function inSet(r: Ranges, c: number): boolean {
+  for (let k = 0; k < r.length; k += 2) { if (c < r[k]) return false; if (c <= r[k + 1]) return true }
+  return false
+}
+
+const isWordAt = (s: string, i: number): boolean => i >= 0 && i < s.length && inSet(RE_WORD, s.charCodeAt(i))
+
+/** Does `prog` match anywhere in `s` (RegExp.prototype.test without flags)? Pike VM, O(|s| × |prog|). */
+function reTest(prog: Inst[], s: string): boolean {
+  const n = prog.length
+  const mark = new Int32Array(n).fill(-1)
+  let cur: number[] = [], next: number[] = []
+  const stack: number[] = []
+  /** Follow epsilon edges from `pc` at position `i` into `list`; true when `match` is reached. */
+  const add = (list: number[], pc0: number, i: number): boolean => {
+    stack.push(pc0)
+    while (stack.length) {
+      const pc = stack.pop()!
+      if (mark[pc] === i) continue
+      mark[pc] = i
+      const inst = prog[pc]
+      switch (inst.op) {
+        case 'match': stack.length = 0; return true
+        case 'jmp': stack.push(inst.x); break
+        case 'split': stack.push(inst.y, inst.x); break
+        case 'assert': {
+          const ok = inst.a === 'bol' ? i === 0 : inst.a === 'eol' ? i === s.length : (isWordAt(s, i - 1) !== isWordAt(s, i)) === (inst.a === 'wb')
+          if (ok) stack.push(pc + 1)
+          break
+        }
+        default: list.push(pc)
+      }
+    }
+    return false
+  }
+  if (add(cur, 0, 0)) return true
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    next.length = 0
+    for (const pc of cur) {
+      const inst = prog[pc] as Extract<Inst, { op: 'set' }>
+      if (inSet(inst.r, c) !== inst.neg && add(next, pc + 1, i + 1)) return true
+    }
+    if (add(next, 0, i + 1)) return true
+    const t = cur; cur = next; next = t
+  }
+  return false
+}
+
+interface Compiled { prog?: Inst[]; error?: string }
+const regexCache = new Map<string, Compiled>()
+
+function compileRegex(pattern: string): Compiled {
+  if (pattern.length > RE_MAX_PATTERN) return { error: `Регулярний вираз довший за ${RE_MAX_PATTERN} символів` }
+  try { new RegExp(pattern) } catch { return { error: `Невірний регулярний вираз «${pattern}»` } }
+  try { return { prog: reCompile(reParse(pattern)) } } catch (e) {
+    if (!(e instanceof ReUnsupported)) throw e
+    return { error: e.message === 'too big' ? `Регулярний вираз «${pattern}» надто складний (повтори {n,m})` : `Регулярний вираз «${pattern}»: зворотні посилання, lookaround і модифікатори не підтримуються` }
+  }
+}
+
+/** Compiled pattern, or null with a G107 warning (on every use, not just the first compile; cache bounded). */
+function regex(pattern: string, env: EvalEnv): Inst[] | null {
+  let c = regexCache.get(pattern)
+  if (!c) {
+    c = compileRegex(pattern)
+    if (regexCache.size >= 500) regexCache.clear()
+    regexCache.set(pattern, c)
+  }
+  if (c.error) {
+    const msg = c.error
+    if (env.diagnostics && !env.diagnostics.some(d => d.code === 'G107' && d.message === msg)) env.diagnostics.push({ code: 'G107', severity: 'warning', message: msg })
+    return null
+  }
+  return c.prog ?? null
+}
+
+/** Test with the subject scan charged to the budget. */
+function reMatch(prog: Inst[], s: string, budget: Budget): boolean {
+  step(budget, Math.floor((s.length + 1) * prog.length / RE_COST_PER_STEP))
+  return reTest(prog, s)
+}
+
+/**
+ * Linear-time `RegExp#test` (no flags) for hosts that match user patterns outside expressions: null when the pattern
+ * is invalid or unsupported (G107 in `env.diagnostics`); the scan is charged to `budget`.
+ */
+export function regexTest(pattern: string, subject: string, budget: Budget = newBudget(), env: EvalEnv = {}): boolean | null {
+  const re = regex(pattern, env)
+  return re ? reMatch(re, subject, budget) : null
 }
 
 function num(v: Value): number | null { return typeof v === 'number' && Number.isFinite(v) ? v : null }
@@ -502,10 +950,17 @@ function roundTo(n: number, digits: number): number {
   return Math.round(n * f) / f
 }
 
-function arith(op: BinOp, a: Value, b: Value, env: EvalEnv): Value {
+function arith(op: BinOp, a: Value, b: Value, budget: Budget, env: EvalEnv): Value {
   if (op === '+') {
-    if (typeof a === 'string' || typeof b === 'string') return toText(a) + toText(b)
-    if (Array.isArray(a) && Array.isArray(b)) return [...a, ...b]
+    if (typeof a === 'string' || typeof b === 'string') {
+      const x = text(a, budget), y = text(b, budget)
+      checkLength(x.length + y.length, budget)
+      return x + y
+    }
+    if (Array.isArray(a) && Array.isArray(b)) {
+      step(budget, a.length + b.length)
+      return own([...a, ...b], budget)
+    }
   }
   const x = num(a), y = num(b)
   if (x === null || y === null) return null
@@ -524,7 +979,7 @@ function arith(op: BinOp, a: Value, b: Value, env: EvalEnv): Value {
   return null
 }
 
-function evalBuiltin(fn: string, args: Value[]): Value {
+function evalBuiltin(fn: string, args: Value[], budget: Budget): Value {
   const a0 = args[0] ?? null
   switch (fn) {
     case 'len':
@@ -534,9 +989,14 @@ function evalBuiltin(fn: string, args: Value[]): Value {
     case 'min':
     case 'max': {
       const list = args.length === 1 && Array.isArray(a0) ? a0 : args
-      const ns = list.map(num).filter((n): n is number => n !== null)
-      if (!ns.length) return null
-      return fn === 'min' ? Math.min(...ns) : Math.max(...ns)
+      step(budget, list.length)
+      // A loop, not Math.min(...list): spreading a long list overflows the stack (RangeError).
+      let best: number | null = null
+      for (const v of list) {
+        const n = num(v)
+        if (n !== null && (best === null || (fn === 'min' ? n < best : n > best))) best = n
+      }
+      return best
     }
     case 'abs': { const n = num(a0); return n === null ? null : Math.abs(n) }
     case 'round': { const n = num(a0); return n === null ? null : roundTo(n, num(args[1] ?? 0) ?? 0) }
@@ -559,6 +1019,16 @@ function agoText(input: Value, now: number): Value {
   return `${Math.round(h / 24)} дн тому`
 }
 
+/** Markdown code fence around `body`: one backtick longer than the longest backtick run inside (CommonMark). */
+export function fenceText(body: string, lang = ''): string {
+  let longest = 0, run = 0
+  for (let i = 0; i < body.length; i++) { if (body[i] === '`') { run++; if (run > longest) longest = run } else run = 0 }
+  const fence = '`'.repeat(Math.max(3, longest + 1))
+  let end = body.length
+  while (end > 0 && body[end - 1] === '\n') end--
+  return fence + lang + '\n' + body.slice(0, end) + '\n' + fence
+}
+
 function evalFilter(node: Extract<ExprAst, { k: 'pipe' }>, input: Value, scope: Scope_, budget: Budget, env: EvalEnv): Value {
   const args = node.args.map(a => evalExpr(a, scope, budget, env))
   const list = Array.isArray(input) ? input : null
@@ -575,15 +1045,24 @@ function evalFilter(node: Extract<ExprAst, { k: 'pipe' }>, input: Value, scope: 
       const key = typeof args[0] === 'string' ? args[0] : ''
       const desc = args[1] === 'desc' || key.startsWith('-')
       const k = key.replace(/^-/, '')
-      const sorted = list.map((v, i) => ({ v, i })).sort((a, b) => compare(getPath(a.v, k), getPath(b.v, k)) || a.i - b.i).map(x => x.v)
-      return desc ? sorted.reverse() : sorted
+      // Keys are extracted (and their text forms charged) once; items without a key stay last and ties keep
+      // their source order in both directions.
+      const dec = list.map((v, i) => {
+        const kv = getPath(v, k)
+        return { v, i, key: kv === null || typeof kv === 'number' || typeof kv === 'string' ? kv : text(kv, budget) }
+      })
+      return dec.sort((a, b) => {
+        if (a.key === null || b.key === null) return a.key === b.key ? a.i - b.i : a.key === null ? 1 : -1
+        const c = compareKeys(a.key, b.key, budget)
+        return (desc ? -c : c) || a.i - b.i
+      }).map(x => x.v)
     }
     case 'grep': {
-      const re = regex(toText(args[0] ?? ''), env)
+      const re = regex(text(args[0] ?? '', budget), env)
       if (!re) return list ? [] : null
       const key = typeof args[1] === 'string' ? args[1] : ''
-      if (list) return list.filter(x => re.test(toText(getPath(x, key))))
-      if (typeof input === 'string') return input.split('\n').filter(l => re.test(l)).join('\n')
+      if (list) return list.filter(x => reMatch(re, text(getPath(x, key), budget), budget))
+      if (typeof input === 'string') return input.split('\n').filter(l => reMatch(re, l, budget)).join('\n')
       return null
     }
     case 'map': {
@@ -602,42 +1081,51 @@ function evalFilter(node: Extract<ExprAst, { k: 'pipe' }>, input: Value, scope: 
       return list.map(x => getPath(x, key))
     }
     case 'join': {
-      const sep = args.length ? toText(args[0]) : ', '
-      if (list) return list.map(x => toText(x)).join(sep)
-      return input === null ? '' : toText(input)
+      const sep = args.length ? text(args[0], budget) : ', '
+      if (!list) return input === null ? '' : text(input, budget)
+      const parts = list.map(x => text(x, budget))
+      checkLength(parts.reduce((n, p) => n + p.length, 0) + sep.length * Math.max(0, parts.length - 1), budget)
+      return parts.join(sep)
     }
     case 'truncate': {
       const n = Math.max(1, Math.trunc(num(args[0] ?? null) ?? 0))
-      const s = toText(input)
+      const s = text(input, budget)
       return s.length > n ? s.slice(0, n - 1) + '…' : s
     }
     case 'fence': {
-      const lang = args.length ? toText(args[0]) : ''
-      return '```' + lang + '\n' + toText(input).replace(/\n+$/, '') + '\n```'
+      const lang = args.length ? text(args[0], budget) : ''
+      const body = text(input, budget)
+      checkLength(body.length + lang.length + 64, budget)
+      return fenceText(body, lang)
     }
     case 'unique': {
       if (!list) return input
+      chargeValue(budget, list)
       const key = typeof args[0] === 'string' ? args[0] : ''
       const seen = new Set<string>()
       return list.filter(x => { const s = JSON.stringify(getPath(x, key)); if (seen.has(s)) return false; seen.add(s); return true })
     }
     case 'where': {
       if (!list) return list === null && input === null ? [] : input
-      const key = toText(args[0] ?? '')
+      const key = text(args[0] ?? '', budget)
       if (args.length < 2) return list.filter(x => truthy(getPath(x, key)))
-      return list.filter(x => deepEqual(getPath(x, key), args[1]))
+      return list.filter(x => deepEqual(getPath(x, key), args[1], budget))
     }
-    case 'len': return evalBuiltin('len', [input])
-    case 'round': return evalBuiltin('round', [input, args[0] ?? 0])
+    case 'len': return evalBuiltin('len', [input], budget)
+    case 'round': return evalBuiltin('round', [input, args[0] ?? 0], budget)
     case 'ago': return agoText(input, env.now ?? Date.now())
   }
   return null
 }
 
-/** Render a parsed template to text in `scope`. */
+/** Render a parsed template to text in `scope`. Output and value walks are charged; past MAX_STRING_LENGTH → G155. */
 export function renderTemplate(parts: TemplatePart[], scope: Scope_, budget: Budget, env: EvalEnv = {}): string {
   let out = ''
-  for (const p of parts) out += typeof p === 'string' ? p : toText(evalExpr(p, scope, budget, env))
+  for (const p of parts) {
+    const s = typeof p === 'string' ? p : text(evalExpr(p, scope, budget, env), budget)
+    if (out.length + s.length > MAX_STRING_LENGTH) checkLength(out.length + s.length, budget)
+    out += s
+  }
   return out
 }
 
@@ -646,7 +1134,7 @@ export function evalExpr(ast: ExprAst, scope: Scope_, budget: Budget, env: EvalE
   step(budget)
   switch (ast.k) {
     case 'lit': return ast.v
-    case 'list': return ast.items.map(i => evalExpr(i, scope, budget, env))
+    case 'list': return own(ast.items.map(i => evalExpr(i, scope, budget, env)), budget)
     case 'id': return lookup(scope, ast.name)
     case 'member': return getProp(evalExpr(ast.obj, scope, budget, env), ast.prop)
     case 'index': {
@@ -671,18 +1159,18 @@ export function evalExpr(ast: ExprAst, scope: Scope_, budget: Budget, env: EvalE
       const l = evalExpr(ast.l, scope, budget, env)
       const r = evalExpr(ast.r, scope, budget, env)
       switch (op) {
-        case '==': return deepEqual(l, r)
-        case '!=': return !deepEqual(l, r)
-        case '<': return l !== null && r !== null && typeof l === typeof r && compare(l, r) < 0
-        case '<=': return l !== null && r !== null && typeof l === typeof r && compare(l, r) <= 0
-        case '>': return l !== null && r !== null && typeof l === typeof r && compare(l, r) > 0
-        case '>=': return l !== null && r !== null && typeof l === typeof r && compare(l, r) >= 0
-        case '~': { if (l === null) return false; const re = regex(toText(r), env); return re ? re.test(toText(l)) : false }
+        case '==': return deepEqual(l, r, budget)
+        case '!=': return !deepEqual(l, r, budget)
+        case '<': return l !== null && r !== null && typeof l === typeof r && compareKeys(l, r, budget) < 0
+        case '<=': return l !== null && r !== null && typeof l === typeof r && compareKeys(l, r, budget) <= 0
+        case '>': return l !== null && r !== null && typeof l === typeof r && compareKeys(l, r, budget) > 0
+        case '>=': return l !== null && r !== null && typeof l === typeof r && compareKeys(l, r, budget) >= 0
+        case '~': { if (l === null) return false; const re = regex(text(r, budget), env); return re ? reMatch(re, text(l, budget), budget) : false }
         case 'in': return inOp(l, r, budget)
-        default: return arith(op, l, r, env)
+        default: return arith(op, l, r, budget, env)
       }
     }
-    case 'builtin': return evalBuiltin(ast.fn, ast.args.map(a => evalExpr(a, scope, budget, env)))
+    case 'builtin': return evalBuiltin(ast.fn, ast.args.map(a => evalExpr(a, scope, budget, env)), budget)
     case 'method': {
       const o = evalExpr(ast.obj, scope, budget, env)
       const a = evalExpr(ast.args[0], scope, budget, env)
@@ -701,13 +1189,17 @@ export function evalExpr(ast: ExprAst, scope: Scope_, budget: Budget, env: EvalE
       }
       return env.call(ast.path, args, kwargs)
     }
-    case 'pipe': return evalFilter(ast, evalExpr(ast.input, scope, budget, env), scope, budget, env)
+    case 'pipe': {
+      const input = evalExpr(ast.input, scope, budget, env)
+      const out = evalFilter(ast, input, scope, budget, env)
+      return out === input ? out : own(out, budget)
+    }
   }
 }
 
 function inOp(l: Value, r: Value, budget: Budget): boolean {
-  if (Array.isArray(r)) { step(budget, r.length); return r.some(x => deepEqual(x, l)) }
-  if (typeof r === 'string') return typeof l === 'string' && r.includes(l)
+  if (Array.isArray(r)) { step(budget, r.length); return r.some(x => deepEqual(x, l, budget)) }
+  if (typeof r === 'string') { step(budget, Math.floor(r.length / (CHARS_PER_CELL * CELLS_PER_STEP))); return typeof l === 'string' && r.includes(l) }
   if (isObj(r)) return typeof l === 'string' && hasOwn(r, l)
   return false
 }

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 export const GATE_JSON = {
+  log: { file: true },
   groups: {
     core: ['skill:tdd'],
     frontend: ['skill:react-components', 'tool:mcp__figma__*'],

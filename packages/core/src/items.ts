@@ -167,13 +167,40 @@ export function renderSkillListing(listing: SkillListing | readonly Item[], deci
 
 // ───────────────────────── Groups ─────────────────────────
 
+/** Own-property lookup in a config map: `toString`, `constructor`, … are never group or profile names. */
+export function ownEntry<T>(map: Readonly<Record<string, T>> | undefined, name: string): T | undefined {
+  return map && Object.prototype.hasOwnProperty.call(map, name) ? map[name] : undefined
+}
+
+/** One form of negation: `skill:!react` is read as `!skill:react` (an exclusion), never as «all skills but react». */
+function groupEntry(raw: string): { negated: boolean; pattern: string } {
+  const { negated, pattern } = splitNegation(raw.trim())
+  const { kind, name } = parseItemId(pattern)
+  if (kind && name.startsWith('!')) {
+    const inner = splitNegation(name)
+    return { negated: negated !== inner.negated, pattern: `${kind}:${inner.pattern}` }
+  }
+  return { negated, pattern }
+}
+
 /** `skill:react-*` matches skill items named `react-*`; a pattern without kind prefix matches any kind by name.
  * A leading `!` is ignored here (see `expandGroups` for negation). */
 export function groupMatches(groupPattern: string, item: Pick<Item, 'kind' | 'name'>): boolean {
-  const { pattern } = splitNegation(groupPattern.trim())
+  const { pattern } = groupEntry(groupPattern)
   const { kind, name } = parseItemId(pattern)
   if (kind && kind !== item.kind) return false
   return compileGlob(name)(item.name)
+}
+
+function splitGroup(pats: readonly string[]): { pos: string[]; neg: string[] } {
+  const pos: string[] = []
+  const neg: string[] = []
+  for (const p of Array.isArray(pats) ? pats : []) {
+    if (typeof p !== 'string') continue
+    const e = groupEntry(p)
+    ;(e.negated ? neg : pos).push(e.pattern)
+  }
+  return { pos, neg }
 }
 
 /** Item ids enabled by the given group names. Unknown group names are ignored.
@@ -181,10 +208,9 @@ export function groupMatches(groupPattern: string, item: Pick<Item, 'kind' | 'na
 export function expandGroups(cfg: Pick<GateConfig, 'groups'>, groupNames: Iterable<string>, items: readonly Item[]): Set<string> {
   const out = new Set<string>()
   for (const g of groupNames) {
-    const pats = cfg.groups?.[g]
+    const pats = ownEntry(cfg.groups, g)
     if (!pats) continue
-    const pos = pats.filter((p) => !p.trim().startsWith('!'))
-    const neg = pats.filter((p) => p.trim().startsWith('!'))
+    const { pos, neg } = splitGroup(pats)
     for (const it of items) {
       if (pos.some((p) => groupMatches(p, it)) && !neg.some((p) => groupMatches(p, it))) out.add(it.id)
     }
@@ -196,9 +222,18 @@ export function expandGroups(cfg: Pick<GateConfig, 'groups'>, groupNames: Iterab
 export function groupsOf(cfg: Pick<GateConfig, 'groups'>, item: Pick<Item, 'kind' | 'name'>): string[] {
   const out: string[] = []
   for (const [g, pats] of Object.entries(cfg.groups ?? {})) {
-    const pos = pats.filter((p) => !p.trim().startsWith('!'))
-    const neg = pats.filter((p) => p.trim().startsWith('!'))
+    const { pos, neg } = splitGroup(pats)
     if (pos.some((p) => groupMatches(p, item)) && !neg.some((p) => groupMatches(p, item))) out.push(g)
   }
   return out
+}
+
+/** Whether some group mentions the item at all: a positive pattern matches it, even when a `!` entry of that
+ * group then excludes it. An excluded item is still "grouped" for the decision, so the exclusion turns it off
+ * instead of handing it the more permissive default of ungrouped items. */
+export function mentionedInGroups(cfg: Pick<GateConfig, 'groups'>, item: Pick<Item, 'kind' | 'name'>): boolean {
+  for (const pats of Object.values(cfg.groups ?? {})) {
+    if (splitGroup(pats).pos.some((p) => groupMatches(p, item))) return true
+  }
+  return false
 }

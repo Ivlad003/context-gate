@@ -13,7 +13,7 @@ import { makeItem } from '../../core/src/items.ts'
 import { toJsonl } from '../../core/src/journal.ts'
 import { detectWindows } from '../../core/src/glob.ts'
 import type { GateData, GateEnv } from './session.ts'
-import { GATE_LOG } from './session.ts'
+import { GATE_ENV_KEYS, GATE_LOG } from './session.ts'
 
 function readText(p: string): string | undefined {
   try { return readFileSync(p, 'utf8') } catch { return undefined }
@@ -117,7 +117,7 @@ export function readBranch(root: string): string | undefined {
 
 export function gateEnv(env: Record<string, string | undefined> = process.env): GateEnv {
   const out: GateEnv = {}
-  for (const k of ['CONTEXT_GATE_PROFILE', 'CONTEXT_GATE_MODE', 'CONTEXT_GATE_OFF', 'CONTEXT_GATE_TICKET_TYPE', 'CONTEXT_GATE_MODEL'] as const) {
+  for (const k of GATE_ENV_KEYS) {
     const v = env[k]
     if (v !== undefined) out[k] = v
   }

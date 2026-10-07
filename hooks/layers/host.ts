@@ -13,7 +13,7 @@ import { cursorMatch } from '../../packages/core/src/assemble.ts'
 import { parseDuration } from '../../packages/core/src/duration.ts'
 import { fileProviderValue, markdownProviderValue, pickFields, providerResultOk } from '../../packages/core/src/providers.ts'
 import { binaryWhitelist } from '../../packages/core/src/config.ts'
-import { DEFAULT_EXECUTORS as CORE_EXECUTORS, executorFor, executorInvocation, executorsOf, parseShimOutput, scriptArgv, scriptFnName, scriptLang, scriptStdin, shimCommand, type ShimCall, type ShimResponse } from '../../packages/core/src/shims.ts'
+import { DEFAULT_EXECUTORS as CORE_EXECUTORS, executorEnv, executorFor, executorInvocation, executorsOf, parseShimOutput, scriptArgv, scriptFnName, scriptLang, scriptStdin, shimCommand, type ShimCall, type ShimResponse } from '../../packages/core/src/shims.ts'
 import { type Io, OWN_TOOL_PREFIX, type Runtime, debug, hash, insideRoot, join, now } from '../ctx.ts'
 
 /** The executors `@run` knows without gate.json (core, same as the CLI). */
@@ -44,10 +44,180 @@ export async function loadWhitelist(io: Io, rt: Runtime): Promise<string[]> {
 
 const binOf = (argv: readonly string[]): string => (argv[0] ?? '').split(/[\\/]/).pop() ?? ''
 
+/** S5: the whitelist names binaries the user's PATH resolves. A path in `argv[0]` (`./tools/node`, `/tmp/x/git`) would
+ *  pass a basename check while starting any file, so only a bare command name may start. */
+export function bareBinary(argv: readonly string[]): boolean {
+  const a = argv[0] ?? ''
+  return a !== '' && !/[\\/]/.test(a)
+}
+
 /** May repo config start this argv? (trust is checked by the caller). */
 export async function allowedBinary(io: Io, rt: Runtime, argv: readonly string[]): Promise<boolean> {
   if (!rt.interactive && !rt.options.allowScripts) return false
+  if (!bareBinary(argv)) return false
   return (await loadWhitelist(io, rt)).includes(binOf(argv))
+}
+
+/** S5: repo `executors[].env` without the variables that change which code an allowed binary runs (core executorEnv). */
+export function safeExecutorEnv(io: Io, env: Record<string, string> | undefined): Record<string, string> {
+  const r = executorEnv(env)
+  for (const k of r.dropped) debug(io, `executors env ${k}: ігнорується (змінює, який код запускається)`)
+  return r.env
+}
+
+// ───────────────────────── containment (H02) ─────────────────────────
+
+const normPath = (p: string, windows: boolean): string => {
+  const t = p.replace(/\\/g, '/').replace(/\/+$/, '')
+  return windows ? t.toLowerCase() : t
+}
+
+async function realRootOf(io: Io, rt: Runtime): Promise<string> {
+  if (rt.realRoot?.root === rt.root) return rt.realRoot.real
+  const st = await io.fs.stat?.(rt.root, { resolve: true }).catch(() => undefined)
+  const real = st?.realPath ?? rt.root
+  rt.realRoot = { root: rt.root, real }
+  return real
+}
+
+function under(real: string, root: string, windows: boolean): boolean {
+  const r = normPath(real, windows)
+  const base = normPath(root, windows)
+  return r === base || r.startsWith(base + '/')
+}
+
+/**
+ * Does an existing absolute path land inside the repo once symlinks resolve (H02)? A port without `fs.stat` (fake
+ * ports) keeps the lexical check only; one whose stat does not resolve refuses a path that is itself a link.
+ */
+export async function insideRealRoot(io: Io, rt: Runtime, path: string): Promise<boolean> {
+  if (!io.fs.stat) return true
+  const st = await io.fs.stat(path, { resolve: true }).catch(() => undefined)
+  if (!st) return false
+  if (st.realPath === undefined) return st.isLink !== true && st.kind !== 'other'
+  return under(st.realPath, await realRootOf(io, rt), rt.windows)
+}
+
+/**
+ * Where a write to `path` would land stays inside the repo (H01): the path itself when it exists (a symlink is
+ * refused outright), else its nearest existing ancestor resolved, plus the rest of the path.
+ */
+export async function writableInsideRoot(io: Io, rt: Runtime, path: string): Promise<boolean> {
+  if (!io.fs.stat) return true
+  const own = await io.fs.stat(path, { resolve: true }).catch(() => undefined)
+  if (own) return own.isLink !== true && (own.realPath === undefined ? own.kind === 'file' : under(own.realPath, await realRootOf(io, rt), rt.windows))
+  const parts = path.replace(/\\/g, '/').split('/')
+  for (let i = parts.length - 1; i > 0; i--) {
+    const dir = parts.slice(0, i).join('/') || '/'
+    const st = await io.fs.stat(dir, { resolve: true }).catch(() => undefined)
+    if (!st) continue
+    if (st.realPath === undefined) return st.isLink !== true
+    return under(`${st.realPath.replace(/[\\/]+$/, '')}/${parts.slice(i).join('/')}`, await realRootOf(io, rt), rt.windows)
+  }
+  return false
+}
+
+/** Text of a repo file: repo-relative, no `..`, and its real path inside the real root (no symlink escape, H02). */
+export async function readRepoFile(io: Io, rt: Runtime, rel: string): Promise<string | undefined> {
+  if (!insideRoot(rel)) return undefined
+  const path = join(rt.root, rel)
+  if (!(await insideRealRoot(io, rt, path))) {
+    debug(io, `${rel}: шлях веде за межі репозиторію (symlink) — не читається`)
+    return undefined
+  }
+  const t = await io.fs.read(path).catch(() => undefined)
+  return typeof t === 'string' ? t : undefined
+}
+
+// ───────────────────────── $.store cache budget (R2) ─────────────────────────
+
+/** Every `cache:*` entry with its size and write time, so the store (4 MiB for every repo) is bounded. Trust and
+ *  `data:` keys are never evicted: only keys listed here (or unlisted `cache:` keys) are deleted. */
+export const CACHE_INDEX = 'cache-index'
+const CACHE_BUDGET = 1_500_000
+const CACHE_ENTRY_MAX = 64_000
+interface CacheIndex { v: 1; entries: Record<string, { size: number; at: number }> }
+const swept = new WeakSet<Runtime>()
+
+async function readIndex(io: Io): Promise<CacheIndex> {
+  const v = (await io.store.get(CACHE_INDEX).catch(() => undefined)) as CacheIndex | undefined
+  return v && v.v === 1 && v.entries && typeof v.entries === 'object' ? v : { v: 1, entries: {} }
+}
+
+/** Index writes in flight: render runs @run/@call nodes in parallel, and each put reads, changes and writes the one
+ *  `cache-index`, so puts are chained (as journal flushes are) or one would drop another's entry from the budget. */
+let cacheChain: Promise<void> = Promise.resolve()
+
+/** Store a cache entry within the budget, oldest entries evicted first. */
+export function cachePut(io: Io, rt: Runtime, key: string, value: unknown): Promise<void> {
+  const run = cacheChain.then(() => cachePutNow(io, rt, key, value))
+  cacheChain = run.catch(() => undefined)
+  return run
+}
+
+async function cachePutNow(io: Io, rt: Runtime, key: string, value: unknown): Promise<void> {
+  const size = JSON.stringify(value).length
+  if (size > CACHE_ENTRY_MAX) return
+  const idx = await readIndex(io)
+  if (!swept.has(rt)) {
+    swept.add(rt)
+    // Entries written before the index (or lost to a concurrent index write) would never be evicted.
+    const keys = await io.store.keys?.().catch(() => undefined)
+    for (const k of keys ?? []) if (k.startsWith('cache:') && !idx.entries[k]) await io.store.delete(k).catch(() => undefined)
+  }
+  idx.entries[key] = { size, at: now() }
+  let total = Object.values(idx.entries).reduce((n, e) => n + e.size, 0)
+  for (const [k] of Object.entries(idx.entries).sort((a, b) => a[1].at - b[1].at)) {
+    if (total <= CACHE_BUDGET) break
+    if (k === key) continue
+    total -= idx.entries[k].size
+    delete idx.entries[k]
+    await io.store.delete(k).catch(() => undefined)
+  }
+  try {
+    await io.store.set(key, value)
+  } catch (err) {
+    delete idx.entries[key]
+    debug(io, `cache store failed: ${String((err as Error)?.message ?? err)}`)
+  }
+  await io.store.set(CACHE_INDEX, idx).catch((err: unknown) => debug(io, `cache index store failed: ${String(err)}`))
+}
+
+/** Drop every cache entry (a full store refused a trust write): trust outranks any cache. */
+export async function clearCacheStore(io: Io): Promise<void> {
+  const idx = await readIndex(io)
+  const keys = new Set([...Object.keys(idx.entries), ...((await io.store.keys?.().catch(() => undefined)) ?? []).filter((k) => k.startsWith('cache:'))])
+  for (const k of keys) await io.store.delete(k).catch(() => undefined)
+  await io.store.set(CACHE_INDEX, { v: 1, entries: {} } satisfies CacheIndex).catch(() => undefined)
+}
+
+/** gate.json `prompt.dir`, repo-relative; an absolute or `..` value falls back to `.claude/prompt` (M05, as dsl.ts
+ *  promptDir, which cannot be imported here: dsl.ts imports this file). */
+export function configuredPromptDir(cfg: { prompt?: { dir?: string } }): string {
+  const dir = (cfg.prompt?.dir ?? '.claude/prompt').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+  return dir && insideRoot(dir) ? dir : '.claude/prompt'
+}
+
+/** Largest input passed in CONTEXT_GATE_INPUT (bytes); larger inputs come only on stdin (CLI INPUT_ENV_MAX). */
+const INPUT_ENV_MAX = 64 * 1024
+
+/** UTF-8 byte length of a string (no Buffer in the mod runtime). */
+function utf8Length(s: string): number {
+  if (s.length * 3 <= INPUT_ENV_MAX) return s.length * 3
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) n += 1
+    else if (c < 0x800) n += 2
+    else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++ }
+    else n += 3
+  }
+  return n
+}
+
+/** A per-process timeout: the render's remaining budget when it passes one, never more than 10 s. */
+function boundedTimeout(timeoutMs: number | undefined): number {
+  return timeoutMs !== undefined && timeoutMs > 0 ? Math.min(timeoutMs, 10_000) : 10_000
 }
 
 export async function runArgv(io: Io, rt: Runtime, argv: string[], init: { stdin?: string; timeoutMs: number; env?: Record<string, string> }): Promise<{ exitCode: number; stdout: string; stderr: string; ms: number }> {
@@ -112,8 +282,8 @@ async function examples(io: Io, rt: Runtime, glob: string, n: number): Promise<V
   }
   const out: Value[] = []
   for (const f of selectExamples(found, glob, Math.min(n, 20))) {
-    const body = await io.fs.read(join(rt.root, f.path)).catch(() => '')
-    out.push(exampleValue(f, typeof body === 'string' ? body : ''))
+    const body = await readRepoFile(io, rt, f.path)
+    out.push(exampleValue(f, body ?? ''))
   }
   return out
 }
@@ -180,7 +350,7 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
   const cfg = rt.cfg
   const executors = executorsOf(cfg)
   const providers = deps.providers ?? cfg.providers ?? {}
-  const promptDir = deps.promptDir ?? (cfg.prompt?.dir ?? '.claude/prompt').replace(/\/+$/, '')
+  const promptDir = deps.promptDir ?? configuredPromptDir(cfg)
   const callables = ['git.log', 'fs.examples', 'fs.glob', 'fs.exists', 'cursor.match', 'scripts.*']
   for (const [name, p] of Object.entries(providers)) if (!p.builtin && !BUILTIN_PROVIDERS.has(name)) callables.push(`${name}.*`)
 
@@ -207,18 +377,18 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
   }
 
   /** `scripts.<fn>(…)`: run `<prompt dir>/scripts/<fn>.*` with `{ ctx, args }` on stdin (CLI `Providers.script`). */
-  const script = async (fn: string, args: Value[], kwargs: Record<string, Value>): Promise<Value> => {
+  const script = async (fn: string, args: Value[], kwargs: Record<string, Value>, timeoutMs = 10_000): Promise<Value> => {
     const dir = `${promptDir}/scripts`
     const file = (await walkRepo(io, rt, dir, { dirs: 50, files: 500 })).find((f) => scriptFnName(f) === fn)
     if (!file) { debug(io, `scripts.${fn}: скрипт не знайдено в ${dir}`); return null }
     if (!deps.trusted) return null
-    const t = await io.fs.read(join(rt.root, file)).catch(() => undefined)
-    const text = typeof t === 'string' ? t : ''
+    if (!(await insideRealRoot(io, rt, join(rt.root, file)))) { debug(io, `scripts.${fn}: ${file} веде за межі репозиторію`); return null }
+    const text = (await readRepoFile(io, rt, file)) ?? ''
     const argv = scriptArgv(join(rt.root, file), scriptLang(file, text))
     if (!(await allowedBinary(io, rt, argv))) { debug(io, `scripts.${fn}: ${argv[0]} поза білим списком`); return null }
     const key = `scripts:${fn}:${hash(text)}:${hash(JSON.stringify([args, kwargs]))}`
     const v = await cached(key, cfg.prompt?.runCacheDefault ?? '5m', async () => {
-      const r = await runArgv(io, rt, argv, { stdin: scriptStdin(args, kwargs), timeoutMs: 10_000 })
+      const r = await runArgv(io, rt, argv, { stdin: scriptStdin(args, kwargs), timeoutMs })
       if (r.exitCode !== 0) { debug(io, `scripts.${fn}: exit ${r.exitCode}: ${r.stderr.trim().split('\n')[0] ?? ''}`); return undefined }
       const out = r.stdout.trim()
       if (!out) return null
@@ -232,18 +402,17 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
     now: () => now(),
     callables,
     providerConfigs: providers,
-    async readFile(path) {
-      if (!insideRoot(path)) return undefined
-      const t = await io.fs.read(join(rt.root, path)).catch(() => undefined)
-      return typeof t === 'string' ? t : undefined
-    },
+    readFile: (path) => readRepoFile(io, rt, path),
     async run(req) {
       const ex = executorFor(executors, req.lang)
       if (!ex) return { exitCode: -1, stdout: '', stderr: `виконавця «${req.lang}» не оголошено в executors`, ms: 0 }
       const inv = executorInvocation(ex, req.code, req.stdin)
       if (!deps.trusted || !(await allowedBinary(io, rt, inv.argv))) return { exitCode: -1, stdout: '', stderr: 'виконання заборонено (довіра / білий список / allowScripts)', ms: 0 }
       const timeoutMs = Math.min(req.timeoutMs, parseDuration(ex.timeout) ?? req.timeoutMs)
-      return runArgv(io, rt, inv.argv, { stdin: inv.stdin, timeoutMs, env: { ...(ex.env ?? {}), CONTEXT_GATE_INPUT: req.stdin, CONTEXT_GATE_ROOT: rt.root } })
+      // CONTEXT_GATE_INPUT only for small inputs: a large scope in the environment fails exec with E2BIG (M46/P3);
+      // stdin always carries the input.
+      const input: Record<string, string> = utf8Length(req.stdin) <= INPUT_ENV_MAX ? { CONTEXT_GATE_INPUT: req.stdin } : {}
+      return runArgv(io, rt, inv.argv, { stdin: inv.stdin, timeoutMs, env: { ...safeExecutorEnv(io, ex.env), ...input, CONTEXT_GATE_ROOT: rt.root } })
     },
     async shim(path, calls, timeoutMs = 10_000) {
       const fail = (msg: string): ShimResponse => ({ results: calls.map(() => null), errors: calls.map(() => msg) })
@@ -251,6 +420,7 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
       if (!insideRoot(path)) return fail(`модуль ${path} поза репозиторієм`)
       const file = join(rt.root, path)
       if (!(await io.fs.exists(file).catch(() => false))) return fail(`модуль ${path} не знайдено`)
+      if (!(await insideRealRoot(io, rt, file))) return fail(`модуль ${path} веде за межі репозиторію`)
       const cmd = shimCommand(path, file, calls, executors)
       if (!cmd.ok) return fail(cmd.error)
       if (!(await allowedBinary(io, rt, cmd.argv))) return fail(`${cmd.argv[0]} не в білому списку або allowScripts вимкнено`)
@@ -259,7 +429,8 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
     },
     async call(req) {
       if (!deps.trusted || !insideRoot(req.path)) throw new Error('виклик заборонено')
-      const r = await host.shim(req.path, req.calls)
+      // The render passes what is left of its budget: the shim never outlives the render deadline (M62).
+      const r = await host.shim(req.path, req.calls, boundedTimeout(req.timeoutMs))
       const err = r.errors.find((e) => e)
       if (err) throw new Error(err)
       return r.results
@@ -285,9 +456,7 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
       return v && typeof v.at === 'number' ? v : undefined
     },
     async cacheSet(key, value) {
-      const s = JSON.stringify(value)
-      if (s.length > 64_000) return
-      await io.store.set(`cache:${deps.repoKey}:${key}`, { value, at: now() }).catch(() => undefined)
+      await cachePut(io, rt, `cache:${deps.repoKey}:${key}`, { value, at: now() })
     },
     registerLazy(name, description, ref) {
       const full = `${OWN_TOOL_PREFIX}${name}`
@@ -312,7 +481,7 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
         const r = await runArgv(io, rt, ['git', 'log', '--oneline', `-${n}`], { timeoutMs: 5000 })
         return r.exitCode === 0 ? r.stdout.trim().split('\n').filter(Boolean) : []
       }
-      if (ns === 'scripts') return script(fn, args, kwargs)
+      if (ns === 'scripts') return script(fn, args, kwargs, boundedTimeout(req.timeoutMs))
       const p = providers[ns]
       if (!p || p.builtin) return null
       if (p.kind === 'cli') {
@@ -320,7 +489,7 @@ export function makeRenderHost(io: Io, rt: Runtime, deps: HostDeps): ModHost {
         const tpl = fns && !Array.isArray(fns) ? fns[fn] : undefined
         const argv = tpl ? fillPlaceholders(tpl, args, kwargs) : Array.isArray(fns) && fns.includes(fn) && p.command ? [...p.command, fn, ...args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))] : undefined
         if (!argv || !deps.trusted || !(await allowedBinary(io, rt, argv))) return null
-        const r = await runArgv(io, rt, argv, { timeoutMs: 10_000 })
+        const r = await runArgv(io, rt, argv, { timeoutMs: boundedTimeout(req.timeoutMs) })
         const res = providerResultOk(p, r.exitCode, r.stdout) // okExitCodes / parseOnError (eslint -f json exits 1)
         if (!res.ok) throw new Error(`${req.path}: ${res.error}`)
         return res.value

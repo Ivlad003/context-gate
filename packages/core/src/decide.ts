@@ -1,12 +1,15 @@
 // skill-gate decision (SPEC "Шар 2 — skill-gate"): a pure function of config, signals, state and items.
 // Priority: manual (/gate) → profiles[*].when → classifier (auto, ≥ minConfidence) → tiers[models[model]] → standard.
 // Hysteresis: the profile changes only on a manual signal, on a different `when` profile two turns in a row,
-// or on recheck (`/gate new`, compaction).
+// or on recheck (`/gate new`, compaction). Only user prompts are turns: a recompute after `/gate +x`, a model
+// change or a gate.json reload passes `advance: false` and moves neither `turn` nor the hysteresis counter.
 
 import type { DecisionLogEntry, DecisionTrigger, Gate, GateConfig, GateState, Item, ItemDecision, ProfileWhen, Signals, Tier } from './types.ts'
+import type { ModelAttrs } from './config.ts'
 import { normalizeConfig, tierForModel } from './config.ts'
-import { expandGroups, groupsOf, isMcpTool, mcpServerOf } from './items.ts'
-import { compileGlob, matchAny } from './glob.ts'
+import { expandGroups, groupsOf, isMcpTool, mcpServerOf, mentionedInGroups, ownEntry } from './items.ts'
+import { compileGlob, isRepoRelative, matchAny, splitNegation } from './glob.ts'
+import { regexTest } from './expr.ts'
 
 export interface DecideOptions {
   /** `/gate new`, compaction or `/gate auto`: re-evaluate the profile without hysteresis. */
@@ -20,6 +23,15 @@ export interface DecideOptions {
   hysteresisTurns?: number
   /** Forced tier (CLI `--tier`, tests): overrides the tier derived from `signals.model`. */
   tier?: Tier
+  /** Model attributes from the harness (context window, cost): the tier for a model id no `models` entry
+   * matches comes from `tiers[*].thresholds` (G-01) instead of falling back to `standard`. */
+  modelAttrs?: ModelAttrs
+  /** `false`: a recompute within the same user turn (`/gate +x`, model change, gate.json reload). `turn` and the
+   * hysteresis counter stay as they are and `when`/classifier signals do not switch the profile; manual
+   * signals and `recheck` still apply. Default true: one call per user prompt. */
+  advance?: boolean
+  /** Case-insensitive `when.paths` (Windows repos), as the adapters pass to `ruleMatches`. */
+  nocase?: boolean
   now?: number
 }
 
@@ -32,8 +44,12 @@ export interface DecideResult {
 /** Separator for the union of several matched profiles. */
 export const PROFILE_UNION = '+'
 
-export function profileParts(profile: string | undefined): string[] {
-  return profile ? profile.split(PROFILE_UNION).filter(Boolean) : []
+/** The profiles of a (possibly united) profile string. With `cfg`, a declared profile whose own name contains
+ * `+` (`c++`) is one profile, not a union (config validation warns about such names, G316). */
+export function profileParts(profile: string | undefined, cfg?: Pick<GateConfig, 'profiles'>): string[] {
+  if (!profile) return []
+  if (cfg && ownEntry(cfg.profiles, profile)) return [profile]
+  return profile.split(PROFILE_UNION).filter(Boolean)
 }
 
 interface WhenHit { trigger: DecisionTrigger; detail: string }
@@ -42,15 +58,17 @@ function whenMatches(when: ProfileWhen | undefined, signals: Signals, opts: Deci
   if (!when) return undefined
   if (when.paths?.length) {
     for (const p of signals.paths) {
-      if (matchAny(p, when.paths, [], { matchBase: true })) return { trigger: 'when:paths', detail: `${p} ~ ${when.paths.join(', ')}` }
+      // A path outside the repo root (`/home/u/.claude/settings.json`) is no signal for a repo profile.
+      if (!isRepoRelative(p)) continue
+      if (matchAny(p, when.paths, [], { matchBase: true, nocase: !!opts.nocase })) return { trigger: 'when:paths', detail: `${p} ~ ${when.paths.join(', ')}` }
     }
   }
   if (when.branch && signals.branch) {
-    try {
-      if (new RegExp(when.branch).test(signals.branch)) return { trigger: 'when:branch', detail: `гілка ${signals.branch} ~ /${when.branch}/` }
-    } catch {
-      reasons.push(`профіль ${name}: невірний regex гілки /${when.branch}/`)
-    }
+    // The repo's pattern runs on the linear-time engine (M51): no catastrophic backtracking from gate.json.
+    let hit: boolean | null = null
+    try { hit = regexTest(when.branch, signals.branch) } catch { /* over the step budget: no match */ }
+    if (hit) return { trigger: 'when:branch', detail: `гілка ${signals.branch} ~ /${when.branch}/` }
+    if (hit === null) reasons.push(`профіль ${name}: невірний або непідтримуваний regex гілки /${when.branch}/`)
   }
   if (when.ticketType?.length && signals.ticketType && when.ticketType.includes(signals.ticketType)) {
     return { trigger: 'when:ticketType', detail: `тип тікета ${signals.ticketType}` }
@@ -71,8 +89,8 @@ function hasLegacy(cfg: GateConfig): boolean {
 
 /** Resolve `+x` / `-x`: a group name, or a profile name (its groups). */
 function resolveGroupRef(cfg: GateConfig, name: string): string[] {
-  if (cfg.groups?.[name]) return [name]
-  const p = cfg.profiles?.[name]
+  if (ownEntry(cfg.groups, name)) return [name]
+  const p = ownEntry(cfg.profiles, name)
   if (p) return p.groups ?? []
   return [name]
 }
@@ -86,12 +104,13 @@ function resolveGroupRef(cfg: GateConfig, name: string): string[] {
 export function decideGate(config: GateConfig, signals: Signals, state: GateState, items: readonly Item[], opts: DecideOptions = {}): DecideResult {
   const cfg = hasLegacy(config) ? normalizeConfig(config).config : config
   const reason: string[] = []
-  const turn = (state.turn ?? 0) + 1
+  const advance = opts.advance !== false
+  const turn = (state.turn ?? 0) + (advance ? 1 : 0)
   const ts = opts.now ?? 0
   const needTurns = opts.hysteresisTurns ?? 2
 
   // ── tier ──
-  const t = opts.tier ? { tier: opts.tier, reason: `tier ${opts.tier} задано явно`, fallback: false } : tierForModel(cfg, signals.model)
+  const t = opts.tier ? { tier: opts.tier, reason: `tier ${opts.tier} задано явно`, fallback: false } : tierForModel(cfg, signals.model, opts.modelAttrs)
   const tier: Tier = t.tier
   reason.push((signals.agentId ? `субагент ${signals.agentId}: ` : '') + t.reason)
   if ((signals.model || opts.tier) && !cfg.tiers?.[tier]) reason.push(`tier ${tier} не оголошено в tiers`)
@@ -100,7 +119,7 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
   if (signals.manual?.off) {
     const gate = allOn(items, tier, state.profile, ['/gate off: фільтрацію вимкнено, усе увімкнено', ...reason])
     const newState: GateState = { ...state, turn }
-    return { gate, state: newState, log: logOf(gate, turn, ts) }
+    return { gate, state: newState, log: logOf(gate, turn, ts, signals) }
   }
 
   // ── profile ──
@@ -117,7 +136,7 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
   let classifyCandidate: string | undefined
   if (signals.classified) {
     const { profile: cp, confidence } = signals.classified
-    const known = !!cfg.profiles?.[cp]
+    const known = !!ownEntry(cfg.profiles, cp)
     if (!known) reason.push(`класифікатор: профіль ${cp} не оголошено`)
     else if (mode === 'shadow') {
       proposed = { profile: cp, confidence }
@@ -131,7 +150,7 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
 
   if (signals.manual?.profile) {
     const mp = signals.manual.profile
-    if (!profileParts(mp).every((p) => cfg.profiles?.[p])) reason.push(`ручний профіль ${mp} не оголошено в profiles`)
+    if (!profileParts(mp, cfg).every((p) => ownEntry(cfg.profiles, p))) reason.push(`ручний профіль ${mp} не оголошено в profiles`)
     if (profile !== mp || source !== 'manual') reason.push(`/gate ${mp}: профіль зафіксовано вручну`)
     else reason.push(`профіль ${mp} зафіксовано вручну`)
     profile = mp
@@ -161,7 +180,10 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
     }
 
     const isFirst = profile === undefined || recheck
-    if (candidate === undefined) {
+    if (!advance && !recheck) {
+      // Same user turn: keep the committed profile and the hysteresis counter as they are.
+      if (candidate !== undefined && candidate !== profile) reason.push(`перерахунок у межах ходу: ${candidate} не змінює профіль ${profile ?? '—'}`)
+    } else if (candidate === undefined) {
       if (recheck) { profile = undefined; source = undefined }
       pending = undefined
     } else if (candidate === profile && !recheck) {
@@ -204,9 +226,10 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
   // ── groups ──
   const tierCfg = cfg.tiers?.[tier]
   const active = new Set<string>(tierCfg?.groups ?? [])
-  for (const p of profileParts(profile)) for (const g of cfg.profiles?.[p]?.groups ?? []) active.add(g)
+  for (const p of profileParts(profile, cfg)) for (const g of ownEntry(cfg.profiles, p)?.groups ?? []) active.add(g)
   for (const a of signals.manual?.add ?? []) for (const g of resolveGroupRef(cfg, a)) { active.add(g); reason.push(`/gate +${a}: група ${g}`) }
-  for (const r of signals.manual?.remove ?? []) for (const g of resolveGroupRef(cfg, r)) { active.delete(g); reason.push(`/gate -${r}: група ${g}`) }
+  const removedGroups: string[] = []
+  for (const r of signals.manual?.remove ?? []) for (const g of resolveGroupRef(cfg, r)) { active.delete(g); removedGroups.push(g); reason.push(`/gate -${r}: група ${g}`) }
   const groups = [...active]
 
   const noGroups = !Object.keys(cfg.groups ?? {}).length
@@ -214,8 +237,14 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
 
   // ── per-item decisions ──
   const enabled = expandGroups(cfg, groups, items)
-  const preloadPats = (tierCfg?.preload ?? []).map((p) => p.replace(/^skill:/, ''))
-  const preloadMatch = preloadPats.map((p) => compileGlob(p))
+  // The user's `/gate -group` beats the tier's preload (the strongest signal wins).
+  const removed = removedGroups.length ? expandGroups(cfg, removedGroups, items) : new Set<string>()
+  // Preload names skills only: a negated entry (`!skill:a`) would otherwise match every skill (config warns, G315).
+  const preloadMatch = (tierCfg?.preload ?? [])
+    .filter((p) => !splitNegation(p.trim()).negated)
+    .map((p) => p.trim().replace(/^skill:/, ''))
+    .filter((p) => p && !p.startsWith('!'))
+    .map((p) => compileGlob(p))
   const decisions: Record<string, ItemDecision> = {}
   const gate: Gate = {
     profile, tier, trigger, off: false,
@@ -227,13 +256,16 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
 
   for (const it of items) {
     let d: ItemDecision
-    const grouped = noGroups ? false : groupsOf(cfg, it).length > 0
-    if (it.kind === 'skill' && preloadMatch.some((m) => m(it.name))) d = 'preload'
+    // An item a group excludes (`!agent:x`) is still grouped: the exclusion turns it off, it must not fall
+    // back to the more permissive default of ungrouped items.
+    const grouped = noGroups ? false : mentionedInGroups(cfg, it)
+    if (it.kind === 'skill' && !removed.has(it.id) && preloadMatch.some((m) => m(it.name))) d = 'preload'
     else if (noGroups || enabled.has(it.id)) d = 'on'
     else if (it.kind === 'section' || it.kind === 'datum') d = 'on'
     else if (grouped) d = 'off' // script tools (`# gate-tool:`) obey groups like MCP tools (G-35)
     else if (it.kind === 'tool' && !isMcpTool(it)) d = 'on'
     else if (it.kind === 'skill') d = 'nameOnly'
+    else if (it.kind === 'tool' && it.name.startsWith('mcp__ide__')) d = 'on' // the harness's IDE bridge, not a repo MCP server
     else if (it.kind === 'tool') d = 'off' // MCP tools outside the profile are off
     else d = 'on' // ungrouped agents and rules stay available
     decisions[it.id] = d
@@ -261,7 +293,7 @@ export function decideGate(config: GateConfig, signals: Signals, state: GateStat
 
   const newState: GateState = { turn, profile, profileSource: source }
   if (pending) newState.pending = pending
-  return { gate, state: newState, log: logOf(gate, turn, ts) }
+  return { gate, state: newState, log: logOf(gate, turn, ts, signals) }
 }
 
 function allOn(items: readonly Item[], tier: Tier, profile: string | undefined, reason: string[]): Gate {
@@ -281,13 +313,18 @@ function allOn(items: readonly Item[], tier: Tier, profile: string | undefined, 
   return gate
 }
 
-function logOf(gate: Gate, turn: number, ts: number): DecisionLogEntry {
+function logOf(gate: Gate, turn: number, ts: number, signals?: Signals): DecisionLogEntry {
   const enabled: string[] = []
   const disabled: string[] = []
   for (const [id, d] of Object.entries(gate.items)) (d === 'off' ? disabled : enabled).push(id)
   const entry: DecisionLogEntry = { ts, turn, trigger: gate.trigger, tier: gate.tier, enabled, disabled, reason: gate.reason, kind: 'decision' }
   if (gate.profile) entry.profile = gate.profile
-  if (gate.proposed) entry.data = { proposed: gate.proposed }
+  const data: Record<string, unknown> = {}
+  if (gate.proposed) data.proposed = gate.proposed
+  // `report` matches runner and adapter decisions per ticket (сценарій 11).
+  if (signals?.ticketId) data.ticketId = signals.ticketId
+  if (signals?.ticketType) data.ticketType = signals.ticketType
+  if (Object.keys(data).length) entry.data = data
   return entry
 }
 
@@ -303,7 +340,7 @@ export function enablingGroup(kind: Item['kind'], name: string, config: GateConf
   const cfg = hasLegacy(config) ? normalizeConfig(config).config : config
   const gs = groupsOf(cfg, { kind, name })
   if (!gs.length) return undefined
-  return gs.find((g) => cfg.profiles?.[g]) ?? gs[0]
+  return gs.find((g) => ownEntry(cfg.profiles, g)) ?? gs[0]
 }
 
 /** Text for `{ deny }` / short tool description: `postgres вимкнено профілем frontend. Користувач може увімкнути: /gate +backend`. */
@@ -364,18 +401,41 @@ export function classifyRequest(config: Pick<GateConfig, 'profiles'>, text: stri
   return JSON.stringify({ text: text.slice(0, 4000), profiles, paths: paths.slice(-20), ...(model ? { model } : {}) })
 }
 
-/** `{ "profile", "confidence" }` anywhere in the text (a model answer or a CLI's stdout); confidence clamped to 0…1. */
+/** `{ "profile", "confidence" }` anywhere in the text (a model answer or a CLI's stdout); confidence clamped to 0…1.
+ * Each balanced top-level `{…}` is tried in turn (nested objects and stray braces before the JSON are fine). */
 export function parseClassify(text: string, profiles: readonly string[]): { profile: string; confidence: number } | undefined {
-  const m = /\{[\s\S]*?\}/.exec(text)
-  if (!m) return undefined
-  try {
-    const v = JSON.parse(m[0]) as { profile?: unknown; confidence?: unknown }
-    if (typeof v.profile !== 'string' || !profiles.includes(v.profile)) return undefined
+  for (const cand of braceCandidates(text)) {
+    let v: { profile?: unknown; confidence?: unknown }
+    try { v = JSON.parse(cand) as typeof v } catch { continue }
+    if (!v || typeof v !== 'object' || typeof v.profile !== 'string' || !profiles.includes(v.profile)) continue
     const c = typeof v.confidence === 'number' ? v.confidence : Number(v.confidence)
     return { profile: v.profile, confidence: Number.isFinite(c) ? Math.max(0, Math.min(1, c)) : 0 }
-  } catch {
-    return undefined
   }
+  return undefined
+}
+
+const MAX_BRACE_STARTS = 64
+const MAX_BRACE_SCAN = 1 << 20
+
+/** Balanced `{…}` spans starting at each `{` (strings respected), at most 20. */
+function braceCandidates(text: string): string[] {
+  const out: string[] = []
+  // The answer is untrusted text: an unbalanced `{{{…` would rescan to the end from every start (O(n²)), so both
+  // the start positions and the characters scanned overall are bounded.
+  let starts = 0
+  let scanned = 0
+  for (let start = text.indexOf('{'); start >= 0 && out.length < 20 && starts++ < MAX_BRACE_STARTS && scanned < MAX_BRACE_SCAN; start = text.indexOf('{', start + 1)) {
+    let depth = 0
+    let q = false
+    for (let i = start; i < text.length && scanned++ < MAX_BRACE_SCAN; i++) {
+      const c = text[i]
+      if (q) { if (c === '\\') i++; else if (c === '"') q = false; continue }
+      if (c === '"') q = true
+      else if (c === '{') depth++
+      else if (c === '}' && --depth === 0) { out.push(text.slice(start, i + 1)); break }
+    }
+  }
+  return out
 }
 
 /** The CLI brief provider's stdin: `{ text, tier, maxChars, paths, model }`. */

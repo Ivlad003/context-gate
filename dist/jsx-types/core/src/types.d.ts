@@ -154,6 +154,8 @@ export interface GateCheckConfig {
     provider?: string;
     onlyNew?: boolean;
     baseline?: string;
+    /** A gate that cannot run (untrusted, not whitelisted, provider unavailable) blocks instead of passing (S6). */
+    failClosed?: boolean;
 }
 export interface ItemSourceConfig {
     kind: 'claude-skills' | 'claude-tools' | 'claude-agents' | 'cursor-mdc' | 'markdown-dir' | 'prompt-dir' | 'provider';
@@ -169,6 +171,8 @@ export interface ItemSourceConfig {
 }
 export interface GateConfig {
     $schema?: string;
+    /** gate.json format version (core CONFIG_VERSION); a newer one is reported (G317). */
+    version?: number;
     /** New unified format: name → kind-prefixed globs (`skill:react-*`, `tool:mcp__figma__*`). */
     groups?: Record<string, string[]>;
     /** Legacy (G310). */
@@ -230,6 +234,8 @@ export interface GateConfig {
         transform?: 'level1' | 'level2';
         /** SKILL.md body: `live` render line (default), pre-rendered `static` body, or `both` (Р6, G-26). */
         skillBody?: 'live' | 'static' | 'both';
+        /** Where `scope: volatile` sections go: the end of the system prompt (default) or the prompt's context (P1). */
+        volatile?: 'system' | 'context';
     };
     health?: Partial<Record<Code, number>>;
     debug?: boolean;
@@ -261,6 +267,8 @@ export interface Signals {
     model?: string;
     agentId?: string;
     ticketType?: string;
+    /** Ticket id (shiftwork `CONTEXT_GATE_TICKET`): journaled so `report` can match runner and adapter decisions. */
+    ticketId?: string;
     /** Classifier proposal. */
     classified?: {
         profile: string;
@@ -327,7 +335,7 @@ export interface DecisionLogEntry {
     enabled: string[];
     disabled: string[];
     reason: string[];
-    kind?: 'decision' | 'escalation-suggested' | 'gate-failed' | 'gate-attempt' | 'skill-render' | 'snapshot' | 'debug' | 'rule-delivered' | 'deny' | 'health';
+    kind?: 'decision' | 'escalation-suggested' | 'gate-failed' | 'gate-attempt' | 'skill-render' | 'snapshot' | 'debug' | 'rule-delivered' | 'deny' | 'health' | 'label';
     data?: Record<string, unknown>;
 }
 export type Scope = 'static' | 'profile' | 'volatile';
@@ -522,11 +530,13 @@ export interface RenderHost {
             args: Value[];
             kwargs?: Record<string, Value>;
         }[];
+        timeoutMs?: number;
     }): Promise<Value[]>;
     mcp?(req: {
         server: string;
         tool: string;
         args: Record<string, Value>;
+        timeoutMs?: number;
     }): Promise<Value>;
     /** Cache and data store (data.*). */
     cacheGet?(key: string): Promise<{

@@ -20,6 +20,8 @@ function utf8(s: string): number[] {
       const d = s.charCodeAt(i + 1)
       if (d >= 0xdc00 && d <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00); i++ }
     }
+    // A lone surrogate is encoded as U+FFFD, as Node's Buffer/createHash do.
+    if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd
     if (c < 0x80) out.push(c)
     else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
     else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))

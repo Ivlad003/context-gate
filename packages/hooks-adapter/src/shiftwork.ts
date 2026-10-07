@@ -70,9 +70,12 @@ export interface TicketPlan {
   appendSystemPrompt: string
   /** Skill directories to symlink into the shift's `--plugin-dir <tmp>/skills/` (skills outside the repo). */
   pluginDirSymlinks: string[]
-  /** For `claude -p --settings '<json>'`: listing overrides for repo/user skills the shift must not see. */
-  settings: { skillOverrides: Record<string, 'name-only' | 'user-invocable-only' | 'off'> }
-  /** Env for the shift so the hooks adapter / mod make the same decision. */
+  /** For `claude -p --settings '<json>'`: listing overrides for repo/user skills the shift must not see, and an
+   * explicit `on` for the skills it may use (settings merge key by key: a stale install-time key must not win). */
+  settings: { skillOverrides: Record<string, 'on' | 'name-only' | 'user-invocable-only' | 'off'> }
+  /** Env for the shift so the hooks adapter / mod make the same decision: profile, ticket type, model, the
+   * ticket's `Skills:` adjustments (`CONTEXT_GATE_ADD` / `CONTEXT_GATE_REMOVE`) and `CONTEXT_GATE_PRELOAD=system`
+   * when `appendSystemPrompt` already carries the preload. */
   env: Record<string, string>
   /** MCP tools gated off (the hooks adapter denies them when installed). */
   mcpOff: string[]
@@ -124,12 +127,17 @@ export function planForTicket(config: GateConfig, input: TicketPlanInput, now = 
     const p = skillItems.get(name)?.provenance.path
     if (p) pluginDirSymlinks.push(/SKILL\.md$/i.test(p) ? dirOf(p) : p)
   }
-  const skillOverrides = skillOverridesFor(gate, { hard: true }) as TicketPlan['settings']['skillOverrides']
+  const skillOverrides: TicketPlan['settings']['skillOverrides'] = {}
+  for (const name of skills) if (skillItems.has(name)) skillOverrides[name] = 'on'
+  Object.assign(skillOverrides, skillOverridesFor(gate, { hard: true }))
 
   const env: Record<string, string> = {}
   if (gate.profile) env.CONTEXT_GATE_PROFILE = gate.profile
   if (input.ticketType) env.CONTEXT_GATE_TICKET_TYPE = input.ticketType.trim()
   if (model) env.CONTEXT_GATE_MODEL = model
+  if (adj.add.length) env.CONTEXT_GATE_ADD = adj.add.join(' ')
+  if (adj.remove.length) env.CONTEXT_GATE_REMOVE = adj.remove.join(' ')
+  if (bodies.length) env.CONTEXT_GATE_PRELOAD = 'system'
 
   return {
     profile: gate.profile,

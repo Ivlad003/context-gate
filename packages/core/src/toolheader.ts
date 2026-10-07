@@ -17,6 +17,38 @@ export interface ToolHeader {
 
 const COMMENT = /^\s*(?:#|\/\/|--|;)\s?(.*)$/
 const SHORTHAND = new Set(['string', 'number', 'integer', 'boolean', 'array', 'object', 'null'])
+/** Keys whose presence alone marks an object as a full JSON Schema. */
+const SCHEMA_ONLY = ['properties', 'items', 'enum', 'const', '$schema', '$ref', 'anyOf', 'oneOf', 'allOf']
+/** JSON Schema keywords (2020-12 plus OpenAPI's `nullable`); an unknown key next to a primitive `type` is a parameter. */
+const SCHEMA_KEYS = new Set([...SCHEMA_ONLY, 'type', 'required', 'description', 'title', 'default', 'examples', 'format', 'pattern',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'minItems', 'maxItems',
+  'uniqueItems', 'additionalProperties', 'nullable', 'deprecated', 'readOnly', 'writeOnly', 'patternProperties',
+  'propertyNames', 'minProperties', 'maxProperties', 'dependentRequired', 'dependentSchemas', 'dependencies', 'not', 'if',
+  'then', 'else', 'prefixItems', 'contains', 'minContains', 'maxContains', 'unevaluatedItems', 'unevaluatedProperties',
+  'additionalItems', 'contentEncoding', 'contentMediaType', 'contentSchema', 'definitions'])
+
+/** A shorthand type string: `string`, `string?`, `number[]` (an enum `a|b` is never read off a schema keyword). */
+function isTypeName(x: unknown): boolean {
+  return typeof x === 'string' && SHORTHAND.has(x.replace(/\?$/, '').replace(/(\[\])+$/, ''))
+}
+
+/**
+ * `{ "type": "string", "description": "Шлях" }` is a full schema; `{ "type": "string", "message": "string" }` is shorthand
+ * for two parameters, one of them named `type`. Full: a schema-only key with a schema value, or a primitive `type` with
+ * no other key that reads as a parameter. A parameter is a schema keyword whose value is a bare type name, or an
+ * unknown key holding a string, list or object (what shorthand accepts); `$`-prefixed keys and booleans or numbers
+ * (which shorthand maps to `{}`) are schema evidence, so `deprecated: true` or `$comment` keep the schema intact.
+ */
+function isFullSchema(o: Record<string, unknown>): boolean {
+  // Shorthand values are strings (`"items": "string[]"` is a parameter); schema values of these keys never are.
+  if (SCHEMA_ONLY.some((k) => Object.prototype.hasOwnProperty.call(o, k) && (typeof o[k] !== 'string' || k.startsWith('$')))) return true
+  if (typeof o.type !== 'string' || !SHORTHAND.has(o.type)) return false
+  return !Object.entries(o).some(([k, x]) => {
+    if (k === 'type' || k.startsWith('$')) return false
+    if (SCHEMA_KEYS.has(k)) return isTypeName(x)
+    return typeof x === 'string' || (typeof x === 'object' && x !== null)
+  })
+}
 
 function shorthandToSchema(v: unknown): Record<string, unknown> {
   if (typeof v === 'string') {
@@ -29,7 +61,7 @@ function shorthandToSchema(v: unknown): Record<string, unknown> {
   if (Array.isArray(v)) return { type: 'array', items: v.length ? shorthandToSchema(v[0]) : {} }
   if (v && typeof v === 'object') {
     const o = v as Record<string, unknown>
-    if (typeof o.type === 'string' && (o.properties || o.items || SHORTHAND.has(o.type))) return o
+    if (isFullSchema(o)) return o
     const properties: Record<string, unknown> = {}
     const required: string[] = []
     for (const [k, x] of Object.entries(o)) {

@@ -61,7 +61,7 @@ hooks/
 
 **`classic.SessionStart`** (no matcher). `const r = await next(e)`.
 
-- `e.source === 'clear'` → `resetConversationState($)`. `'compact'` → set `manual.recheck` when `config.classify.recheckOn` includes `compact`.
+- `e.source === 'clear'`, `'resume'` or `'fork'` → `resetConversationState($)`. `'compact'` → set `manual.recheck` when `config.classify.recheckOn` includes `compact`.
 - Always return `{ ...r, watchPaths: [...(r.watchPaths ?? []), ...watchList] }`. `watchList` holds absolute paths: `.claude/gate.json`, each `.cursor/rules/*.mdc` that exists, the `.claude/prompt/*.prompt.tsx` files, and the `scripts/**` files the config names. PROBE item 5 decides whether a directory entry works.
 
 **`session.end`** with matcher `{ reason: 'clear' }` → `resetConversationState($)`, then `next(e)`. The chain shares a 1.5 s bound, so keep it to state writes only.
@@ -73,7 +73,7 @@ hooks/
 **`command.run`** with matcher `{ command: 'gate' }`. `cmd = gatecmd.ts parseGateCommand(e.args)` dispatches as follows:
 
 - status (no args) → `{ text: formatStatus }`, built from `decide.ts statusLine(gate, { ctxPct })` plus the on/off lists.
-- `<profile>` / `+g` / `-g` / `off` / `auto` → `update(manual, …)`, then `recompute($, 'manual')` (see below), then `{ text }`.
+- `<profile>` / `+g` / `-g` / `off` / `auto` → `update(manual, …)`, then `recompute($, 'manual')` (see below), then `{ text }`. In shadow mode `+g`/`-g` alone only edit the proposal (the reply says «shadow: групи записано в пропозицію…»); a profile, `off`, `apply` or mode `auto` applies the gate. `profile <name>` reaches a profile named like a subcommand. `why <item>` explains one item's decision.
 - `new` → `manual.recheck = true`.
 - `shadow` / `apply` → `manual.mode`.
 - `why` → `$.ui.open({ id: 'gate-why', title: 'gate why' })`, then `{ text: formatWhy(log, 50) }`. `why off` → `$.ui.close({ id: 'gate-why' })`.
@@ -157,7 +157,7 @@ const r = await $.model.complete({ model: config.classify.model ?? 'haiku', maxT
 const parsed = r.isAnswered ? parseClassify(r.text, profiles) : undefined   // fallback: $.model.classify(text, labels) → confidence = minConfidence - 0.01
 ```
 
-Then `recompute($, 'prompt')`, which increments `gateState.turn`. When `brief` is on and the tier is in `config.brief.tiers`, and the brief cache for this task is missing, a brief is generated through `$.model.complete({ model: config.brief.model ?? 'opus', … })` → `brief`. This step is optional, sits behind `options.brief`, and runs in the background with the result injected on the next prompt.
+Then `recompute($, 'prompt')`, which increments `gateState.turn`; every other trigger (`/gate`, model change, gate.json reload) recomputes with core `advance: false`, so neither the turn nor the hysteresis moves. In shadow mode the classifier and the brief wait at most 1.5 s: a late classifier answer lands as its own decision (trigger `classify`), a late brief is injected into the next prompt. When `brief` is on and the tier is in `config.brief.tiers`, and the brief cache for this task is missing, a brief is generated through `$.model.complete({ model: config.brief.model ?? 'opus', … })` → `brief`. This step is optional, sits behind `options.brief`, and runs in the background with the result injected on the next prompt.
 
 **`turn.step`** (no matcher, an observer). It **must** be an async generator:
 
@@ -222,7 +222,7 @@ Markdown prompts (`.claude/prompt/*.md`) need no build: `mddsl.ts parseMarkdownP
 - `run` → trusted plus `options.allowScripts` plus the executor binary on the user whitelist → `$.process.run(argv, { cwd: root, stdin, timeoutMs })`. A rejection maps to `{ exitCode: -1, stdout: '', stderr: String(err), ms }`.
 - `call` → the language shim through `run`.
 - `mcp` → `$.mcp.call(server, tool, args)` (trusted only) → `structuredContent ?? text of content`.
-- `cacheGet` / `cacheSet` → `$.store` under `cache:<repoKey>:<key>`. Mind the 4 MiB total: entries carry an LRU of `at` values.
+- `cacheGet` / `cacheSet` → `$.store` under `cache:<repoKey>:<key>`. Mind the 4 MiB total: a `cache-index` key tracks the size and time of every entry, bounded to ~1.5 MB (oldest written first out, FIFO by write time) and 64 KB per entry; trust and data keys are never evicted.
 - `itemBody` → layer 1 rules plus the skill bodies from `$.fs.read('.claude/skills/<n>/SKILL.md')`.
 - `now` → a value captured once per dispatch from `await $.clock.now()`, because the interface is synchronous.
 - `trusted` → `trust.decision === 'trusted'`.
@@ -237,7 +237,7 @@ Untrusted runs render as `unverified` stubs inside the core.
 
 1. `key = repo.root + '|' + (repo.remote ?? '')`.
 2. `options.trustBuild === 'always'` → trusted; `'never'` → denied.
-3. Otherwise read the stored `$.store.get('trust:'+key)`. When `commandsHash` matches `hash(config commands)`, take its decision.
+3. Otherwise read the stored `$.store.get('trust:'+key)`. When its hash matches sha256(`commandsHash` ⊕ `surfaceHash`), take its decision. `commandsHash` covers every provider kind; `surfaceHash` covers the executable files of the prompt dir (TS/TSX/JS/py/sh, `scripts/`, `lib/`, Markdown with `@run`/`@call`/`@mcp`, compiled run nodes) and module provider files. A change under a decision taken this session asks again on the next prompt. The CLI still hashes only the config, so the two hashes differ.
 4. Otherwise, when interactive (`session.start` `e.isInteractive`, kept in the module), ask with `await $.ui.ask('Зібрати промпти й дозволити скрипти з цього репозиторію?', ['Так, довіряю', 'Ні'])`. Compare the answer to the labels exactly. A rejection (dismissed, or `-p`) counts as "unknown for now" and is not stored.
 5. Store the answer and update `trust`.
 

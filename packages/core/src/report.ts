@@ -20,9 +20,15 @@ export function entryTokens(e: DecisionLogEntry): number {
   return num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens) + num(u.output_tokens)
 }
 
-/** A verification attempt: a Verify run (runner), a command gate, or a failed test/lint Bash call (mod). */
-function attemptOf(e: DecisionLogEntry): 'passed' | 'failed' | undefined {
-  if (e.kind === 'gate-failed') return 'failed'
+/** A verification attempt: a Verify run (runner), a command gate, or a failed test/lint Bash call (mod).
+ * A command gate is counted from its `gate-attempt` entries (`pass` and `block`); its `gate-failed` twin is
+ * then skipped (`attemptGates`: gates that have `gate-attempt` entries), so a block counts once. */
+function attemptOf(e: DecisionLogEntry, attemptGates: ReadonlySet<string>): 'passed' | 'failed' | undefined {
+  if ((e.kind as string) === 'gate-attempt') {
+    const o = e.data?.outcome
+    return o === 'pass' ? 'passed' : o === 'block' ? 'failed' : undefined
+  }
+  if (e.kind === 'gate-failed') return attemptGates.has(gateName(e)) ? undefined : 'failed'
   if (e.trigger === 'verify' && e.data?.gate === 'verify') return e.data?.passed === true ? 'passed' : 'failed'
   if (e.kind === 'debug' && e.trigger === 'verify-failed') return 'failed'
   return undefined
@@ -34,10 +40,11 @@ function attemptOf(e: DecisionLogEntry): 'passed' | 'failed' | undefined {
  */
 export function tierCosts(entries: readonly DecisionLogEntry[]): TaskCost[] {
   const tasks = new Map<string, Map<string, TierCost & { turnSet: Set<number> }>>()
+  const attemptGates = new Set(entries.filter((e) => (e.kind as string) === 'gate-attempt').map(gateName))
   for (const e of entries) {
     const tier = e.tier || '?'
     const task = String(e.data?.ticket ?? e.data?.ticketId ?? 'сесія')
-    const att = attemptOf(e)
+    const att = attemptOf(e, attemptGates)
     const tokens = entryTokens(e)
     if (!att && !tokens && e.kind !== 'decision') continue
     const byTier = tasks.get(task) ?? new Map()
@@ -56,6 +63,11 @@ export function tierCosts(entries: readonly DecisionLogEntry[]): TaskCost[] {
   return out
 }
 
+/** The gate an entry belongs to: `data.gate`, else the trigger (`read-before-write`). */
+function gateName(e: DecisionLogEntry): string {
+  return typeof e.data?.gate === 'string' ? e.data.gate : String(e.trigger)
+}
+
 /** `| задача | tier | спроб | невдалих | токенів |` for `/gate why` and `report`. */
 export function formatTierCosts(costs: readonly TaskCost[]): string {
   if (!costs.length) return 'Спроб перевірки за tier ще не було.'
@@ -68,10 +80,11 @@ export function formatTierCosts(costs: readonly TaskCost[]): string {
 
 export interface DenySuggestion { profile: string; kind: Item['kind']; name: string; count: number; group?: string; text: string }
 
-/** `mcp__postgres__query` / `tool:mcp__postgres__query` / `skill:x` → kind + name. */
-function deniedItem(e: DecisionLogEntry): { kind: Item['kind']; name: string } | undefined {
+/** `mcp__postgres__query` / `tool:mcp__postgres__query` / `skill:x` (the mod's `data.skill`) → kind + name.
+ * Shared by `report` and the pipeline's `observe` counts. */
+export function deniedItem(e: DecisionLogEntry): { kind: Item['kind']; name: string } | undefined {
   const d = e.data ?? {}
-  const raw = typeof d.tool === 'string' ? d.tool : typeof d.skill === 'string' ? `skill:${d.skill}` : typeof d.id === 'string' ? d.id : undefined
+  const raw = typeof d.tool === 'string' ? d.tool : typeof d.skill === 'string' ? `skill:${d.skill}` : typeof d.id === 'string' ? d.id : typeof d.name === 'string' ? d.name : undefined
   if (!raw) return undefined
   const m = /^(skill|tool|agent|rule):(.+)$/.exec(raw)
   if (m) return { kind: m[1] as Item['kind'], name: m[2]! }
@@ -86,7 +99,9 @@ export function denySuggestions(entries: readonly DecisionLogEntry[], config: Ga
   const counts = new Map<string, { profile: string; kind: Item['kind']; name: string; count: number }>()
   let profile: string | undefined
   for (const e of entries) {
-    if (!e.kind || e.kind === 'decision') { if (e.profile) profile = e.profile; continue }
+    // Every decision resets the running profile: after one with no profile (tier only, `/gate auto`), later
+    // denies belong to no profile and are not attributed to a stale one.
+    if (!e.kind || e.kind === 'decision') { if (e.trigger !== 'verify') profile = e.profile; continue }
     if (e.kind !== 'deny' || e.trigger === 'strictWrite' || e.data?.shadow === true) continue
     const it = deniedItem(e)
     const p = e.profile ?? profile
@@ -146,6 +161,66 @@ export function compareRunnerMod(entries: readonly DecisionLogEntry[]): TicketCo
     out.push({ ticket, ...(r.ticketType ? { ticketType: r.ticketType } : {}), ...(r.profile ? { runner: r.profile } : {}), ...(mod ? { mod } : {}), agree: (r.profile ?? '') === (mod ?? '') })
   }
   return out
+}
+
+// ───────────────────────── shadow agreement (MVP exit criterion, M2) ─────────────────────────
+
+export interface ShadowAgreement {
+  /** Decisions that carry a proposal (`data.proposed`, the shadow classifier/`when` result). */
+  proposed: number
+  /** Proposals with a reference: a `label` entry or a later manual choice (`/gate <p>`, `[gate:p]`) in that turn
+   * window, or the profile a `classify` or `manual` decision itself committed. */
+  labeled: number
+  matched: number
+  differed: number
+  /** Proposals nobody confirmed or corrected: not counted in the agreement. */
+  unlabeled: number
+  /** matched / labeled, 0…1; undefined while nothing is labeled. */
+  rate?: number
+}
+
+const partsOf = (p: unknown): string[] => (typeof p === 'string' && p ? p.split('+') : [])
+
+/**
+ * Agreement of shadow proposals with the profile the user actually wanted (SPEC: MVP exit ≥ 80 %). Shadow
+ * decisions carry no `profile`, so the reference is, in order: a `label` entry after the proposal and before
+ * the next proposal (`data.profile` the correct profile, or `data.correct: true|false`), a `manual` decision
+ * in that window (the user overrode or confirmed it), else the decision's own `profile` when the classifier set it or
+ * the user did (trigger `classify` / `manual`; a `when`/sticky profile is not a verdict on the proposal). A
+ * proposal with no reference is `unlabeled`, never a mismatch.
+ */
+export function shadowAgreement(entries: readonly DecisionLogEntry[]): ShadowAgreement {
+  const r: ShadowAgreement = { proposed: 0, labeled: 0, matched: 0, differed: 0, unlabeled: 0 }
+  const isDecision = (e: DecisionLogEntry) => (!e.kind || e.kind === 'decision') && e.trigger !== 'verify'
+  const proposalOf = (e: DecisionLogEntry): string | undefined => {
+    const p = (e.data?.proposed as { profile?: unknown } | undefined)?.profile
+    return isDecision(e) && typeof p === 'string' && p ? p : undefined
+  }
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!
+    const proposal = proposalOf(e)
+    if (!proposal) continue
+    r.proposed++
+    let verdict: boolean | undefined
+    for (let j = i + 1; j < entries.length && verdict === undefined; j++) {
+      const x = entries[j]!
+      if (proposalOf(x)) break
+      if ((x.kind as string) === 'label') {
+        const d = x.data ?? {}
+        if (typeof d.correct === 'boolean') verdict = d.correct
+        else if (typeof d.profile === 'string') verdict = partsOf(d.profile).includes(proposal)
+      } else if (isDecision(x) && x.trigger === 'manual' && x.profile) verdict = partsOf(x.profile).includes(proposal)
+    }
+    // The decision's own profile is a reference when the classifier applied it or the user chose it (`manual`); a
+    // `when` or sticky profile next to a shadow proposal was not influenced by it and says nothing about it (M2).
+    if (verdict === undefined && (e.trigger === 'classify' || e.trigger === 'manual') && e.profile && e.data?.shadow !== true) verdict = partsOf(e.profile).includes(proposal)
+    if (verdict === undefined) { r.unlabeled++; continue }
+    r.labeled++
+    if (verdict) r.matched++
+    else r.differed++
+  }
+  if (r.labeled) r.rate = r.matched / r.labeled
+  return r
 }
 
 // ───────────────────────── skill-prompt renders (G-28) ─────────────────────────

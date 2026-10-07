@@ -4,8 +4,8 @@
 `systemPromptOptions.skills`; `permissions.skill` and `prompt({ skills })` in V2. SPEC-COVERAGE G-52.
 
 Both adapters read the same `.claude/gate.json` and rule sources as the mod, the hooks adapter and shiftwork.
-They decide with the same core `decideGate` and journal to the same `.claude/gate.log.jsonl`. Each entry carries
-`data.adapter: "pi"` or `"opencode"`.
+They decide with the same core `decideGate` and journal to the same `.claude/gate.log.jsonl` (only when gate.json has
+`"log": { "file": true }`, as the other writers). Each entry carries `data.adapter: "pi"` or `"opencode"`.
 
 ## Layout
 
@@ -22,20 +22,23 @@ They decide with the same core `decideGate` and journal to the same `.claude/gat
 | gate feature | pi | opencode (V2) |
 | --- | --- | --- |
 | turn decision | `before_agent_start`, using `ctx.model` (`provider/id`, the provider is stripped) | `session` hook `prompt`; re-decided in `context` when `model.id` changes |
-| `[gate:x]` / `[gate:off]` / `[gate:auto]` / `[gate:new]` | `input` → `{ action: "transform" }` strips it | `prompt` hook edits `prompt.text` |
+| `[gate:x]` / `[gate:off]` / `[gate:auto]` / `[gate:new]` | `input` → `{ action: "transform" }` strips it; a profile gate.json does not declare is ignored with `G502` (`ctx.ui.notify`) | `prompt` hook edits `prompt.text`; an undeclared profile is ignored (`G502`) |
 | Always rules + status line | `systemPromptOptions.sections["context-gate"]` | `context` hook: `system.push(text)` |
-| tier preload | inlined in the same section (`<!-- Preloaded skill: <path> -->`) | `prompt.skills.push({ id })` once per context. A preload the first prompt missed (model not known yet) is inlined in `system` until the next prompt attaches it |
+| tier preload (only for the applied gate: not in shadow, not with the gate off; skipped with `CONTEXT_GATE_PRELOAD=system`) | inlined in the same section (`<!-- Preloaded skill: <path> -->`) | `prompt.skills.push({ id })` once per context. A preload the first prompt missed (model not known yet) is inlined in `system` until the next prompt attaches it |
 | skills selection | `systemPromptOptions.skills` filtered: `off` removed, `nameOnly` kept (pi has no name-only mode) | `permission` hook `evaluate`: `action: "skill"` with a gated-off resource → `effect: "deny"` with the deny text. `skillPermissionRules(gate)` gives the same as `{ action: "skill", resource, effect: "deny" }` rules for `session.create({ permissions })` |
 | MCP / tool deny | `tool_call` → `{ block: true, reason }` for `mcp__<server>__<tool>` outside the profile | `context` hook deletes those tools from `tools`; `evaluate` denies their action |
 | Auto Attached (glob) rules | `tool_result` of `read` / `edit` / `write` → rule text appended to `content`, once per context | `tool` hook `execute.after` of `read` / `edit` / `write` → appended to `result.content` (string or parts) |
+| `.mdc` delivery | a full `read` of the `.mdc` or a prompt mention; an edit or write is no delivery | same |
+| child sessions | — | a new session inherits the parent's (event `parentID`, else the most recently active session's) manual override, committed gate state, model and gate; `seen` and preload are not copied |
 | `@file` mentions | `when.paths` signal; their Auto rules go in a hidden custom message (`display: false`) | `when.paths` signal; their Auto rules are appended to the prompt text |
 | dedup reset | `session_compact`; `session_start` with `new` (full reset), `resume` or `fork` | `session` hook `compaction` (preload is re-attached too) |
 | shadow (`classify.mode: "shadow"`, no profile) | decision journaled with `shadow: true`; nothing filtered or blocked; rules delivered | same |
 | journal | `decision` (on change), `rule-delivered`, `deny` | same |
 
-Deny texts point to `[gate:<group>]` at the start of the prompt instead of `/gate +<group>`, since there is no mod
-command here. Env works as in the hooks adapter: `CONTEXT_GATE_PROFILE` (applied), `CONTEXT_GATE_MODE=auto|shadow`,
-`CONTEXT_GATE_OFF=1`, `CONTEXT_GATE_TICKET_TYPE`, `CONTEXT_GATE_MODEL`. So the `env` of shiftwork's `planForTicket`
+Deny texts point to `[gate:<profile>]` (a declared profile that contains the enabling group, else `[gate:off]`) at the
+start of the prompt instead of `/gate +<group>`, since there is no mod command here. Env works as in the hooks adapter: `CONTEXT_GATE_PROFILE` (applied), `CONTEXT_GATE_MODE=auto|shadow`,
+`CONTEXT_GATE_OFF=1`, `CONTEXT_GATE_TICKET_TYPE`, `CONTEXT_GATE_MODEL`, `CONTEXT_GATE_ADD` / `CONTEXT_GATE_REMOVE`
+(applied on top of the profile; their presence counts as applied) and `CONTEXT_GATE_PRELOAD=system`. So the `env` of shiftwork's `planForTicket`
 makes a pi or OpenCode shift decide like a `claude -p` shift.
 
 ## Rule sources
@@ -96,7 +99,9 @@ Points to verify before calling it supported:
 2. The element type of `system`: the built-ins push `rc.make(text)`, probably a branded string. The adapter pushes a
    plain string.
 3. MCP tool naming and its permission `action`: `canonicalToolName` maps `<server>_<tool>` / `<server>.<tool>` for
-   servers listed under `mcp` in `opencode.json` (root, `.opencode/`, `~/.config/opencode/`).
+   servers listed under `mcp` in `opencode.json` (root, `.opencode/`, `~/.config/opencode/`). `opencode.jsonc` is
+   parsed as JSONC (comments, trailing commas); an unparsable config is journaled once as `debug` and its MCP servers
+   are not gated.
 4. That skill ids equal the `SKILL.md` names the gate uses.
 5. `ctx.permission.rules({ sessionID, permissions })` is not called. `skillPermissionRules` is exported for a runner
    that creates sessions.

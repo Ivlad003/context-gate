@@ -7,7 +7,7 @@
 //   tool_result        → Auto Attached rules for `read` / `edit` / `write` paths appended to the result content
 //   session_start / session_compact → dedup reset
 
-import type { DecisionLogEntry, Item } from '../../core/src/types.ts'
+import type { DecisionLogEntry, GateConfig, Item } from '../../core/src/types.ts'
 import { makeItem } from '../../core/src/items.ts'
 import type { GateData, GateSession } from '../common/session.ts'
 import { applyFlag, decideTurn, filterSkills, mentionedFiles, resetSession, rulesForFiles, rulesForFile, systemParts, systemText, toolDeny, toolPath } from '../common/session.ts'
@@ -39,9 +39,11 @@ export function piModelRef(ctx: Pick<PiContext, 'model'>): string | undefined {
   return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined
 }
 
-/** `input`: apply and strip a leading `[gate:x]`. Returns the transformed text, or undefined to continue unchanged. */
-export function onInput(s: GateSession, text: string): string | undefined {
-  const f = applyFlag(s, text)
+/** `input`: apply and strip a leading `[gate:x]`. Returns the transformed text, or undefined to continue unchanged.
+ * With `cfg`, an undeclared profile is stripped but ignored (G502), and `notify` gets the notice. */
+export function onInput(s: GateSession, text: string, cfg?: GateConfig, notify?: (message: string) => void): string | undefined {
+  const f = applyFlag(s, text, cfg)
+  if (f.ignored) notify?.(f.ignored)
   return f.flag ? f.text : undefined
 }
 
@@ -52,7 +54,7 @@ export function onInput(s: GateSession, text: string): string | undefined {
 export function onBeforeAgentStart(data: GateData, s: GateSession, event: PiBeforeAgentStartEvent, ctx: Pick<PiContext, 'model'>, now: number, readBody?: (path: string) => string | undefined): Step<PiBeforeAgentStartResult> {
   const opts = event.systemPromptOptions
   const skills = opts.skills ?? []
-  const pre = applyFlag(s, event.prompt ?? '')
+  const pre = applyFlag(s, event.prompt ?? '', data.config)
   const files = mentionedFiles(data, s, pre.text)
   const pathItems = skillItems(skills)
   const sessionData: GateData = { ...data, items: mergeItems(pathItems, data.items) }

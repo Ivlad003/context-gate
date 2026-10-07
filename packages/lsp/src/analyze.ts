@@ -12,6 +12,12 @@ import type { CtxModel, Shape } from './model.ts'
 
 type TSModule = typeof TS
 
+/** Expression props that hold a list (array or object of expressions); other props take one string. */
+const LIST_PROPS = new Set(['Table.cells', 'Call.args', 'Call.kwargs', 'Debug.exprs'])
+
+/** String props the renderer never interpolates (`{{ }}` there is literal text). */
+const NO_TEMPLATE = new Set(['Include.text', 'Include.description', 'Include.path', 'Lazy.path', 'Use.path'])
+
 /** Props whose string value is a whole expression, per component. */
 export const EXPR_PROPS: Record<string, string[]> = {
   Section: ['when'],
@@ -39,8 +45,10 @@ export interface ExprSite {
   /** From a `{{ }}` placeholder rather than a whole-expression prop. */
   template: boolean
   section?: string
-  /** Value offset → file offset (escapes in string literals). */
+  /** Value offset → file offset (escapes in string literals, JSX entities, CRLF in template literals). */
   map?: number[]
+  /** An unclosed `{{`: literal text for the core, so only completion and hover use it. */
+  unclosed?: boolean
 }
 
 export interface SectionInfo { id: string; scope?: string; start: number; end: number; idStart: number; idEnd: number; line: number }
@@ -57,7 +65,14 @@ export interface IncludeInfo {
   section?: string
 }
 
-export interface BindingFact { name: string; kind: 'item' | 'index' | 'value' | 'ns' | 'number'; of?: string; shape?: Shape }
+export interface BindingFact {
+  name: string
+  kind: 'item' | 'index' | 'value' | 'ns' | 'number'
+  of?: string
+  shape?: Shape
+  /** File range where the binding is visible (an `Each` body, a function); file-wide without it. */
+  scope?: { start: number; end: number }
+}
 
 export interface FileFacts {
   sites: ExprSite[]
@@ -105,30 +120,62 @@ function attrString(ts: TSModule, el: TS.JsxOpeningLikeElement, name: string): s
   return s?.text
 }
 
-/** Offset map value index → file offset for a string literal (handles simple `\x` escapes). */
-function literalMap(text: string, node: TS.Node, sf: TS.SourceFile): { base: number; map?: number[] } {
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }
+
+/**
+ * The value of a string literal as the build sees it, with a map value index → file offset (one entry per value
+ * char plus the end). JSX attribute strings have no escapes but decode HTML entities; JS strings and template
+ * literals decode escapes, and a template literal's CRLF (or lone CR) is one `\n` (TS `.text` is cooked).
+ */
+export function literalValue(ts: TSModule, text: string, node: TS.StringLiteral | TS.NoSubstitutionTemplateLiteral, sf: TS.SourceFile): { value: string; map: number[] } {
   const start = node.getStart(sf) + 1
-  const raw = text.slice(start, node.end - 1)
-  if (!raw.includes('\\')) return { base: start }
+  const end = node.end - 1
+  let value = ''
   const map: number[] = []
-  for (let i = 0; i < raw.length; i++) {
-    map.push(start + i)
-    if (raw[i] === '\\') {
+  const push = (s: string, at: number): void => { value += s; for (let k = 0; k < s.length; k++) map.push(at) }
+  if (node.parent && ts.isJsxAttribute(node.parent)) {
+    for (let i = start; i < end;) {
+      const m = text[i] === '&' ? /^&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/.exec(text.slice(i, Math.min(end, i + 12))) : null
+      const e = m?.[1]
+      const code = e?.[0] === '#' ? (e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)) : undefined
+      const decoded = !e ? undefined : code !== undefined ? (Number.isFinite(code) && code <= 0x10ffff ? String.fromCodePoint(code) : undefined) : ENTITIES[e]
+      if (m && decoded !== undefined) { push(decoded, i); i += m[0].length; continue }
+      push(text[i]!, i)
       i++
-      if (raw[i] === 'u' && raw[i + 1] === '{') { const j = raw.indexOf('}', i); if (j > 0) i = j }
-      else if (raw[i] === 'u') i += 4
-      else if (raw[i] === 'x') i += 2
     }
+    map.push(end)
+    return { value, map }
   }
-  map.push(start + raw.length)
-  return { base: start, map }
+  const simple: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v' }
+  for (let i = start; i < end;) {
+    const c = text[i]!
+    if (c === '\r') { push('\n', i); i += text[i + 1] === '\n' ? 2 : 1; continue }
+    if (c !== '\\') { push(c, i); i++; continue }
+    const e = text[i + 1] ?? ''
+    // Line continuation: no value char.
+    if (e === '\r' || e === '\n' || e === '\u2028' || e === '\u2029') { i += e === '\r' && text[i + 2] === '\n' ? 3 : 2; continue }
+    if (e in simple) { push(simple[e]!, i); i += 2; continue }
+    if (e === '0' && !/[0-9]/.test(text[i + 2] ?? '')) { push('\0', i); i += 2; continue }
+    if (e === 'x' && /^[0-9a-fA-F]{2}$/.test(text.slice(i + 2, i + 4))) { push(String.fromCharCode(parseInt(text.slice(i + 2, i + 4), 16)), i); i += 4; continue }
+    if (e === 'u') {
+      const b = /^\{([0-9a-fA-F]{1,6})\}/.exec(text.slice(i + 2, i + 10))
+      if (b) { push(String.fromCodePoint(Math.min(0x10ffff, parseInt(b[1]!, 16))), i); i += 2 + b[0].length; continue }
+      if (/^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6))) { push(String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16)), i); i += 6; continue }
+    }
+    // `\"`, `\\`, `\/`, …: the next char stands for itself.
+    push(e, i)
+    i += 2
+  }
+  map.push(end)
+  return { value, map }
 }
 
-function makeSite(lit: TS.StringLiteral | TS.NoSubstitutionTemplateLiteral, text: string, sf: TS.SourceFile, valueStart: number, valueEnd: number, rest: Omit<ExprSite, 'start' | 'end' | 'text' | 'map'>): ExprSite {
-  const { base, map } = literalMap(text, lit, sf)
-  const at = (i: number): number => (map ? map[Math.min(i, map.length - 1)]! : base + i)
-  const site: ExprSite = { ...rest, start: at(valueStart), end: at(valueEnd), text: lit.text.slice(valueStart, valueEnd) }
-  if (map) site.map = map.slice(valueStart, valueEnd + 1).map((x) => x)
+function makeSite(lv: { value: string; map: number[] }, valueStart: number, valueEnd: number, rest: Omit<ExprSite, 'start' | 'end' | 'text' | 'map'>): ExprSite {
+  const at = (i: number): number => lv.map[Math.min(i, lv.map.length - 1)]!
+  const site: ExprSite = { ...rest, start: at(valueStart), end: at(valueEnd), text: lv.value.slice(valueStart, valueEnd) }
+  // Only a literal whose value is not a plain copy of its source needs the offset map.
+  const map = lv.map.slice(valueStart, valueEnd + 1)
+  if (map.some((x, i) => x !== site.start + i)) site.map = map
   return site
 }
 
@@ -150,6 +197,11 @@ export function placeholderRanges(s: string): [number, number][] {
     i = close + 2
   }
   return out
+}
+
+/** Whether the placeholder range ending at `end` (from `placeholderRanges`) has no closing `}}`: literal text for the core. */
+export function isUnclosed(s: string, end: number): boolean {
+  return !s.slice(end).trimStart().startsWith('}}')
 }
 
 function skillArgShapes(ts: TSModule, init: TS.Node | undefined): Record<string, Shape> | undefined {
@@ -183,23 +235,27 @@ export function scanTsx(ts: TSModule, fileName: string, text: string): FileFacts
   const facts: FileFacts = { sites: [], sections: [], includes: [], bindings: [], uncachedStaticRuns: [] }
   const claimed = new Set<TS.Node>()
   const sectionStack: { id: string; scope?: string }[] = []
+  let rawDepth = 0
 
-  const exprLiterals = (init: TS.Node | undefined): (TS.StringLiteral | TS.NoSubstitutionTemplateLiteral)[] => {
+  /** String literals of a prop; arrays and objects only for props that hold expression lists (`list`). */
+  const exprLiterals = (init: TS.Node | undefined, list = true): (TS.StringLiteral | TS.NoSubstitutionTemplateLiteral)[] => {
     if (!init) return []
     const s = stringLit(ts, init)
     if (s) return [s]
     const e = ts.isJsxExpression(init) ? init.expression : init
-    if (!e) return []
+    if (!e || !list) return []
     if (ts.isArrayLiteralExpression(e)) return e.elements.flatMap((x) => exprLiterals(x))
     if (ts.isObjectLiteralExpression(e)) return e.properties.flatMap((p) => (ts.isPropertyAssignment(p) ? exprLiterals(p.initializer) : []))
     return []
   }
 
   const addTemplates = (lit: TS.StringLiteral | TS.NoSubstitutionTemplateLiteral, component: string, prop: string): void => {
-    if (!lit.text.includes('{{')) return
     claimed.add(lit)
+    if (!lit.getText(sf).includes('{') && !lit.getText(sf).includes('&#')) return
+    const lv = literalValue(ts, text, lit, sf)
+    if (!lv.value.includes('{{')) return
     const section = sectionStack[sectionStack.length - 1]?.id
-    for (const [a, b] of placeholderRanges(lit.text)) facts.sites.push(makeSite(lit, text, sf, a, b, { component, prop, template: true, ...(section ? { section } : {}) }))
+    for (const [a, b] of placeholderRanges(lv.value)) facts.sites.push(makeSite(lv, a, b, { component, prop, template: true, ...(section ? { section } : {}), ...(isUnclosed(lv.value, b) ? { unclosed: true } : {}) }))
   }
 
   const visitOpening = (el: TS.JsxOpeningLikeElement, whole: TS.Node): void => {
@@ -210,10 +266,15 @@ export function scanTsx(ts: TSModule, fileName: string, text: string): FileFacts
       if (!ts.isJsxAttribute(p)) continue
       const prop = p.name.getText()
       if (exprProps.includes(prop)) {
-        for (const lit of exprLiterals(p.initializer)) {
+        // `Each of={['a', 'b']}` is build-time data, not a list of expressions.
+        for (const lit of exprLiterals(p.initializer, LIST_PROPS.has(`${name}.${prop}`))) {
           claimed.add(lit)
-          facts.sites.push(makeSite(lit, text, sf, 0, lit.text.length, { component: name, prop, template: false, ...(section ? { section } : {}) }))
+          const lv = literalValue(ts, text, lit, sf)
+          facts.sites.push(makeSite(lv, 0, lv.value.length, { component: name, prop, template: false, ...(section ? { section } : {}) }))
         }
+      } else if (NO_TEMPLATE.has(`${name}.${prop}`) || /^[a-z]/.test(name) || name === 'Run') {
+        // Never interpolated at render: Include text/description, intrinsic attributes, Run props.
+        for (const lit of exprLiterals(p.initializer)) claimed.add(lit)
       } else {
         // Mcp args, Fence title, Log message, …: only `{{ }}` placeholders are expressions.
         for (const lit of exprLiterals(p.initializer)) addTemplates(lit, name, prop)
@@ -234,9 +295,11 @@ export function scanTsx(ts: TSModule, fileName: string, text: string): FileFacts
           }
         }
         const itemName = as ?? (fnParams[0] || 'it')
-        facts.bindings.push({ name: itemName, kind: 'item', ...(of !== undefined ? { of } : {}) })
+        // The item is visible in the body only, so two loops may reuse a name with different shapes.
+        const scope = { start: el.getEnd(), end: whole.getEnd() }
+        facts.bindings.push({ name: itemName, kind: 'item', ...(of !== undefined ? { of } : {}), scope })
         const idx = index ?? fnParams[1]
-        if (idx) facts.bindings.push({ name: idx, kind: 'index' })
+        if (idx) facts.bindings.push({ name: idx, kind: 'index', scope })
         break
       }
       case 'Let': case 'Set': case 'Store': {
@@ -267,7 +330,7 @@ export function scanTsx(ts: TSModule, fileName: string, text: string): FileFacts
         if (n) facts.bindings.push({ name: n, kind: 'ns' })
         break
       }
-      case 'Repeat': facts.bindings.push({ name: 'i', kind: 'number' }); break
+      case 'Repeat': facts.bindings.push({ name: 'i', kind: 'number', scope: { start: el.getEnd(), end: whole.getEnd() } }); break
       case 'Table': facts.bindings.push({ name: 'row', kind: 'item', ...(attrString(ts, el, 'rows') !== undefined ? { of: attrString(ts, el, 'rows')! } : {}) }); break
       case 'Include': case 'Skill': case 'Rule': {
         const m = attr(ts, el, 'mode')
@@ -308,17 +371,26 @@ export function scanTsx(ts: TSModule, fileName: string, text: string): FileFacts
         }
       }
       visitOpening(opening, node)
+      // `<Run>` code and `<Lazy>` descriptions are never interpolated: `{{ .State }}` there is not an expression.
+      const raw = name === 'Run' || name === 'Lazy'
+      if (raw) rawDepth++
       ts.forEachChild(node, (c) => visit(c, true))
+      if (raw) rawDepth--
       if (pushed) sectionStack.pop()
       return
     }
-    if (inJsx && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && !claimed.has(node)) {
+    if (inJsx && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && !claimed.has(node) && !rawDepth) {
       const parent = node.parent
       const component = parent && ts.isJsxAttribute(parent) ? 'attr' : 'text'
       addTemplates(node, component, component === 'attr' ? (parent as TS.JsxAttribute).name.getText() : 'children')
     }
     if (inJsx && (ts.isArrowFunction(node) || ts.isFunctionExpression(node))) {
-      for (const p of node.parameters) if (ts.isIdentifier(p.name) && !facts.bindings.some((b) => b.name === (p.name as TS.Identifier).text)) facts.bindings.push({ name: p.name.text, kind: 'value' })
+      const scope = { start: node.getStart(sf), end: node.getEnd() }
+      for (const p of node.parameters) {
+        if (!ts.isIdentifier(p.name)) continue
+        const pname = p.name.text
+        if (!facts.bindings.some((b) => b.name === pname && (!b.scope || (b.scope.start <= scope.start && scope.end <= b.scope.end)))) facts.bindings.push({ name: pname, kind: 'value', scope })
+      }
     }
     ts.forEachChild(node, (c) => visit(c, inJsx || ts.isJsxFragment(node)))
   }
@@ -327,13 +399,19 @@ export function scanTsx(ts: TSModule, fileName: string, text: string): FileFacts
   return facts
 }
 
-/** Bindings map for the expression checker, refining `Each` items from their `of` shapes. */
-export function bindingsFor(facts: FileFacts, model: CtxModel): Bindings {
+/**
+ * Bindings map for the expression checker, refining `Each` items from their `of` shapes. With `pos`, only the
+ * bindings visible there count (scoped ones whose range holds it; the innermost, scanned last, wins).
+ */
+export function bindingsFor(facts: FileFacts, model: CtxModel, pos?: number): Bindings {
   const m: Bindings = new Map()
   const ANY: Shape = { k: 'any' }
-  for (const b of facts.bindings) m.set(b.name, b.shape ?? (b.kind === 'number' || b.kind === 'index' ? { k: 'prim', t: 'number' } : ANY))
+  const visible = facts.bindings.filter((b) => !b.scope || pos === undefined || (pos >= b.scope.start && pos <= b.scope.end))
+  // File-wide bindings first, so a scoped one (a loop item) overrides the same name.
+  const ordered = [...visible.filter((b) => !b.scope), ...visible.filter((b) => b.scope)]
+  for (const b of ordered) m.set(b.name, b.shape ?? (b.kind === 'number' || b.kind === 'index' ? { k: 'prim', t: 'number' } : ANY))
   const modelWithArgs = facts.skillArgs ? { ...model, roots: { ...model.roots, args: { k: 'object', props: facts.skillArgs, doc: 'аргументи skill' } as Shape } } : model
-  for (const b of facts.bindings) {
+  for (const b of ordered) {
     if (b.of === undefined) continue
     const s = inferShape(b.of, modelWithArgs, m)
     if (b.kind === 'item') m.set(b.name, s.k === 'array' ? s.item : ANY)
@@ -363,10 +441,10 @@ const LIVE_CODES = /^G1(0\d|5[47]|63|7\d)$/
 export function analyzeFile(ts: TSModule, fileName: string, text: string, model: CtxModel, compiled?: { diagnostics?: Diagnostic[]; relPath?: string }): FileDiag[] {
   const facts = scanTsx(ts, fileName, text)
   const fm = fileModel(facts, model)
-  const bound = bindingsFor(facts, model)
   const out: FileDiag[] = []
   for (const site of facts.sites) {
-    for (const d of checkExpr(site.text, fm, bound)) {
+    if (site.unclosed) continue
+    for (const d of checkExpr(site.text, fm, bindingsFor(facts, model, site.start))) {
       const start = toFile(site, d.start)
       const end = toFile(site, Math.max(d.end, d.start))
       out.push({ start, length: Math.max(1, end - start), code: d.code, severity: d.severity, message: `${d.message}`, ...(d.hint ? { hint: d.hint } : {}) })
@@ -375,17 +453,40 @@ export function analyzeFile(ts: TSModule, fileName: string, text: string, model:
   for (const r of facts.uncachedStaticRuns) {
     out.push({ start: r.start, length: Math.max(1, r.end - r.start), code: 'G163', severity: 'error', message: `<Run> без cache у static-секції "${r.section}": static рендериться один раз і має бути стабільною.`, hint: 'додай cache="1h" або перенеси в scope="volatile"' })
   }
-  if (compiled?.diagnostics) out.push(...compiledDiagnostics(compiled.diagnostics, text, compiled.relPath))
+  if (compiled?.diagnostics) {
+    const lineOf = lineIndex(text)
+    const scanned = new Set<number>()
+    for (const site of facts.sites) for (let l = lineOf(site.start); l <= lineOf(site.end); l++) scanned.add(l)
+    out.push(...compiledDiagnostics(compiled.diagnostics, text, compiled.relPath, { diagnostics: out, lines: scanned }))
+  }
   return out
 }
 
-/** Map `.compiled/<id>.json` diagnostics of this file onto line ranges. */
-export function compiledDiagnostics(diags: Diagnostic[], text: string, relPath?: string): FileDiag[] {
+/** 1-based line of a file offset. */
+function lineIndex(text: string): (off: number) => number {
   const lineStarts = [0]
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') lineStarts.push(i + 1)
+  return (off: number): number => {
+    let lo = 0, hi = lineStarts.length - 1
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid]! <= off) lo = mid; else hi = mid - 1 }
+    return lo + 1
+  }
+}
+
+/**
+ * Map `.compiled/<id>.json` diagnostics of this file onto line ranges. A compiled copy of a code the live analysis
+ * computes is dropped only when the live scan covers its line (a scanned expression there, or the same live code):
+ * the scan sees string literals only, so a build error elsewhere (a component, an `e` template) must still show.
+ * Without `live`, all such copies are dropped.
+ */
+export function compiledDiagnostics(diags: Diagnostic[], text: string, relPath?: string, live?: { diagnostics: FileDiag[]; lines: Set<number> }): FileDiag[] {
+  const lineStarts = [0]
+  for (let i = 0; i < text.length; i++) if (text[i] === '\n') lineStarts.push(i + 1)
+  const lineOf = lineIndex(text)
+  const liveAt = new Set((live?.diagnostics ?? []).map((d) => `${d.code}@${lineOf(d.start)}`))
   const out: FileDiag[] = []
   for (const d of diags) {
-    if (LIVE_CODES.test(d.code)) continue
+    if (LIVE_CODES.test(d.code) && (live === undefined || d.line === undefined || live.lines.has(d.line) || liveAt.has(`${d.code}@${d.line}`))) continue
     if (relPath && d.path && !(d.path === relPath || d.path.endsWith('/' + relPath) || relPath.endsWith('/' + d.path) || relPath.endsWith(d.path))) continue
     const line = Math.min(Math.max(1, d.line ?? 1), lineStarts.length)
     const start = lineStarts[line - 1]!
@@ -409,7 +510,7 @@ export function completeAt(ts: TSModule, fileName: string, text: string, pos: nu
   const facts = scanTsx(ts, fileName, text)
   const site = siteAt(facts, pos)
   if (!site) return undefined
-  const r = completeExpr(site.text, toLocal(site, pos), fileModel(facts, model), bindingsFor(facts, model))
+  const r = completeExpr(site.text, toLocal(site, pos), fileModel(facts, model), bindingsFor(facts, model, site.start))
   return { ...r, start: toFile(site, r.start), end: toFile(site, r.end), site }
 }
 
@@ -420,7 +521,7 @@ export function hoverAt(ts: TSModule, fileName: string, text: string, pos: numbe
   const facts = scanTsx(ts, fileName, text)
   const site = siteAt(facts, pos)
   if (!site) return undefined
-  const h = hoverExpr(site.text, toLocal(site, pos), fileModel(facts, model), bindingsFor(facts, model))
+  const h = hoverExpr(site.text, toLocal(site, pos), fileModel(facts, model), bindingsFor(facts, model, site.start))
   if (!h) return undefined
   const res: FileHover = { ...h, start: toFile(site, h.start), end: toFile(site, h.end), site }
   if (site.section) {
@@ -449,7 +550,7 @@ export type Refactor =
 
 /** CLI command for "згенерувати quick-варіант" (proposal written by `expand`, never applied silently). */
 export function quickVariantCommand(sectionId: string): string[] {
-  return ['context-gate', 'expand', '--only', sectionId]
+  return ['context-gate', 'expand', '--only', sectionId, '--tiers', 'quick']
 }
 
 export function sectionAt(facts: FileFacts, pos: number): SectionInfo | undefined {

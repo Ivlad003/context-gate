@@ -54,6 +54,7 @@ export async function sessionStart(io: Io, rt: Runtime, e: { isInteractive: bool
   rt.interactive = e.isInteractive
   rt.surface = e.surface
   rt.ready = false
+  rt.boot = undefined
   await registerCommands(io)
   await ensureSession(io, rt)
   try {
@@ -69,11 +70,15 @@ export async function sessionStart(io: Io, rt: Runtime, e: { isInteractive: bool
   }
 }
 
-/** classic.SessionStart, after `next`: /clear reset, compaction recheck, and the FileChanged watch list. */
+/** A conversation other than the one this runtime has followed: `/clear`, `/resume` (the process goes on under another
+ *  session id) and a fork. Reads, dedup, turn and budget state of the old one must not carry over (M17). */
+const NEW_CONVERSATION = new Set(['clear', 'resume', 'fork'])
+
+/** classic.SessionStart, after `next`: /clear, /resume and fork reset, compaction recheck, and the FileChanged watch list. */
 export async function classicSessionStart(io: Io, rt: Runtime, source: string): Promise<string[]> {
   try {
     await ensureSession(io, rt)
-    if (source === 'clear') await resetConversation(io, rt, 'clear')
+    if (NEW_CONVERSATION.has(source)) await resetConversation(io, rt, source)
     if (source === 'compact' && recheckOn(rt, 'compact')) {
       await io.update('manual', (m) => json({ ...m, recheck: true }))
       rt.recheckReason = 'compact'
@@ -86,7 +91,7 @@ export async function classicSessionStart(io: Io, rt: Runtime, source: string): 
 }
 
 export async function sessionEnd(io: Io, rt: Runtime, reason: string): Promise<void> {
-  if (reason === 'clear') await resetConversation(io, rt, 'clear')
+  if (reason === 'clear' || reason === 'resume') await resetConversation(io, rt, reason)
   await flushJournal(io, rt)
 }
 
@@ -96,7 +101,15 @@ export async function compactInstructions(io: Io, rt: Runtime, instructions: str
   return [instructions, await keepText(io)].filter(Boolean).join('\n\n')
 }
 
-/** session.compact, after `next`: reclassify on the next prompt when recheckOn has `compact`. */
+/** session.compact of a subagent's transcript, after `next`: the main loop was not compacted (no recheck, the static
+ *  cache stays, M26); only that agent's delivered rules are forgotten, so they reach it again. */
+export async function compactAgentAfter(io: Io, rt: Runtime, agentId: string): Promise<void> {
+  await io.update('seen', (s) => s.filter((k) => !k.startsWith(`${agentId}:`)))
+  await journal(io, rt, { kind: 'debug', trigger: 'compact', data: { agentId } })
+}
+
+/** session.compact, after `next` (a real compaction of the main conversation): reclassify on the next prompt when
+ *  recheckOn has `compact`. */
 export async function compactAfter(io: Io, rt: Runtime): Promise<void> {
   if (recheckOn(rt, 'compact')) {
     await io.update('manual', (m) => json({ ...m, recheck: true }))

@@ -37,7 +37,8 @@ export function parseArgv(argv: readonly string[], spec: Record<string, FlagSpec
       if (!loose) { out.errors.push(`невідомий прапорець --${key}`); continue }
       const next = argv[i + 1]
       if (inline !== undefined) out.flags[key] = inline
-      else if (next !== undefined && !next.startsWith('--')) { out.flags[key] = next; i++ }
+      // A target (`prompt://x`) is never an unknown flag's value.
+      else if (next !== undefined && !next.startsWith('--') && !/^prompt:\/\//.test(next)) { out.flags[key] = next; i++ }
       else out.flags[key] = true
       continue
     }

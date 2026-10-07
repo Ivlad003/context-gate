@@ -207,7 +207,7 @@ package split.
 ### Prompts as skills
 
 75. `<Prompt as="skill" name description args invoke tiers>` (`components.ts Prompt`).
-76. SKILL.md gets `name`, `description`, `argument-hint` from the schema, and `disable-model-invocation` for `invoke.model: false`. Its body is the `` !`node … run <name> --args "$ARGUMENTS" --ctx-from live` `` line (`build.ts renderSkillMd`).
+76. SKILL.md gets `name`, `description`, `argument-hint` from the schema, and `disable-model-invocation` for `invoke.model: false`. Its body is the live line from `build.ts skillCommand`: `node "$CLAUDE_PLUGIN_ROOT/dist/cli.js"` when the plugin is loaded, else `npx --no-install context-gate`, then `run <name> --args '$ARGUMENTS' --ctx-from live` with `$ARGUMENTS` single-quoted so the shell expands nothing in arguments without a `'` (M29/M30; open residual: a `'` in the arguments ends the quote and the rest runs as shell code, a prompt-injection path for model-invoked skills where the line runs without the mod). `build` refuses to overwrite a hand-written SKILL.md without `--force`, and removes orphaned `.compiled` files and generated SKILL.md of removed prompts (M32/M33).
 77. The mod renders on `skill.prompt` with args from `tool.call {Skill}`, `command.run` or the text (PROBE #6; `dsl.ts skillPrompt`, `captureSkillArgs`).
 78. One argument parser for `/name`, the CLI and `$ARGUMENTS`: positional, `--k v`, `--k=v`, flags, quotes, `--` rest, and the types string, number, enum, flag, path, list, json and rest (`core/argparse.ts`).
 79. A parse error renders the `usage` section with Ukrainian text (`argparse.ts usageLine`; verified on `run release-notes --args "--format bad"`).
@@ -230,12 +230,12 @@ package split.
 
 ### Language limits, variables, loops
 
-93. A total AST with a step limit of 10 000 per section → G155 (`render.ts:605`).
+93. A total AST with a step limit of 10 000 per section → G155 (`render.ts Interp.run`). Values are capped too (2^20 cells, depth 256, strings 2^26 chars; `expr.ts own/chargeValue`), walking a value is charged per 64 cells, and any runtime error fails only its section with G155. `~`/`grep` run on a linear-time regex engine (`expr.ts regexTest`), also used for `when.branch` and `claude-tools` `match`.
 94. The pipe-filter whitelist: take, sort, grep, map (template), join, truncate, fence, unique, where, len, plus round and ago (`expr.ts FILTERS:33`).
 95. `@fn` with no recursion → G151 (`mddsl.ts`).
 96. Provider calls only at the head of a chain → G154 (`expr.ts`).
 97. Codes G151, G152, G154, G155, G157, G159 and G160 are emitted.
-98. `@let`/`@set` are section-scoped, and `store`/`data.*` cross sections.
+98. `@let`/`@set` are section-scoped (`@let` binds in the section or @fn call frame, visible after the block that declares it), and `store`/`data.*` cross sections.
 99. Arithmetic, min/max/abs/round/floor/ceil, comparisons, `&& || !`, `?:`, string `+`, `len`, `in`, `~`, `??`, `.at()`. Division by zero → null (`expr.ts`).
 100. `@repeat n` ≤ 1000 with `i`, and `@break`/`@continue` in each and repeat (`render.ts:726`, G152).
 101. State across sessions via `@store` → `data.*` (CLI files and the cache; the mod `$.store`).
@@ -302,8 +302,8 @@ package split.
 
 142. Provider kinds `cli`, `file` (JSON, Markdown, `pick`), `mcp` (mod only; the CLI marks it unverified, G205) and `module` (builtin `git`, `fs`). `functions` with `{id}` placeholders, `cache`, `onError` (`cli/context.ts`, `host.ts providerData`).
 143. Reserved names `git`, `fs`, `cursor`, `gate`, `ctx`, `session`.
-144. Gates: `run` with `{changedPaths}`, `pass` as an expression over `exitCode`/`stdout`/`result`, a `message` template, `onlyNew` and `baseline`. A failure gives `{deny}`; a pass leaves no trace (`gates.ts runCommandGate`).
-145. `when.expr` over providers (`decide.ts:56`, `skill-gate.ts evalWhen`).
+144. Gates: `run` with `{changedPaths}`, `pass` as an expression over `exitCode`/`stdout`/`result`, a `message` template, `onlyNew` and `baseline` (captured before the session's first edit, compared by position-free keys), `failClosed`. Command `write` gates run after the edit lands and report a failure as tool-result context; only builtin read-before-write denies pre-edit. A pass leaves no trace (`gates.ts runCommandGate`).
+145. `when.expr` over providers (`decide.ts:56`, `skill-gate.ts evalWhen`); the mod fills git/session/tier/provider data for it.
 146. Statuses ok, fail and unverified, with `◌ N` in the status line.
 147. `explain`, `fmt [--check]` and proposals (`expand`, `schema infer`).
 
@@ -341,7 +341,7 @@ package split.
 168. 8: the deny text and `/gate +backend`.
 169. 9: `sync` fallback, and the layer turns off on `.claude/rules/cursor`.
 170. 10: `expand` → proposals with a `source-hash` guard.
-171. 11: `when.ticketType` in the mod and the hooks adapter, plus shiftwork `planForTicket`. 12: `bench --before --after` (tokens, unverified).
+171. 11: `when.ticketType` in the mod (via the `CONTEXT_GATE_TICKET_TYPE` env port in `hooks/register.ts`) and the hooks adapter, plus shiftwork `planForTicket`. 12: `bench --before --after` (tokens, unverified).
 
 ### Run modes
 
@@ -392,6 +392,20 @@ All are DONE:
 - Stage 7a: index, LSP, VS Code, browser editor, and the four provider kinds.
 - Stage 8: marketplace, validate and the README (G-60).
 - Checklist "Що перевірити": items 1, 2, 5 and 6 resolved via the d.ts; 2, 5 and 8 confirmed live, 3, 4, 6 (subagents) and 7 are interactive-only (G-62, docs/PROBE.md).
+
+## Review 2026-10-06: behaviour changes
+
+The fixes of the 2026-10-06 bug review changed documented behaviour in these places (details in SPEC, MOD-ADAPTER, HOOKS-ADAPTER, ADAPTERS and SHIFTWORK):
+
+- **Language.** Value size limits and linear-time regex (G155, G107 on every render that uses a bad pattern), nesting over 200 levels → G101. Dashed members only directly under `data` (`data.api-endpoints`); elsewhere `a.b-1` is subtraction. Strings decode `\uXXXX`, `\u{…}`, `\xHH`, `\b`, `\f`, `\v`, `\0`. `sort` keeps missing keys last and ties stable in both directions; `fence` sizes the fence to its content.
+- **Render.** `@run` cache key covers args, loop items and @let values; one 2 s budget for run/call/providers/mcp with `timeoutMs` passed to hosts; pending data never runs branches or calls with null; `store` never overwrites with a stub; exact-only number parsing of stdout (also the bash shim); `data.<key>.fetchedAt/stale` are non-enumerable; secrets are masked structurally (trace JSON stays valid); compiled `uses` bind only their own prompt; lazy tool names get a `_<hash6>` suffix on collision.
+- **Markdown DSL.** `\{{` is a literal `{{`; CommonMark fences; output fences longer than any backtick run; budget truncation closes an open fence; quoted `@include` paths; `parseMarkdownPrompt({ tiers })` treats `a.b.md` as a variant only for a configured tier (CLI expand, editor, LSP pass the tiers).
+- **Health.** H002 without usage = share of the unchanged prefix; H003 = changed content in tokens.
+- **Decide.** `advance`, `modelAttrs`, `nocase` options; group negation is `off`; `[gate:off|auto|new]` via `promptFlagAction`; new codes G016, G314–G317; `version` in gate.json; Bedrock/ARN/gateway model ids; path-like `argv[0]` only from system bin dirs or exact whitelist entries; `report` shadow agreement over labeled proposals only (`label` journal kind).
+- **Mod.** Shadow `/gate +g/-g` edit the proposal; only user prompts are turns; trust bound to sha256 of commands and executable prompt files; journal appends by re-reading and rotates into `.claude/gate.log.1.jsonl`; the debug log is re-read before every write; `$.store` cache bounded (~1.5 MB, oldest first); `/resume` and fork reset per-conversation state; `prompt.volatile: "context"`; `/gate why <item>`; Auto Attached rules are not gated by the profile; ungrouped MCP tools stay on; the mod loads only the compiled ids `prompt.lock.json` lists; rule ids under a custom cursor-mdc dir are the path below it, and a duplicate id is skipped (G001 warning).
+- **CLI.** Live SKILL.md line (`skillCommand`), `build --force`, orphan pruning, lock-driven loading, atomic writes; `sync` rebuilds or reports H013, writes nothing in shadow without `--profile/--tier`, refuses an unparsable settings file (G301); root discovery stops at the nearest `.git`/`gate.json`; symlink containment (`safeJoin`); process groups and `--no-optional-locks` git; providers in parallel under a 12 s deadline; `--trust-repo` ignored on `pull_request_target`; `report --since` and `observe --since` reject unitless numbers.
+- **Adapters.** Preload only for the applied gate; read-before-write needs `builtin: true`; `[gate:x]` with an undeclared profile → G502; session-state lock and 3-way merge; SubagentStart rules; opt-in PostModelSwitch; fork seeding; `CONTEXT_GATE_ADD/REMOVE/PRELOAD`; pi/opencode journal only with `log.file`.
+- **Tooling.** New build-time G160 cases (JS methods on Each items, refs inside `<Run>`, object Mcp args, non-finite numbers); default CLI `npx --no context-gate`; editor `--no-cdn`, pinned CodeMirror, CRLF kept, cross-site requests rejected.
 
 ## N/A
 

@@ -6,7 +6,7 @@ import * as vscode from 'vscode'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { buildRunArgs, previewOptions, renderPreviewHtml, runCli, sectionIdAt, type PreviewState, type RunView } from './preview.ts'
+import { buildRunArgs, invalidRunState, previewOptions, renderPreviewHtml, runCli, sectionIdAt, SAFE_ID, type PreviewState, type RunView } from './preview.ts'
 import { resolveCli, shellLine, buildTargetFor, readLock, type CliCommand } from './compiler-core.ts'
 import { Compiler, execCli, needsEditorTypes, type RootInfo } from './compiler.ts'
 import { registerDslProviders } from './providers.ts'
@@ -63,7 +63,8 @@ async function configureTsPlugin(): Promise<void> {
   if (!ext) return
   await ext.activate()
   const api = (ext.exports as { getAPI?: (v: number) => { configurePlugin(id: string, cfg: unknown): void } } | undefined)?.getAPI?.(0)
-  const cmd = cliFor(activeRoot())
+  // Untrusted workspace: never hand the repo's node_modules/.bin/context-gate to the tsserver plugin.
+  const cmd = cliFor(vscode.workspace.isTrusted ? activeRoot() : undefined)
   // The extension publishes fresh build diagnostics itself (compiler.ts); the plugin keeps the live ones.
   api?.configurePlugin(PLUGIN, { cliPath: cmd.argv, cliEnv: cmd.env, compiledDiagnostics: false })
 }
@@ -114,7 +115,8 @@ class PreviewPanel {
     this.dryScripts = dryScripts
     this.render()
     const cmd = cliFor(this.root)
-    this.view = await runCli([...cmd.argv, ...buildRunArgs(this.state, { dryScripts })], this.root, 60_000, cmd.env)
+    const invalid = invalidRunState(this.state)
+    this.view = invalid ? { text: '', sections: [], trace: [], diagnostics: [], error: invalid } : await runCli([...cmd.argv, ...buildRunArgs(this.state, { dryScripts })], this.root, 60_000, cmd.env)
     this.busy = false
     this.render()
   }
@@ -132,6 +134,8 @@ async function previewCommand(): Promise<void> {
   const file = editor.document.uri.fsPath
   const root = findRoot(file)
   if (!root) { void vscode.window.showWarningMessage('context-gate: не знайдено .claude/ у батьківських каталогах'); return }
+  // Preview runs the CLI, which builds (executes) the repo's TSX: not in an untrusted workspace.
+  if (!vscode.workspace.isTrusted) { void vscode.window.showWarningMessage('context-gate: preview вимкнено в недовіреному workspace'); return }
   const section = sectionIdAt(editor.document.getText(), editor.document.offsetAt(editor.selection.active), file)
     ?? await vscode.window.showInputBox({ prompt: 'id секції' })
   if (!section) return
@@ -147,10 +151,13 @@ function quickVariantCommand(section?: string): void {
   const root = file ? findRoot(file) : undefined
   const id = section ?? (editor && file ? sectionIdAt(editor.document.getText(), editor.document.offsetAt(editor.selection.active), file) : undefined)
   if (!root || !id) return
+  if (!vscode.workspace.isTrusted) { void vscode.window.showWarningMessage('context-gate: quick-варіант вимкнено в недовіреному workspace'); return }
+  // The id comes from the file and goes into a shell line.
+  if (!SAFE_ID.test(id)) { void vscode.window.showWarningMessage(`context-gate: невірний id секції «${id}»`); return }
   const cmd = cliFor(root)
   const term = vscode.window.createTerminal({ name: 'context-gate expand', cwd: root, env: cmd.env })
   term.show()
-  term.sendText(shellLine(cmd, ['expand', '--only', id]))
+  term.sendText(shellLine(cmd, ['expand', '--only', id, '--tiers', 'quick']))
 }
 
 async function buildCommand(full: boolean): Promise<void> {
@@ -221,7 +228,7 @@ export function activate(context: vscode.ExtensionContext): { compiler: Compiler
       const rel = relative(p.root, doc.uri.fsPath).split(/[\\/]/)
       if (rel[0] === '.claude' || rel[0] === 'scripts') void p.refresh(true)
     }),
-    vscode.workspace.onDidGrantWorkspaceTrust(() => { void ensureEditorTypes() }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => { void ensureEditorTypes(); void configureTsPlugin() }),
     vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration('contextGate.cliPath')) void configureTsPlugin() }),
     vscode.languages.registerCodeActionsProvider({ pattern: '**/.claude/prompt/**/*.{tsx,md}' }, {
       provideCodeActions(document: vscode.TextDocument, range: vscode.Range) {

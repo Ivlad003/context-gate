@@ -3,7 +3,7 @@
 
 import type { Diagnostic, GateConfig, Item, ItemSourceConfig, MdcRule, RuleType, Value } from './types.ts'
 import { diag } from './codes.ts'
-import { matchAny, splitTopLevel } from './glob.ts'
+import { globError, isRepoRelative, matchAny, splitTopLevel } from './glob.ts'
 import { evalSource, newBudget, splitTemplate, toText } from './expr.ts'
 
 export interface ParseMdcOptions {
@@ -39,29 +39,34 @@ function stripComment(v: string): string {
   return v
 }
 
-/** `globs` value: comma string (commas inside `{}` don't split), inline array, or quoted string. */
+/** Split on commas outside quotes and braces. */
+function splitGlobItems(inner: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let q: string | undefined
+  let depth = 0
+  for (const c of inner) {
+    if (q) { cur += c; if (c === q) q = undefined; continue }
+    if (c === '"' || c === "'") { q = c; cur += c; continue }
+    if (c === '{') depth++
+    if (c === '}') depth = Math.max(0, depth - 1)
+    if (c === ',' && depth === 0) { out.push(cur); cur = ''; continue }
+    cur += c
+  }
+  out.push(cur)
+  return out
+}
+
+/** `globs` value: comma string (commas inside `{}` don't split), inline array, or quoted string(s):
+ * `"src/**\/*.ts", "test/**\/*.ts"` is two globs, not one string with stray quotes. */
 export function parseGlobList(value: string): string[] {
   const v = value.trim()
   if (!v) return []
-  if (v.startsWith('[') && v.endsWith(']')) {
-    const inner = v.slice(1, -1)
-    // split on commas outside quotes and braces
-    const out: string[] = []
-    let cur = ''
-    let q: string | undefined
-    let depth = 0
-    for (const c of inner) {
-      if (q) { cur += c; if (c === q) q = undefined; continue }
-      if (c === '"' || c === "'") { q = c; cur += c; continue }
-      if (c === '{') depth++
-      if (c === '}') depth = Math.max(0, depth - 1)
-      if (c === ',' && depth === 0) { out.push(cur); cur = ''; continue }
-      cur += c
-    }
-    out.push(cur)
-    return out.map(unquote)
-  }
-  return splitTopLevel(unquote(v)).map((s) => unquote(s))
+  if (v.startsWith('[') && v.endsWith(']')) return splitGlobItems(v.slice(1, -1)).map(unquote)
+  const items = splitGlobItems(v)
+  // One quoted string holding a comma list (`"src/**, !src/gen/**"`) is still split.
+  if (items.length === 1) return splitTopLevel(unquote(v)).map((s) => unquote(s))
+  return items.map((s) => unquote(s))
 }
 
 function prefixGlob(glob: string, dirPrefix: string): string {
@@ -101,8 +106,11 @@ export function expandFileRefs(body: string): { body: string; fileRefs: string[]
   return { body: lines.join('\n'), fileRefs: [...new Set(refs)] }
 }
 
+/** A repo path, not an npm scope (`@types/node`, `@angular/core`): `./` or `../`, a trailing `/`, or an
+ * extension on the last segment. */
 function looksLikeFile(s: string): boolean {
-  return /[/.]/.test(s) && !s.includes('@') && /[A-Za-z0-9]/.test(s)
+  if (s.includes('@') || !/[A-Za-z0-9]/.test(s)) return false
+  return /^\.\.?\//.test(s) || s.endsWith('/') || /\.[A-Za-z0-9]+$/.test(s.split('/').pop() ?? '')
 }
 
 export function classifyRule(r: { alwaysApply: boolean; globs: string[]; negGlobs: string[]; description?: string }): RuleType {
@@ -116,7 +124,7 @@ export function parseMdc(text: string, opts: ParseMdcOptions): { rule: MdcRule; 
   const diagnostics: Diagnostic[] = []
   const src = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n')
   const prefix = normPrefix(opts.dirPrefix)
-  const id = prefix && !opts.id.startsWith(prefix) ? prefix + opts.id : opts.id
+  const id = prefix + opts.id
   let description: string | undefined
   let alwaysApply = false
   const rawGlobs: string[] = []
@@ -185,6 +193,9 @@ export function parseMdc(text: string, opts: ParseMdcOptions): { rule: MdcRule; 
     const p = neg ? g.slice(1).trim() : g
     if (!p) continue
     const full = prefix ? prefixGlob(p, prefix) : p
+    const bad = globError(full)
+    if (bad) { diagnostics.push(diag('G016', `Невірний glob ${g}: ${bad}. Його пропущено.`, { path: opts.path, severity: 'warning' })); continue }
+    if (/["']/.test(p)) diagnostics.push(diag('G016', `Glob ${g} містить лапки: перевір, чи список globs записано правильно`, { path: opts.path, severity: 'warning' }))
     ;(neg ? negGlobs : globs).push(full)
   }
   if (!globs.length && negGlobs.length) diagnostics.push(diag('G015', undefined, { path: opts.path }))
@@ -194,12 +205,17 @@ export function parseMdc(text: string, opts: ParseMdcOptions): { rule: MdcRule; 
   return { rule, diagnostics }
 }
 
-/** Rule id and dir prefix from a repo-relative `.mdc` path: `packages/api/.cursor/rules/db/x.mdc` → id `packages/api/db/x`, prefix `packages/api/`. */
-export function ruleIdFromPath(path: string): { id: string; dirPrefix: string } {
+/** Rule id and dir prefix from a repo-relative `.mdc` path: `packages/api/.cursor/rules/db/x.mdc` → id `packages/api/db/x`, prefix `packages/api/`.
+ * Under a custom `cursor-mdc` `dir` (pass the source dirs, `cursorRuleDirs(cfg).dirs`) the id is the path below
+ * that dir (`config/rules/api/x.mdc` → `api/x`), as for `markdown-dir`, so two `x.mdc` in different subdirs never
+ * share an id. Without `sourceDirs` it falls back to the file name. */
+export function ruleIdFromPath(path: string, sourceDirs: readonly string[] = []): { id: string; dirPrefix: string } {
   const p = path.replace(/\\/g, '/').replace(/^\.\//, '')
   const m = /^(.*?)\.cursor\/rules\/(.+?)\.mdc$/.exec(p)
-  if (!m) return { id: p.replace(/\.mdc$/, '').split('/').pop() ?? p, dirPrefix: '' }
-  return { id: m[2], dirPrefix: m[1] }
+  if (m) return { id: m[2], dirPrefix: m[1] }
+  const dir = sourceDirs.map(trimRuleDir).filter((d) => d && p.startsWith(d + '/')).sort((a, b) => b.length - a.length)[0]
+  if (dir) return { id: p.slice(dir.length + 1).replace(/\.mdc$/, ''), dirPrefix: '' }
+  return { id: p.replace(/\.mdc$/, '').split('/').pop() ?? p, dirPrefix: '' }
 }
 
 // ───────────────────────── Matching ─────────────────────────
@@ -215,6 +231,7 @@ export interface RuleMatchOptions {
  * (a leading `./` and backslashes are tolerated). Rule type is not checked; see `autoRulesFor`. */
 export function ruleMatches(rule: Pick<MdcRule, 'globs' | 'negGlobs'>, path: string, opts: RuleMatchOptions = {}): boolean {
   const p = path.replace(/\\/g, '/').replace(/^\.\//, '')
+  if (!isRepoRelative(p)) return false // a file outside the repo root never attaches a repo rule
   return matchAny(p, rule.globs, rule.negGlobs, { nocase: !!opts.nocase, matchBase: true })
 }
 
@@ -512,10 +529,12 @@ export function loadRuleSources(cfg: GateConfig, fs: RuleSourceFs, opts: { provi
   for (const path of [...new Set(mdc)].sort()) {
     const text = fs.read(path)
     if (text === undefined) continue
-    const { id, dirPrefix } = ruleIdFromPath(path)
+    const { id, dirPrefix } = ruleIdFromPath(path, dirs)
     const r = parseMdc(text, { path, id, dirPrefix })
-    rules.push(r.rule)
     diagnostics.push(...r.diagnostics)
+    const dup = rules.find((x) => x.id === r.rule.id)
+    if (dup) { diagnostics.push(diag('G001', `Правило ${r.rule.id}: id уже має ${dup.path}; ${path} пропущено`, { path, severity: 'warning' })); continue }
+    rules.push(r.rule)
   }
   const has = (id: string) => rules.some((x) => x.id === id)
   const md: { path: string; src: ItemSourceConfig }[] = []

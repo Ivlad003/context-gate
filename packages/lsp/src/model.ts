@@ -55,10 +55,11 @@ export function builtinRoots(profiles: string[] = [], tiers: string[] = []): Rec
     budgets: obj({ soft: num('softContextPct'), hard: num('hardContextPct') }, 'бюджети контексту'),
     args: obj({}, 'аргументи skill', true),
     data: obj({}, 'збережені дані (Store, store=)', true),
+    scripts: any('скрипти з <promptDir>/scripts: scripts.f(...) (Р5)'),
   }
 }
 
-export const BUILTIN_ROOT_NAMES = ['gate', 'git', 'fs', 'cursor', 'session', 'ctx', 'budgets', 'args', 'data'] as const
+export const BUILTIN_ROOT_NAMES = ['gate', 'git', 'fs', 'cursor', 'session', 'ctx', 'budgets', 'args', 'data', 'scripts'] as const
 
 /** JSON Schema → Shape (type, enum, const, anyOf/oneOf, object, array). */
 export function schemaToShape(schema: unknown, depth = 0): Shape {
@@ -91,9 +92,17 @@ export function schemaToShape(schema: unknown, depth = 0): Shape {
   }
 }
 
+/** Placeholders of the index sampler (core `sampleValue`): a cut object, an array length, a dropped content string. */
+const SAMPLE_OBJECT = '{…}'
+const SAMPLE_ARRAY = /^\[\d+\]$/
+const SAMPLE_CONTENT = /^string\(\d+\)$/
+
 /** Shape inferred from a sample value (index / trace snapshots). Objects stay open: a sample is not a schema. */
 export function valueToShape(v: unknown, depth = 0): Shape {
   if (v === null || v === undefined) return any()
+  if (v === SAMPLE_OBJECT) return any()
+  if (typeof v === 'string' && SAMPLE_ARRAY.test(v)) return arr(any())
+  if (typeof v === 'string' && SAMPLE_CONTENT.test(v)) return str()
   if (typeof v === 'string') return str()
   if (typeof v === 'number') return num()
   if (typeof v === 'boolean') return bool()
@@ -122,7 +131,8 @@ export interface GateIndex {
   vars?: Record<string, unknown>
   ctx?: Record<string, unknown>
   providers?: Record<string, { schema?: unknown; functions?: string[]; exposes?: string[]; description?: string } | unknown>
-  data?: Record<string, unknown>
+  /** `data.*` keys (core `GateIndex`), or samples by key (older indexes). */
+  data?: string[] | Record<string, unknown>
 }
 
 /** `.claude/prompt/.trace/last.json`: the last `context-gate run --json` (or `prompt.compose`) snapshot. */
@@ -209,7 +219,8 @@ export function buildModel(input: ModelInput = {}): CtxModel {
   // data.* keys from the index / trace (samples, open objects).
   const dataShape = roots.data as Extract<Shape, { k: 'object' }>
   const scope = traceScope(trace)
-  const dataSample = { ...(index.data ?? {}), ...(scope && typeof scope.data === 'object' && scope.data && !Array.isArray(scope.data) ? (scope.data as Record<string, Value>) : {}) }
+  const indexData: Record<string, unknown> = Array.isArray(index.data) ? Object.fromEntries(index.data.filter((k): k is string => typeof k === 'string').map((k) => [k, undefined])) : (index.data ?? {})
+  const dataSample = { ...indexData, ...(scope && typeof scope.data === 'object' && scope.data && !Array.isArray(scope.data) ? (scope.data as Record<string, Value>) : {}) }
   for (const [k, v] of Object.entries(dataSample)) dataShape.props[k] = valueToShape(v)
 
   // Index vars refine unknown providers with sample values (still open).
@@ -314,7 +325,8 @@ export function readDts(text: string, typeName?: string): { decls: Map<string, s
       for (; j < src.length; j++) {
         const c = src[j]!
         if ('{[(<'.includes(c)) d++
-        else if ('}])>'.includes(c)) d--
+        // `=>` of a function type is not a closing `>`.
+        else if ('}])>'.includes(c) && !(c === '>' && src[j - 1] === '=')) d = Math.max(0, d - 1)
         if (d > 0) continue
         if (c === ';') break
         if (c === '\n' && src.slice(i, j).trim() && !/[|&,:=<({[]\s*$/.test(src.slice(i, j)) && /^\s*(export\b|interface\b|type\b|declare\b|import\b|$)/.test(src.slice(j + 1))) break
@@ -355,7 +367,7 @@ function splitDepth(s: string, sep: string): string[] {
     if (q) { cur += c; if (c === q && s[i - 1] !== '\\') q = ''; continue }
     if (c === '"' || c === "'" || c === '`') { q = c; cur += c; continue }
     if ('{[(<'.includes(c)) d++
-    else if ('}])>'.includes(c)) d--
+    else if ('}])>'.includes(c) && !(c === '>' && s[i - 1] === '=')) d = Math.max(0, d - 1)
     if (d === 0 && c === sep) { out.push(cur); cur = ''; continue }
     cur += c
   }

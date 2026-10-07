@@ -2,7 +2,7 @@
 // `context-gate run --only <id> --json --dry-scripts`). No `vscode` import: tested with node:test.
 
 import { type PreviewState, type RunView } from '../../../packages/lsp/src/runcli.ts'
-export { buildRunArgs, cliArgv, parseRunOutput, runCli, type PreviewState, type RunView } from '../../../packages/lsp/src/runcli.ts'
+export { buildRunArgs, cliArgv, invalidRunState, parseRunOutput, runCli, SAFE_ID, type PreviewState, type RunView } from '../../../packages/lsp/src/runcli.ts'
 
 export interface PreviewOptions {
   tiers: string[]
@@ -44,8 +44,10 @@ const opt = (values: string[], cur: string | undefined, emptyLabel: string): str
 export function renderPreviewHtml(view: RunView | undefined, state: PreviewState, options: PreviewOptions, env: { nonce: string; cspSource: string; busy?: boolean; dryScripts?: boolean }): string {
   const sec = view?.sections.find((s) => s.id === state.section) ?? view?.sections[0]
   const tokens = sec?.tokens ?? (view ? Math.ceil(view.text.length / 4) : 0)
-  const diag = (view?.diagnostics ?? []).map((d) => `<li class="${d.severity}"><b>${escapeHtml(d.code)}</b> ${escapeHtml(d.message)}${d.line ? ` <a href="#" data-line="${d.line}">:${d.line}</a>` : ''}</li>`).join('')
-  const rows = (view?.trace ?? []).map((t) => `<tr${t.line ? ` data-line="${t.line}" class="link"` : ''}><td>${escapeHtml(t.section)}</td><td>${escapeHtml(t.kind)}</td><td>${escapeHtml(t.detail)}</td><td>${t.ms ?? ''}</td><td>${escapeHtml(t.source ?? '')}</td></tr>`).join('')
+  // Every field of the CLI's JSON is escaped, numbers included: the JSON is data, not trusted markup.
+  const e = (v: unknown): string => escapeHtml(String(v ?? ''))
+  const diag = (view?.diagnostics ?? []).map((d) => `<li class="${e(d.severity)}"><b>${e(d.code)}</b> ${e(d.message)}${d.line ? ` <a href="#" data-line="${e(d.line)}">:${e(d.line)}</a>` : ''}</li>`).join('')
+  const rows = (view?.trace ?? []).map((t) => `<tr${t.line ? ` data-line="${e(t.line)}" class="link"` : ''}><td>${e(t.section)}</td><td>${e(t.kind)}</td><td>${e(t.detail)}</td><td>${e(t.ms)}</td><td>${e(t.source)}</td></tr>`).join('')
   return `<!doctype html>
 <html lang="uk"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${env.cspSource} 'unsafe-inline'; script-src 'nonce-${env.nonce}';">

@@ -55,8 +55,8 @@ This prints JSON with absolute symlink paths and no `gate` field:
 | `preload` | skill names whose body is inlined | — |
 | `appendSystemPrompt` | preloaded bodies framed `<!-- Preloaded skill: <path> -->`, the same framing as `loadPreload` | append to the worker system prompt file (`--append-system-prompt-file`) |
 | `pluginDirSymlinks` | skill directories of `skills` | symlink into `<tmp>/plugin/skills/` and pass `--plugin-dir` (as `route.skills.paths` today). Only skills outside the worktree need this |
-| `settings.skillOverrides` | `nameOnly` → `name-only`, `off` → `off` | `claude -p --settings '<json>'`. This hides repo and user skills (`.claude/skills`, `~/.claude/skills`) that the plugin dir can't remove |
-| `env` | `CONTEXT_GATE_PROFILE`, `CONTEXT_GATE_TICKET_TYPE`, `CONTEXT_GATE_MODEL` | the shift's env, so the hooks adapter or the mod in that shift decides the same |
+| `settings.skillOverrides` | `nameOnly` → `name-only`, `off` → `off`, and an explicit `on` for every known skill the plan grants (on and preload), so a stale key from install time loses the key-by-key settings merge | `claude -p --settings '<json>'`. This hides repo and user skills (`.claude/skills`, `~/.claude/skills`) that the plugin dir can't remove |
+| `env` | `CONTEXT_GATE_PROFILE`, `CONTEXT_GATE_TICKET_TYPE`, `CONTEXT_GATE_MODEL`; `CONTEXT_GATE_ADD` / `CONTEXT_GATE_REMOVE` (the ticket's `**Skills:** +a -b`, only when non-empty); `CONTEXT_GATE_PRELOAD=system` when `appendSystemPrompt` carries preload bodies | the shift's env, so the hooks adapter, pi/opencode or the mod in that shift decide the same and do not preload twice (the mod reads the profile and ticket type; ADD/REMOVE/PRELOAD only the adapters so far) |
 | `mcpOff` | MCP tools outside the profile | informational. They are denied when the hooks adapter is installed in the worktree's `.claude/settings.local.json`, or passed in the same `--settings` JSON together with `hooks` from `install --print` |
 | `log` | a `decision` entry (`trigger: when:ticketType`) | write with `decisionEvent(plan, { ts, turn: shift, ticket })` |
 
@@ -69,7 +69,8 @@ names. A legacy `gate.json` with `skillGroups` reads as unified `groups` (G310),
 ```js
 // in startShift, when <worktree>/.claude/gate.json exists
 const plan = JSON.parse(execFileSync('node', [hooksAdapter, 'plan', '--root', cwd, '--type', route.type, '--model', route.ref, '--skills', ticket.skills.join(' ')]))
-for (const p of plan.pluginDirSymlinks) await symlink(p, join(pluginDir, 'skills', basename(p)))
+// only skills outside the worktree: the worktree's own .claude/skills are already visible
+for (const p of plan.pluginDirSymlinks.filter((p) => isAbsolute(p) && !p.startsWith(cwd + sep))) await symlink(p, join(pluginDir, 'skills', basename(p)))
 fullSystemPrompt = [systemPrompt, preload.text, plan.appendSystemPrompt].filter(Boolean).join('\n\n')
 args.push('--settings', JSON.stringify(plan.settings))
 env = { ...env, ...plan.env }

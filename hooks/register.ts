@@ -13,15 +13,16 @@ import type { EngineInterface, Register } from 'claude-code'
 import { type FileCall, type Io, OWN_TOOL_PREFIX, newRuntime, readOptions } from './ctx.ts'
 import { INITIAL, type State, type StateKey } from './state.ts'
 import { ensureSession } from './layers/config.ts'
-import { classicSessionStart, compactAfter, compactInstructions, configFileChanged, recordStepUsage, sessionEnd, sessionStart } from './layers/session.ts'
+import { classicSessionStart, compactAfter, compactAgentAfter, compactInstructions, configFileChanged, recordStepUsage, sessionEnd, sessionStart } from './layers/session.ts'
 import { editSection, gateCommand, rerenderHealth, rerenderSection } from './layers/commands.ts'
-import { bashAfter, bashBefore, gatesAfterFile, gatesBeforeFile, gatesMentioned, promptGates, turnAfter } from './layers/gates.ts'
+import { bashAfter, bashBefore, gatesAfterFile, gatesAfterWrite, gatesBeforeFile, gatesMentioned, guardsBash, guardsFileCall, promptGates, turnAfter } from './layers/gates.ts'
 import { checkRoot, relPath, ruleCommand, rulesAfterFile, rulesBeforeFile, rulesContextAfter, rulesContextBefore, rulesFileChanged } from './layers/cursor-rules.ts'
 import { describeMcp, gatePromptSubmit, listingAfter, mcpGate, observeStep, offerAgent, recompute, skillCall } from './layers/skill-gate.ts'
 import { checkBudgets } from './layers/budgets.ts'
 import { captureSkillArgs, composeAfter, dslContextBefore, dslFileChanged, serveOwnTool, skillPrompt, trustOnPrompt } from './layers/dsl.ts'
 import { HEALTH_PANE, SECTION_PANE, WHY_PANE, applyProposed, bandProps, buildErrorOf, healthPane, resetAuto, sectionPane, whyPane } from './layers/ui.ts'
 import { indexWatched, writeIndex } from './layers/index.ts'
+import { invalidateSurface } from './layers/trust.ts'
 
 export { bandLine, gateLine } from './layers/ui.ts'
 
@@ -95,7 +96,7 @@ function port($: EngineInterface): Io {
       list: (path) => $.fs.list(path),
       exists: (path) => $.fs.exists(path),
       write: (path, text) => $.fs.write(path, text),
-      stat: (path) => $.fs.stat(path),
+      stat: (path, options) => $.fs.stat(path, options),
     },
     session: {
       id: () => $.session.id(),
@@ -106,11 +107,19 @@ function port($: EngineInterface): Io {
       append: (args) => $.session.append(args),
       compact: (input) => $.session.compact(input),
     },
-    env: { os: () => $.env.get('OS'), home: () => $.env.get('HOME'), cacheHome: () => $.env.get('XDG_CACHE_HOME') },
+    env: {
+      os: () => $.env.get('OS'),
+      home: () => $.env.get('HOME'),
+      cacheHome: () => $.env.get('XDG_CACHE_HOME'),
+      planProfile: () => $.env.get('CONTEXT_GATE_PROFILE'),
+      ticketType: () => $.env.get('CONTEXT_GATE_TICKET_TYPE'),
+      ticket: () => $.env.get('CONTEXT_GATE_TICKET'),
+    },
     store: {
       get: (key) => $.store.get(key),
       set: (key, value) => $.store.set(key, value),
       delete: (key) => $.store.delete(key),
+      keys: () => $.store.keys(),
     },
     process: { run: (argv, init) => $.process.run(argv, init), spawn: (request) => $.process.spawn(request) },
     settings: { read: () => $.settings.read() as Promise<Record<string, unknown>> },
@@ -140,6 +149,21 @@ function pass<E, R>(_$: unknown, e: E, next: (e: E) => R): R {
   return next(e)
 }
 
+/** What an enforcement hook answers when it fails before `next` and the repo enforces something on the call (R7):
+ *  a refusal, not the engine's fail-open. */
+const GUARD_DENY = 'context-gate: перевірка гейтів не вдалася — дію не виконано. Повтори її; якщо збій повторюється, перевір .claude/gate.json або /gate health.'
+
+/** userConfig fields that widen what repo code may run: only the person in /config may turn them on (S14). Keyed
+ *  `<plugin>.<field>`; the plugin part may carry a suffix (`context-gate@inline`). */
+const WIDENING: Record<string, (v: unknown) => boolean> = {
+  trustBuild: (v) => v === 'always',
+  allowScripts: (v) => v === true,
+}
+const widening = (key: string): ((v: unknown) => boolean) | undefined => {
+  const m = /^context-gate(?:@[^.]*)?\.(\w+)$/.exec(key)
+  return m ? WIDENING[m[1]] : undefined
+}
+
 export const register: Register = (on, options) => {
   const rt = newRuntime(readOptions(options))
 
@@ -166,14 +190,21 @@ export const register: Register = (on, options) => {
   on('session.compact', async ($, e, next) => {
     if (e.trigger === 'precompute') return next(e)
     const io = port($)
+    if (e.agentId !== undefined) {
+      // A subagent's own transcript: the main loop keeps its profile, recheck and static cache (M26).
+      const r = await next(e)
+      if (!('skip' in r && r.skip)) await compactAgentAfter(io, rt, e.agentId)
+      return r
+    }
     const instructions = await compactInstructions(io, rt, e.instructions)
     const r = await next({ ...e, instructions })
-    await compactAfter(io, rt)
+    if (!('skip' in r && r.skip)) await compactAfter(io, rt) // a vetoed compaction changed nothing (L10)
     return r
   }).catch(pass)
 
   on('classic.FileChanged', async ($, e, next) => {
     const io = port($)
+    invalidateSurface(rt)
     rulesFileChanged(rt, e.file_path)
     await dslFileChanged(io, rt, e.file_path)
     await configFileChanged(io, rt, e.file_path)
@@ -195,9 +226,16 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', async ($, e, next) => {
-    captureSkillArgs(rt, e.command, e.args)
+    captureSkillArgs(rt, e.command, e.args, e.origin)
     return next(e)
   }).catch(pass)
+
+  // S14: another plugin's `$.config.set` (or a bridge) may not widen trust; the person's own /config change may.
+  on('config.set', async ($, e, next) => {
+    const widens = widening(e.key)
+    if (widens && widens(e.value) && e.origin.kind !== 'composer') return { deny: 'context-gate: розширити довіру може лише користувач у /config' }
+    return next(e)
+  }).catch(($, e, next) => (next.called || !widening(e.key) ? next(e) : { deny: 'context-gate: зміну не перевірено' }))
 
   // ───────── layer 1 + 2: prompt ─────────
 
@@ -248,8 +286,8 @@ export const register: Register = (on, options) => {
     if (denied) return denied
     const r = await next(e)
     gatesAfterFile(rt, c, r)
-    return rulesAfterFile(io, rt, c, r)
-  }).catch(pass)
+    return rulesAfterFile(io, rt, c, await gatesAfterWrite(io, rt, c, r))
+  }).catch(($, e, next) => (next.called || !guardsFileCall(rt, e.tool) ? next(e) : { deny: GUARD_DENY }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const io = port($)
@@ -259,7 +297,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     await bashAfter(io, rt, cmd, r)
     return r
-  }).catch(pass)
+  }).catch(($, e, next) => (next.called || !guardsBash(rt, typeof e.command === 'string' ? e.command : '') ? next(e) : { deny: GUARD_DENY }))
 
   on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
     // Without the engine's tool table laid beside the d.ts, Skill's arguments are `unknown`: narrow them.

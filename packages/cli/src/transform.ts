@@ -191,9 +191,10 @@ export function transformLevel2(ts: typeof TS, src: string, opts: TransformOptio
       return { s: `${wrap(o, P.atom)}${x.questionDotToken ? '?.' : '.'}${x.name.text}`, p: P.atom }
     }
     if (ts.isElementAccessExpression(x)) {
-      const o = tr(x.expression, locals)
       const arg = skipParens(x.argumentExpression)
+      // `ctx['gate']` first: translating the bare `ctx` would reject it («ctx без поля»).
       if (ts.isIdentifier(skipParens(x.expression)) && ctxNames.has((skipParens(x.expression) as TS.Identifier).text) && ts.isStringLiteralLike(arg)) return { s: arg.text, p: P.atom }
+      const o = tr(x.expression, locals)
       return { s: `${wrap(o, P.atom)}[${tr(arg, locals).s}]`, p: P.atom }
     }
     if (ts.isPrefixUnaryExpression(x)) {

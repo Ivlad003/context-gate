@@ -1,18 +1,17 @@
 // `context-gate run | render | health`: the standalone interpreter (SPEC «Автономний інтерпретатор»,
 // «Промпти як skills», «Prompt health»). Same core renderPrompt as the mod's prompt.compose.
 
-import { dirname, join, relative } from 'node:path'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import type { CompiledPrompt, Diagnostic, Node, RenderResult, Value } from '../../core/src/types.ts'
-import { renderPrompt, formatTrace, isDataEnvelope, capDebugLog, debugLogLines, type RenderOptionsExt } from '../../core/src/render.ts'
-import { debugLogPath } from '../../core/src/config.ts'
+import { renderPrompt, formatTrace, isDataEnvelope, capDebugLog, debugLogLines, secretValues, type RenderOptionsExt } from '../../core/src/render.ts'
+import { debugLogPath, maskSecretsDeep } from '../../core/src/config.ts'
 import { computeHealth, formatHealth } from '../../core/src/health.ts'
 import { fromJsonl, gateStatsFromJournal } from '../../core/src/journal.ts'
 import type { RunJson, RunJsonMeta } from '../../core/src/runjson.ts'
 import { buildPrompts, checkStale } from './build.ts'
 import { sectionText, skillArgs } from '../../core/src/assemble.ts'
-import { buildContext, setData, type ContextOptions, type RenderContext } from './context.ts'
-import { lineDiff, posix, readJson, writeJson, fileExists, readText } from './util.ts'
+import { buildContext, setData, validDataKey, type ContextOptions, type RenderContext } from './context.ts'
+import { lineDiff, posix, readJson, safeJoin, sha256, writeJson, writeText, fileExists, readText } from './util.ts'
 
 export interface RunOptions extends ContextOptions {
   id?: string
@@ -70,16 +69,23 @@ export async function validateUses(prompts: CompiledPrompt[], ctx: RenderContext
   return out
 }
 
-/** Builds stale/missing TSX when allowed; returns diagnostics of the build (empty when nothing to do). */
-export async function ensureBuilt(ctxRoot: string, promptDir: string, trusted: boolean, mode: string | undefined): Promise<Diagnostic[]> {
+export interface EnsureBuilt {
+  /** H013 when the build was not allowed; error diagnostics of the build otherwise. */
+  diagnostics: Diagnostic[]
+  /** Something was (re)built: `.compiled` changed and the context must be reloaded. */
+  built: boolean
+}
+
+/** Builds stale/missing TSX when allowed (trusted, `prompt.build` != never). */
+export async function ensureBuilt(ctxRoot: string, promptDir: string, trusted: boolean, mode: string | undefined): Promise<EnsureBuilt> {
   const st = checkStale({ root: ctxRoot, dir: promptDir })
   const todo = [...st.stale, ...st.missing]
-  if (!todo.length) return []
+  if (!todo.length) return { diagnostics: [], built: false }
   if (!trusted || mode === 'never') {
-    return [{ code: 'H013', severity: 'warning', message: `Застарілий або відсутній .compiled: ${todo.join(', ')}`, hint: trusted ? 'context-gate build' : 'context-gate build (або trust grant / --trust-repo для автозбірки)' }]
+    return { built: false, diagnostics: [{ code: 'H013', severity: 'warning', message: `Застарілий або відсутній .compiled: ${todo.join(', ')}`, hint: trusted ? 'context-gate build' : 'context-gate build (або trust grant / --trust-repo для автозбірки)' }] }
   }
   const r = await buildPrompts({ root: ctxRoot, dir: promptDir, only: todo })
-  return r.diagnostics.filter((d) => d.severity === 'error')
+  return { built: r.written.length > 0, diagnostics: r.diagnostics.filter((d) => d.severity === 'error') }
 }
 
 export interface Rendered { result: RenderResult; mode: 'prompt' | 'skill' | 'section'; id?: string; usage?: string; prompts: CompiledPrompt[] }
@@ -125,15 +131,30 @@ export async function renderWith(ctx: RenderContext, o: { id?: string; only?: st
   return { result, mode: only ? 'section' : 'prompt', ...(only ? { id: only } : {}), prompts: prompts.system }
 }
 
-/** Persist `store=` values: always to the cache data store; to `.claude/prompt/data/` with `prompt.persist`. */
-export function persistStored(ctx: RenderContext, result: RenderResult): string[] {
+/**
+ * Persist `store=` values: always to the cache data store; to `.claude/prompt/data/` with `prompt.persist`.
+ * Keys come from the repo (`<Store name>`, `@store`): one that is not a plain data key (`../x`, `/abs`) is
+ * refused with a G001 warning and never written (Р2: untrusted repos write nothing outside `data/`).
+ */
+export function persistStored(ctx: RenderContext, result: RenderResult, diagnostics: Diagnostic[] = []): string[] {
   const out: string[] = []
   const entries = (result as RenderResult & { storedEntries?: Record<string, Value> }).storedEntries ?? {}
   for (const [k, v] of Object.entries(result.stored)) {
+    if (!validDataKey(k)) {
+      diagnostics.push({ code: 'G001', severity: 'warning', message: `store «${k}»: невірний ключ даних — значення не збережено`, hint: 'латиниця, цифри, . _ - (без /, .. і абсолютних шляхів)' })
+      continue
+    }
     const env = isDataEnvelope(entries[k]) ? entries[k] as Record<string, Value> : undefined
     out.push(...setData(ctx.repo, k, v, { persist: !!ctx.repo.config.prompt?.persist, ...(env && typeof env.cache === 'string' ? { cache: env.cache } : {}), ...(env && typeof env.fetchedAt === 'number' ? { fetchedAt: env.fetchedAt } : {}) }))
   }
   return out
+}
+
+/** The scope as written to `.trace/last.json`, `run --json` and the index: values of the `env` whitelist masked. */
+export function maskedScope(scope: Record<string, Value>): Record<string, Value> {
+  const env = scope.env
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return scope
+  return { ...scope, env: Object.fromEntries(Object.keys(env).map((k) => [k, '***'])) }
 }
 
 function outputText(r: Rendered, markers: boolean): string {
@@ -144,13 +165,15 @@ function outputText(r: Rendered, markers: boolean): string {
 
 /** The `run --json` object (core RunJson): what stdout prints and `.trace/last.json` holds. */
 export function jsonOf(ctx: RenderContext, r: Rendered, diagnostics: Diagnostic[], extra: Partial<RunJsonMeta> = {}): RunJson {
+  // Structural masking (M04): a secret copied into another scope value or a trace line never reaches the JSON.
+  const secrets = secretValues(ctx.scope)
   const out: RunJson = {
     sections: r.result.sections,
     text: outputText(r, false),
-    trace: r.result.trace,
+    trace: maskSecretsDeep(r.result.trace, secrets),
     diagnostics,
     ms: r.result.ms,
-    scope: ctx.scope,
+    scope: maskSecretsDeep(maskedScope(ctx.scope), secrets),
     meta: {
       ok: !r.usage && !diagnostics.some((d) => d.severity === 'error'),
       mode: r.mode,
@@ -179,36 +202,46 @@ export function writeDebugLog(root: string, result: RenderResult, meta: { tier?:
   const add = debugLogLines(result, meta.now ?? Date.now(), { ...(meta.tier ? { tier: meta.tier } : {}), ...(meta.secrets ? { secrets: meta.secrets } : {}) })
   if (!add) return undefined
   const file = meta.file ?? debugLogPath({ debug: true })!
-  const path = join(root, file.path)
+  // `debugLog.path` comes from gate.json: only inside the repo (no `..`, absolute paths or symlinks out of it).
+  const path = safeJoin(root, file.path)
+  if (!path) return undefined
   try {
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, capDebugLog(readText(path) ?? '', add, file.maxBytes))
+    writeText(path, capDebugLog(readText(path) ?? '', add, file.maxBytes), root)
     return path
   } catch { return undefined }
 }
 
 /** `.claude/prompt/.trace/last.json`: the last run's RunJson (scope included) for the LSP and the editors. */
 function writeTrace(ctx: RenderContext, j: RunJson): void {
-  try { writeJson(join(ctx.repo.root, ctx.repo.promptDir, '.trace', 'last.json'), j) } catch { /* read-only repo */ }
+  const p = safeJoin(ctx.repo.root, join(ctx.repo.promptDir, '.trace', 'last.json'))
+  // The whole file is masked (as the mod's .trace/last.json): it lives in the repo and may be shared.
+  try { if (p) writeJson(p, maskSecretsDeep(j, secretValues(ctx.scope))) } catch { /* read-only repo */ }
 }
+
+/** Warning codes printed to stderr even without `--trace`: the render lacks part of the context. */
+const THIN_CONTEXT = new Set(['H013', 'G204', 'G203'])
 
 export async function runCommand(o: RunOptions): Promise<RunOutcome> {
   let ctx = await buildContext(o)
   const pre: Diagnostic[] = []
   if (o.autoBuild !== false) {
     const built = await ensureBuilt(ctx.repo.root, ctx.repo.promptDir, ctx.host.trusted, ctx.repo.config.prompt?.build)
-    pre.push(...built)
-    if (built.length || ctx.prompts.compiledFrom === 'none') ctx = await buildContext(o)
+    pre.push(...built.diagnostics)
+    // Reload after any build (success or partial): ctx.prompts were read from the old .compiled.
+    if (built.built || built.diagnostics.length || ctx.prompts.compiledFrom === 'none') ctx = await buildContext(o)
   }
   const logFile = debugLogPath(ctx.repo.config, !!o.debug)
   const debugOn = !!logFile
   const r = await renderWith(ctx, { ...(o.id ? { id: o.id } : {}), ...(o.only ? { only: o.only } : {}), ...(o.argsRaw !== undefined ? { argsRaw: o.argsRaw } : {}), ...(debugOn ? { debug: true } : {}) })
   if (logFile && !r.usage) writeDebugLog(ctx.repo.root, r.result, { tier: ctx.tier, secrets: envSecrets(ctx.repo.config), file: logFile })
   const g158 = r.usage ? [] : await validateUses(r.prompts, ctx)
-  const diagnostics = [...ctx.diagnostics, ...pre, ...g158, ...r.result.diagnostics, ...ctx.host.notes]
-  const written = r.usage ? [] : persistStored(ctx, r.result)
+  const storeDiags: Diagnostic[] = []
+  const written = r.usage ? [] : persistStored(ctx, r.result, storeDiags)
+  const diagnostics = [...ctx.diagnostics, ...pre, ...g158, ...r.result.diagnostics, ...storeDiags, ...ctx.host.notes]
   const failedProviders = ctx.providers.failed.filter((f) => f.mode === 'fail')
-  const hasError = r.result.diagnostics.some((d) => d.severity === 'error') || g158.length > 0 || failedProviders.length > 0
+  // Exit 1 on any error diagnostic (main.ts contract): render, G158, failed providers, and also the context
+  // (missing fixture, config errors) and the auto-build (G164), so CI never passes on a stale or wrong render.
+  const hasError = diagnostics.some((d) => d.severity === 'error') || failedProviders.length > 0
   const code = hasError ? 1 : 0
   let stdout = ''
   let stderr = ''
@@ -238,7 +271,9 @@ export async function runCommand(o: RunOptions): Promise<RunOutcome> {
     if (written.length) lines.push('', 'Збережено: ' + written.join(', '))
     stdout += lines.join('\n') + '\n'
   } else {
-    for (const d of diagnostics.filter((x) => x.severity === 'error')) stderr += `${d.code} ${d.message}${d.hint ? ` (${d.hint})` : ''}\n`
+    // Errors, and the warnings that mean the model got a thinner prompt than the repo describes (stale or missing
+    // .compiled, untrusted providers/scripts skipped, git timeout): loud on stderr for `claude -p` and CI (O2).
+    for (const d of diagnostics.filter((x) => x.severity === 'error' || THIN_CONTEXT.has(x.code))) stderr += `${d.code} ${d.message}${d.hint ? ` (${d.hint})` : ''}\n`
   }
   return { code, stdout, stderr, result: r.result, ctx }
 }
@@ -248,7 +283,8 @@ export async function runCommand(o: RunOptions): Promise<RunOutcome> {
 export async function healthCommand(o: ContextOptions & { json?: boolean; strict?: boolean }): Promise<RunOutcome> {
   const ctx = await buildContext({ ...o, dryScripts: o.dryScripts ?? false })
   const r = await renderWith(ctx, {})
-  const prevPath = join(ctx.repo.cacheDir, 'last-render.json')
+  // H002/H003 compare with the previous render of the same tier, profile and model (not of another tier).
+  const prevPath = join(ctx.repo.cacheDir, `last-render.${sha256(JSON.stringify([ctx.tier, ctx.gate.profile ?? null, o.model ?? null])).slice(0, 12)}.json`)
   const previous = readJson<RenderResult>(prevPath)
   const stale = checkStale({ root: ctx.repo.root, dir: ctx.repo.promptDir })
   // H011 from the journal's `gate-attempt` entries (core journal contract; the mod and the hooks adapter write them):

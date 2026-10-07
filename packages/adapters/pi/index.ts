@@ -15,7 +15,7 @@ export interface PiAdapterOptions {
   /** Clock (tests). */
   now?: () => number
   env?: Record<string, string | undefined>
-  /** Journal writer (tests); default appends to `<root>/.claude/gate.log.jsonl`. */
+  /** Journal writer (tests); default appends to `<root>/.claude/gate.log.jsonl` when gate.json has `log.file`. */
   journal?: (root: string, entries: readonly DecisionLogEntry[]) => void
   /** Skill body reader for preload (tests). */
   readBody?: (path: string) => string | undefined
@@ -26,7 +26,7 @@ export interface PiAdapterOptions {
 export function createPiAdapter(opts: PiAdapterOptions = {}) {
   const now = opts.now ?? Date.now
   const env = opts.env ?? process.env
-  const journal = opts.journal ?? appendJournal
+  const journal = opts.journal
   const readBody = opts.readBody ?? readSkillBody
   const home = opts.home ?? env.HOME ?? homedir()
 
@@ -43,15 +43,21 @@ export function createPiAdapter(opts: PiAdapterOptions = {}) {
       return data
     }
     const current = (ctx: PiContext): GateData => data && root === ctx.cwd ? data : load(ctx)
-    const write = (entries: readonly DecisionLogEntry[]) => { if (entries.length) journal(root, entries) }
+    // As the mod and the hooks adapter: the file journal only with `log.file` (M28), never in a repo without gate.json.
+    const write = (entries: readonly DecisionLogEntry[]) => {
+      if (!entries.length) return
+      if (journal) journal(root, entries)
+      else if (data?.config.log?.file) appendJournal(root, entries)
+    }
     // A failing gate must never break the harness: errors leave the event untouched.
     const guard = <T>(fn: () => T): T | undefined => { try { return fn() } catch { return undefined } }
 
     pi.on('session_start', (event) => { guard(() => onSessionStart(session, event)) })
     pi.on('session_compact', () => { guard(() => onCompact(session)) })
 
-    pi.on('input', (event) => guard((): PiInputResult => {
-      const text = onInput(session, event.text)
+    pi.on('input', (event, ctx) => guard((): PiInputResult => {
+      const cfg = guard(() => current(ctx).config)
+      const text = onInput(session, event.text, cfg, (m) => { try { ctx.ui.notify(m, 'warning') } catch { /* no UI */ } })
       return text === undefined ? { action: 'continue' } : { action: 'transform', text }
     }))
 

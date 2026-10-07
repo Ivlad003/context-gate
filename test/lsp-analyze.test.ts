@@ -117,7 +117,7 @@ test('scanTsx: sites map back to source text exactly', () => {
 })
 
 test('analyzeFile: live diagnostics incl. G163 and compiled G151', () => {
-  const diags = analyzeFile(ts, 'a.prompt.tsx', TSX, model, { diagnostics: [{ code: 'G151', severity: 'error', message: 'Рекурсія компонентів: A → A.', path: '.claude/prompt/a.prompt.tsx', line: 3 }, { code: 'G101', severity: 'error', message: 'dup', line: 3 }], relPath: '.claude/prompt/a.prompt.tsx' })
+  const diags = analyzeFile(ts, 'a.prompt.tsx', TSX, model, { diagnostics: [{ code: 'G151', severity: 'error', message: 'Рекурсія компонентів: A → A.', path: '.claude/prompt/a.prompt.tsx', line: 3 }, { code: 'G101', severity: 'error', message: 'dup', line: 4 }], relPath: '.claude/prompt/a.prompt.tsx' })
   const got = diags.map((d) => [d.code, TSX.slice(d.start, d.start + d.length).slice(0, 20)])
   assert.deepEqual(got, [['G172', 'git.nope'], ['G163', '<Run lang="bash" as='], ['G151', '<Prompt>']])
   assert.equal(numericCode('G151'), 90151)
@@ -149,7 +149,7 @@ test('refactorsAt: extract to Lazy and quick variant', () => {
   assert.equal(TSX.slice(sk.edits[0]!.start, sk.edits[0]!.end), '"ref"')
   const q = rs.find((r) => r.name === 'quick-variant')
   assert.ok(q && q.name === 'quick-variant')
-  assert.deepEqual(q.command, ['context-gate', 'expand', '--only', 'rules'])
+  assert.deepEqual(q.command, ['context-gate', 'expand', '--only', 'rules', '--tiers', 'quick'])
 })
 
 test('tsserver plugin decorates a real language service', () => {

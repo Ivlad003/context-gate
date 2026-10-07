@@ -89,7 +89,7 @@ test('build examples/basic: compiled shape, lock, SKILL.md, staleness', async ()
     assert.match(md, /\nargument-hint: "<tag\|sha> \[--format md\|slack\|github\] \[--scope <scope>\] \[--dry\]"\n/)
     assert.match(md, /\ngenerated-by: context-gate\n/)
     assert.doesNotMatch(md, /disable-model-invocation/)
-    assert.ok(md.includes('!`node "${CLAUDE_PLUGIN_ROOT}/dist/cli.js" run release-notes --args "$ARGUMENTS" --ctx-from live`'))
+    assert.ok(md.includes("run release-notes --args '$ARGUMENTS' --ctx-from live`"))
     assert.match(readFileSync(join(root, '.claude/skills/pr-review/SKILL.md'), 'utf8'), /\ndisable-model-invocation: true\n/)
 
     // Staleness without building.
@@ -301,11 +301,11 @@ test('prompt.skillBody static | both: SKILL.md with a pre-rendered body (default
   const md = readFileSync(join(root, '.claude/skills/notes/SKILL.md'), 'utf8')
   assert.match(md, /\ncontext-gate-body: static\n---\n<!-- context-gate: static — тіло попередньо відрендерено на збірці з дефолтними аргументами \(format=md, dry=false\)/)
   assert.match(md, /\n\nФормат md, від останнього тегу\.\n$/)
-  assert.doesNotMatch(md, /!`node/)
+  assert.doesNotMatch(md, /!`if /)
   writeFileSync(join(root, '.claude/gate.json'), JSON.stringify({ prompt: { skillBody: 'both' } }))
   await buildPrompts({ root })
   const both = readFileSync(join(root, '.claude/skills/notes/SKILL.md'), 'utf8')
-  assert.match(both, /\ncontext-gate-body: live\+static\n---\n!`node "\$\{CLAUDE_PLUGIN_ROOT\}\/dist\/cli\.js" run notes/)
+  assert.match(both, /\ncontext-gate-body: live\+static\n---\n!`if \[ -n "\$\{CLAUDE_PLUGIN_ROOT:-\}" \].* run notes --args '\$ARGUMENTS'/)
   assert.match(both, /статичний варіант[\s\S]*Формат md, від останнього тегу\.\n$/)
   // Default stays live.
   writeFileSync(join(root, '.claude/gate.json'), '{}')
@@ -316,9 +316,9 @@ test('prompt.skillBody static | both: SKILL.md with a pre-rendered body (default
 
 test('renderSkillMd options and validatePrompt on a skill body', () => {
   const cp = { version: 1, compiler: COMPILER, id: 's', sourceHash: 'a'.repeat(64), sources: [], sections: [], diagnostics: [], skill: { name: 's', description: 'd', args: {}, invoke: { user: true, model: false }, body: [] } } as CompiledPrompt
-  assert.match(renderSkillMd(cp), /disable-model-invocation: true[\s\S]*!`node/)
+  assert.match(renderSkillMd(cp), /disable-model-invocation: true[\s\S]*!`if /)
   // `static` without a rendered text falls back to live.
-  assert.match(renderSkillMd(cp, { body: 'static' }), /!`node/)
+  assert.match(renderSkillMd(cp, { body: 'static' }), /!`if /)
   assert.match(renderSkillMd(cp, { body: 'static', staticText: 'T', source: 'npm:x@1' }), /source: "npm:x@1"\ncontext-gate-body: static\n---\n<!--[^\n]*без аргументів[^\n]*-->\n\nT\n$/)
   const body = [{ t: 'let', name: 'x', value: '1' }, { t: 'let', name: 'x', value: '2' }] as CompiledPrompt['sections'][0]['children']
   assert.deepEqual(validatePrompt({ sections: [], skill: { ...cp.skill!, body } }).map((d) => d.code), ['G153'])

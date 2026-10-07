@@ -61,9 +61,13 @@ function kebab(s: string): string {
   return s.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
 }
 
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k)
+
+/** Declared parameter for a raw name: own spec keys only (`--constructor` is unknown), never `__proto__`. */
 function findKey(spec: Record<string, ArgSpec>, raw: string): string | undefined {
-  if (raw in spec) return raw
-  for (const k of Object.keys(spec)) if (kebab(k) === raw || kebab(k) === kebab(raw)) return k
+  if (raw === '__proto__') return undefined
+  if (hasOwn(spec, raw)) return raw
+  for (const k of Object.keys(spec)) if (k !== '__proto__' && (kebab(k) === raw || kebab(k) === kebab(raw))) return k
   return undefined
 }
 
@@ -82,7 +86,7 @@ function typeHint(name: string, s: ArgSpec): string {
 /** `<tag|sha> [--format md|slack|github] [--scope <scope>] [--dry]` (no command name). */
 export function argumentHint(spec: Record<string, ArgSpec>): string {
   const parts: string[] = []
-  const positional = Object.entries(spec).filter(([, s]) => s.positional !== undefined && s.type !== 'rest').sort((a, b) => a[1].positional! - b[1].positional!)
+  const positional = Object.entries(spec).filter(([k, s]) => k !== '__proto__' && s.positional !== undefined && s.type !== 'rest').sort((a, b) => a[1].positional! - b[1].positional!)
   for (const [k, s] of positional) {
     const h = typeHint(k, s)
     const body = h.startsWith('<') ? h : `<${h}>`
@@ -150,7 +154,7 @@ export function parseArgs(input: string | readonly string[] | Record<string, unk
   const toks: Tok[] = typeof input === 'string' ? tokenize(input) : (input as readonly string[]).map((v) => ({ value: v, start: -1, end: -1, quoted: false }))
   const args: Record<string, ArgValue> = {}
   const restKey = Object.keys(spec).find((k) => spec[k].type === 'rest')
-  const positional = Object.entries(spec).filter(([, s]) => s.positional !== undefined && s.type !== 'rest').sort((a, b) => a[1].positional! - b[1].positional!).map(([k]) => k)
+  const positional = Object.entries(spec).filter(([k, s]) => k !== '__proto__' && s.positional !== undefined && s.type !== 'rest').sort((a, b) => a[1].positional! - b[1].positional!).map(([k]) => k)
   const extra: string[] = []
   const set = (k: string, v: ArgValue) => {
     if (spec[k].type === 'list' && Array.isArray(args[k]) && Array.isArray(v)) args[k] = [...(args[k] as string[]), ...v]
@@ -198,7 +202,7 @@ export function parseArgs(input: string | readonly string[] | Record<string, unk
       continue
     }
     // positional
-    while (pos < positional.length && positional[pos] in args) pos++
+    while (pos < positional.length && hasOwn(args, positional[pos])) pos++
     if (pos < positional.length) {
       const key = positional[pos++]
       const r = convert(key, spec[key], v, opts)
@@ -216,7 +220,7 @@ export function parseArgs(input: string | readonly string[] | Record<string, unk
 
 function finish(name: string, spec: Record<string, ArgSpec>, args: Record<string, ArgValue>): ParseArgsResult {
   for (const [k, s] of Object.entries(spec)) {
-    if (args[k] !== undefined) continue
+    if (k === '__proto__' || (hasOwn(args, k) && args[k] !== undefined)) continue
     if (s.required) return fail(name, spec, `бракує обов'язкового аргументу \`${k}\``)
     if (s.default !== undefined) args[k] = s.default as ArgValue
     else if (s.type === 'flag') args[k] = false

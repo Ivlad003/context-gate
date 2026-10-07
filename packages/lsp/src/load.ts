@@ -2,8 +2,8 @@
 // inputs (gate.json, gate.index.json, .types/ctx.d.ts, .trace/last.json, .compiled/*.json) with an
 // mtime cache, so tsserver can call it on every keystroke.
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { CompiledPrompt, Diagnostic, GateConfig } from '../../core/src/types.ts'
 import { buildModel, type CtxModel, type GateIndex, type LastTrace } from './model.ts'
 
@@ -51,27 +51,49 @@ export function modelPaths(root: string, config?: Partial<GateConfig>): { config
   }
 }
 
-const modelCache = new Map<string, { key: string; model: CtxModel; config?: Partial<GateConfig> }>()
+const modelCache = new Map<string, { key: string; schemas: string[]; model: CtxModel; config?: Partial<GateConfig> }>()
 
-/** Ctx model of a repo, reloaded when any input file changes. */
+/**
+ * Reader of repo-relative files for `buildModel` (provider schema files). Only paths inside the repo: the
+ * gate.json of a cloned repo must not point the editor at `~/.ssh` or `/etc`. Every path asked for is
+ * recorded in `seen`, so the model cache also watches schema files.
+ */
+export function repoFileReader(root: string, seen?: string[]): (rel: string) => string | undefined {
+  const base = resolve(root)
+  return (rel: string) => {
+    if (typeof rel !== 'string' || !rel || rel.includes('\0') || isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) return undefined
+    const abs = resolve(base, rel)
+    if (abs !== base && !abs.startsWith(base + sep)) return undefined
+    seen?.push(abs)
+    try {
+      const real = realpathSync(abs)
+      const realBase = realpathSync(base)
+      if (real !== realBase && !real.startsWith(realBase + sep)) return undefined
+    } catch { return undefined }
+    return readText(abs)
+  }
+}
+
+/** Ctx model of a repo, reloaded when any input file changes (provider schema files included). */
 export function loadModel(root: string): { model: CtxModel; config?: Partial<GateConfig> } {
   const cfgPath = join(root, '.claude', 'gate.json')
   const config = readJsonCached<Partial<GateConfig>>(cfgPath)
   const p = modelPaths(root, config)
-  const key = [p.config, p.index, p.ctxDts, p.trace].map(mtime).join(':')
+  const keyOf = (schemas: string[]): string => [p.config, p.index, p.ctxDts, p.trace, ...schemas].map(mtime).join(':')
   const hit = modelCache.get(root)
-  if (hit && hit.key === key) return hit
+  if (hit && hit.key === keyOf(hit.schemas)) return hit
   const index = readJson<GateIndex>(p.index)
   const ctxDts = readText(p.ctxDts)
   const trace = readJson<LastTrace>(p.trace)
+  const schemas: string[] = []
   const model = buildModel({
     ...(config ? { config } : {}),
     ...(index ? { index } : {}),
     ...(ctxDts ? { ctxDts } : {}),
     ...(trace ? { trace } : {}),
-    readFile: (rel: string) => readText(join(root, rel)),
+    readFile: repoFileReader(root, schemas),
   })
-  const entry = { key, model, ...(config ? { config } : {}) }
+  const entry = { key: keyOf(schemas), schemas, model, ...(config ? { config } : {}) }
   modelCache.set(root, entry)
   return entry
 }

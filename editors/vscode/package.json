@@ -20,6 +20,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
+      "restrictedConfigurations": ["contextGate.cliPath"],
       "description": "У недовіреному workspace збірка (вона виконує код промптів) і preview вимкнені; підказки, схема gate.json і перевірка .mdc працюють."
     }
   },
@@ -48,6 +49,7 @@
       "properties": {
         "contextGate.cliPath": {
           "type": "string",
+          "scope": "machine",
           "default": "",
           "description": "Команда CLI context-gate (напр. `node /шлях/context-gate/dist/cli.js`). Порожньо: `node_modules/.bin/context-gate` workspace, інакше CLI, вбудований у розширення."
         },

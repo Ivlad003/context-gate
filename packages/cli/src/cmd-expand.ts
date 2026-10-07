@@ -120,16 +120,17 @@ export interface ExpandPlanItem {
   tsx?: { line?: number }
 }
 
-export function planExpand(root: string, promptDir: string, tiers: string[], only?: string[]): ExpandPlanItem[] {
+/** `tierNames`: the configured tiers, so only `<id>.<tier>.md` of a known tier is a variant (L53). */
+export function planExpand(root: string, promptDir: string, tiers: string[], only?: string[], tierNames?: string[]): ExpandPlanItem[] {
   const dir = join(root, promptDir)
   if (!existsSync(dir)) return []
   const files = readdirSync(dir).filter((f) => f.endsWith('.md') && !/^readme\.md$/i.test(f)).sort()
   const plan: ExpandPlanItem[] = []
   for (const f of files) {
-    if (tierVariantOf(f)) continue
+    if (tierVariantOf(f, tierNames)) continue
     const rel = posix(join(promptDir, f))
     const text = readText(join(dir, f)) ?? ''
-    const parsed = parseMarkdownPrompt(text, { path: rel })
+    const parsed = parseMarkdownPrompt(text, { path: rel, ...(tierNames ? { tiers: tierNames } : {}) })
     const id = parsed.section.id
     if (only?.length && !only.includes(id)) continue
     const hasTierDirective = /^\s*@tier\b/m.test(text)
@@ -189,7 +190,8 @@ export function planExpandTsx(root: string, promptDir: string, tiers: string[], 
 export async function expandCommand(root: string, o: { model?: string; dryRun?: boolean; only?: string[]; tiers?: string[]; force?: boolean }): Promise<{ code: number; out: string }> {
   const repo = loadRepo(root)
   const tiers = o.tiers?.length ? o.tiers : ['quick', 'standard'].filter((t) => !repo.config.tiers || t in repo.config.tiers)
-  const mdPlan = planExpand(root, repo.promptDir, tiers, o.only)
+  const tierNames = Object.keys(repo.config.tiers ?? {})
+  const mdPlan = planExpand(root, repo.promptDir, tiers, o.only, tierNames.length ? tierNames : undefined)
   const tsx = planExpandTsx(root, repo.promptDir, tiers, o.only, new Set(mdPlan.map((p) => p.id)))
   const plan = [...mdPlan, ...tsx.plan]
   const unbuiltNote = tsx.unbuilt.length ? `Не зібрано: ${tsx.unbuilt.join(', ')} — запусти context-gate build, щоб expand побачив TSX-секції.\n` : ''
@@ -215,7 +217,7 @@ export async function expandCommand(root: string, o: { model?: string; dryRun?: 
       continue
     }
     const fm = ['---', `id: ${p.id}`, `generated-by: context-gate expand (${model})`, `generated-at: ${new Date().toISOString()}`, `source-hash: ${p.sourceHash}`, `source: ${p.source}${p.tsx?.line ? `:${p.tsx.line}` : ''}`, ...(p.tsx ? [`apply: "<Tier is=\\"${p.tier}\\"> у ${p.source}"`] : []), '---', '']
-    writeText(join(root, p.out), fm.join('\n') + r.stdout.trim() + '\n')
+    writeText(join(root, p.out), fm.join('\n') + r.stdout.trim() + '\n', root)
     lines.push(`записано ${p.out}${p.tsx ? ` (TSX: встав як <Tier is="${p.tier}">…</Tier> у ${p.source}${p.tsx.line ? `:${p.tsx.line}` : ''}, а канонічний текст — у <Tier is={[…інші tiers]}>)` : ''}`)
   }
   if (lines.some((l) => l.startsWith('записано'))) lines.push('', `Переглянь diff і перенеси потрібні варіанти з proposals/ у ${repo.promptDir}/.`)

@@ -8,6 +8,11 @@
     "$schema": {
       "type": "string"
     },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "gate.json format version (1). A newer version than the installed context-gate understands is reported (G317)."
+    },
     "groups": {
       "type": "object",
       "additionalProperties": {
@@ -808,6 +813,10 @@
           },
           "baseline": {
             "type": "string"
+          },
+          "failClosed": {
+            "type": "boolean",
+            "description": "A gate that cannot run blocks instead of passing (S6)."
           }
         }
       }
@@ -877,6 +886,13 @@
             "both"
           ],
           "description": "SKILL.md body: live render line, pre-rendered static body, or both (Р6)."
+        },
+        "volatile": {
+          "enum": [
+            "system",
+            "context"
+          ],
+          "description": "`scope: volatile` sections: end of the system prompt (default) or the prompt context, which keeps the system prompt cacheable (P1)."
         }
       }
     },

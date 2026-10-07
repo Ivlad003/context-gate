@@ -96,7 +96,7 @@ test('planForTicket: appendSystemPrompt, symlinks, env, log', () => {
   assert.equal(p.appendSystemPrompt, '<!-- Preloaded skill: .claude/skills/tdd/SKILL.md -->\nТест першим.')
   assert.ok(p.pluginDirSymlinks.includes('.claude/skills/tdd'))
   assert.ok(p.pluginDirSymlinks.includes('/home/u/.claude/skills/git-conventions'))
-  assert.deepEqual(p.env, { CONTEXT_GATE_PROFILE: 'frontend', CONTEXT_GATE_TICKET_TYPE: 'ui', CONTEXT_GATE_MODEL: 'claude-haiku-4-5' })
+  assert.deepEqual(p.env, { CONTEXT_GATE_PROFILE: 'frontend', CONTEXT_GATE_TICKET_TYPE: 'ui', CONTEXT_GATE_MODEL: 'claude-haiku-4-5', CONTEXT_GATE_PRELOAD: 'system' })
   assert.equal(p.settings.skillOverrides.misc, 'name-only')
   assert.equal(p.log.kind, 'decision')
   assert.equal(p.log.trigger, 'when:ticketType')

@@ -40,7 +40,9 @@ export function parseEditorUrl(stdout: string): string | undefined {
 
 /** Starts (or reuses) the editor for `id` and resolves its URL, or an error text in Ukrainian. */
 export async function openEditor(io: Io, rt: Runtime, id: string): Promise<{ url: string } | { error: string }> {
-  const live = running(rt).get(id)
+  // One editor per root and id: after a move into another worktree the old root's editor is not this one.
+  const key = `${rt.root}\0${id}`
+  const live = running(rt).get(key)
   if (live?.url) return { url: live.url }
   const spawn = io.process.spawn
   if (!spawn) return { error: 'Редактор недоступний: цей хост не має $.process.spawn' }
@@ -53,13 +55,13 @@ export async function openEditor(io: Io, rt: Runtime, id: string): Promise<{ url
     return { error: `Не вдалося запустити редактор: ${String((err as Error)?.message ?? err)}` }
   }
   const ed: Editor = { id, stop: () => { void stream.return(undefined as never).catch(() => undefined) } }
-  running(rt).set(id, ed)
+  running(rt).set(key, ed)
   return new Promise((resolve) => {
     let done = false
     const finish = (r: { url: string } | { error: string }): void => {
       if (done) return
       done = true
-      if ('error' in r) running(rt).delete(id)
+      if ('error' in r) running(rt).delete(key)
       resolve(r)
     }
     const started = now()
@@ -90,7 +92,7 @@ export async function openEditor(io: Io, rt: Runtime, id: string): Promise<{ url
       } catch (e) {
         finish({ error: `Не вдалося запустити редактор: ${String((e as Error)?.message ?? e)}` })
       } finally {
-        running(rt).delete(id)
+        running(rt).delete(key)
         debug(io, `editor ${id} stopped`)
       }
     })()

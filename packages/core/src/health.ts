@@ -65,6 +65,28 @@ export const DEFAULT_THRESHOLDS: Record<string, number> = {
 const INTERNAL = new Set(['tokens', 'chars', 'static-pct', 'tokens:static', 'tokens:profile', 'tokens:volatile', 'ctx-pct'])
 const SCRIPT_KINDS = new Set(['run', 'call', 'mcp'])
 
+/**
+ * Tokens of a section that differ between two turns: the span between the common prefix and the common suffix
+ * of the texts (an append costs the appended part, a rewrite the whole section). Without both texts (a
+ * section added, removed, or a previous render stored without text) → the larger size.
+ */
+function changedTokens(c: { text?: string; tokens: number } | undefined, p: { text?: string; tokens: number } | undefined): number {
+  const whole = Math.max(c?.tokens ?? 0, p?.tokens ?? 0)
+  const a = c?.text
+  const b = p?.text
+  if (typeof a !== 'string' || typeof b !== 'string' || (!a && c!.tokens) || (!b && p!.tokens)) return whole
+  let pre = 0
+  const max = Math.min(a.length, b.length)
+  while (pre < max && a.charCodeAt(pre) === b.charCodeAt(pre)) pre++
+  let suf = 0
+  while (suf < max - pre && a.charCodeAt(a.length - 1 - suf) === b.charCodeAt(b.length - 1 - suf)) suf++
+  const changed = Math.max(a.length, b.length) - pre - suf
+  return Math.min(whole, Math.max(1, Math.ceil(changed / 4)))
+}
+
+/** Changing text in the system prompt invalidates the cache of the whole conversation after it, not just a tail. */
+const H002_ADVICE = 'змінне — у кінець (`scope: volatile`) або поза системний промпт; стабілізувати значення (кеш, округлення)'
+
 const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
 export function computeHealth(current: RenderResult, previous?: RenderResult, extras: HealthExtras = {}, thresholds: HealthThresholds = {}): HealthReport {
@@ -100,19 +122,29 @@ export function computeHealth(current: RenderResult, previous?: RenderResult, ex
   if (realStable !== undefined) {
     add({
       code: 'H002', name: 'Стабільна частка (prompt cache), %', value: realStable, threshold: th('H002'), ok: realStable >= th('H002'),
-      advice: `з usage: cache_read ${fmtK(u!.cacheReadTokens ?? 0)} з ${fmtK(usageIn)} вхідних → винести змінне у volatile в кінці`,
+      advice: `з usage: cache_read ${fmtK(u!.cacheReadTokens ?? 0)} з ${fmtK(usageIn)} вхідних → ${H002_ADVICE}`,
     })
   }
 
   if (previous) {
-    const prev = new Map(previous.sections.filter(s => s.included).map(s => [s.id, s]))
-    const stableChars = inc.filter(s => prev.get(s.id)?.hash === s.hash).reduce((a, s) => a + s.chars, 0)
+    const prevInc = previous.sections.filter(s => s.included)
+    const prev = new Map(prevInc.map(s => [s.id, s]))
+    // The prompt cache is a prefix: everything after the first changed or moved section is re-read, however
+    // much of it is unchanged. Stable = the sections equal to the previous turn at the same position.
+    let stableChars = 0
+    let breakAt: string | undefined
+    for (let i = 0; i < inc.length; i++) {
+      const p = prevInc[i]
+      if (!p || p.id !== inc[i].id || p.hash !== inc[i].hash) { breakAt = inc[i].id; break }
+      stableChars += inc[i].chars
+    }
     const stablePct = chars ? Math.round((stableChars / chars) * 100) : 100
     const changed = inc.filter(s => prev.get(s.id)?.hash !== s.hash)
     if (realStable === undefined) add({
       code: 'H002', name: 'Стабільна частка (prompt cache), %', value: stablePct, threshold: th('H002'), ok: stablePct >= th('H002'),
-      advice: changed.length ? `змінились: ${changed.map(s => s.id).join(', ')} → винести змінне у volatile` : undefined,
+      advice: breakAt !== undefined ? `кеш обривається на ${breakAt}${changed.length ? `; змінились: ${changed.map(s => s.id).join(', ')}` : '; змінився порядок'} → ${H002_ADVICE}` : undefined,
     })
+    // Drift counts what changed, not how the size changed: a rewritten section costs its full size.
     let drift = 0
     const drifted: string[] = []
     const ids = new Set([...inc.map(s => s.id), ...prev.keys()])
@@ -120,7 +152,7 @@ export function computeHealth(current: RenderResult, previous?: RenderResult, ex
       const c = inc.find(s => s.id === id)
       const p = prev.get(id)
       if ((c?.scope ?? p?.scope) === 'volatile' || c?.hash === p?.hash) continue
-      drift += Math.abs((c?.tokens ?? 0) - (p?.tokens ?? 0)) || Math.max(c?.tokens ?? 0, p?.tokens ?? 0)
+      drift += changedTokens(c, p)
       drifted.push(id)
     }
     add({

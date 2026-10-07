@@ -1,9 +1,9 @@
 // context-gate CLI entry (bundled into dist/cli.js). Exit codes: 0 ok, 1 failure (error diagnostics, failed
 // checks, refused formatting), 2 usage error (unknown command or flag, bad arguments).
 
-import { existsSync, realpathSync, watch } from 'node:fs'
+import { existsSync, realpathSync, rmSync, statSync, watch } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import pkg from '../../../package.json' with { type: 'json' }
 import type { Diagnostic, Value } from '../../core/src/types.ts'
 import { explain as explainCode, CODES } from '../../core/src/codes.ts'
@@ -23,7 +23,7 @@ import { formatPrompt } from './fmt.ts'
 import { buildContext, callScriptTool, loadData, loadRepo, scriptTools, setData, validDataKey } from './context.ts'
 import { readTrust, setTrust, trustState, readUserSettings, userSettingsPath, trustPath, binaryWhitelist, repoCacheDir } from './settings.ts'
 import { withUserSkills } from './host-node.ts'
-import { ensureGitignore, findRoot, parseJsonl, posix, readStdin, readText, walkFiles, writeText, writeJson } from './util.ts'
+import { ensureGitignore, findRoot, parseJsonl, posix, readOptionalStdin, readStdin, readText, walkFiles, writeText, writeJson } from './util.ts'
 
 export const VERSION: string = (pkg as { version: string }).version
 
@@ -66,18 +66,36 @@ function printDiags(io: Io, ds: Diagnostic[]): void {
   for (const d of ds) io.err(`${d.severity} ${d.code}${d.path ? ` ${d.path}${d.line ? ':' + d.line : ''}` : ''} ${d.message}${d.hint ? ` (${d.hint})` : ''}\n`)
 }
 
-/** Re-runs `fn` on changes under `paths` (debounced) until SIGINT. */
+/**
+ * Re-runs `fn` on changes under `paths` (debounced) until SIGINT. A change during a run schedules one more run
+ * after it (never lost). Directories are watched rather than files: an atomic save (rename over the file) would
+ * detach a watcher on the file itself, so a watched file is matched by name in its parent directory.
+ */
 async function watchLoop(paths: string[], fn: () => Promise<void>, io: Io): Promise<number> {
   await fn()
   let timer: NodeJS.Timeout | undefined
   let busy = false
+  let again = false
+  const runOnce = async (): Promise<void> => {
+    if (busy) { again = true; return }
+    busy = true
+    try {
+      do { again = false; try { await fn() } catch (e) { io.err(String(e) + '\n') } } while (again)
+    } finally { busy = false }
+  }
   const trigger = (): void => {
     if (timer) clearTimeout(timer)
-    timer = setTimeout(async () => { if (busy) return; busy = true; try { await fn() } catch (e) { io.err(String(e) + '\n') } finally { busy = false } }, 150)
+    timer = setTimeout(() => { void runOnce() }, 150)
   }
-  const watchers = paths.filter((p) => existsSync(p)).map((p) => watch(p, { recursive: true }, (_e, f) => { if (!f || !/(^|[\\/])\.(compiled|trace|types)([\\/]|$)|\.tmp$/.test(String(f))) trigger() }))
+  const ignored = (f: string): boolean => /(^|[\\/])\.(compiled|trace|types)([\\/]|$)|\.tmp$/.test(f)
+  const watchers = paths.filter((p) => existsSync(p)).map((p) => {
+    if (statSync(p).isDirectory()) return watch(p, { recursive: true }, (_e, f) => { if (!f || !ignored(String(f))) trigger() })
+    const name = basename(p)
+    return watch(dirname(p), (_e, f) => { if (!f || String(f) === name) trigger() })
+  })
   io.err(`стежу за: ${paths.filter((p) => existsSync(p)).map((p) => posix(relative(process.cwd(), p)) || '.').join(', ')} (Ctrl+C — вихід)\n`)
   await new Promise<void>((done) => process.once('SIGINT', () => done()))
+  if (timer) clearTimeout(timer)
   for (const w of watchers) w.close()
   return 0
 }
@@ -86,7 +104,7 @@ async function doBuild(root: string, p: ParsedArgv, io: Io): Promise<number> {
   const repo = loadRepo(root)
   const only = list(p, 'only')
   const t0 = Date.now()
-  const r = await buildPrompts({ root, dir: repo.promptDir, ...(only ? { only } : {}) })
+  const r = await buildPrompts({ root, dir: repo.promptDir, ...(only ? { only } : {}), ...(bool(p, 'force') ? { force: true } : {}) })
   if (repo.hasConfig) { try { generateCtxTypes({ root, config: repo.config }) } catch { /* types are best effort */ } }
   // tsconfig.json + .types/jsx/ for editors (the jsx package is not installed in user repos).
   const types = existsSync(join(root, repo.promptDir)) ? writeEditorTypes(root, repo.promptDir) : { written: [], notes: [] }
@@ -94,12 +112,18 @@ async function doBuild(root: string, p: ParsedArgv, io: Io): Promise<number> {
   r.written.push(...types.written)
   // Р3: a copy of .compiled in ~/.cache/context-gate/<repo>/compiled for `claude -p` without a build.
   for (const cp of r.compiled) if (!cp.diagnostics.some((d) => d.severity === 'error')) { try { writeJson(join(repo.cacheDir, 'compiled', `${cp.id}.json`), cp) } catch { /* best effort */ } }
+  // …and without the orphans the build pruned from the repo (a removed prompt must not come back from the cache).
+  for (const rel of r.removed ?? []) {
+    const m = /\.compiled\/([^/]+\.json)$/.exec(rel)
+    if (m) { try { rmSync(join(repo.cacheDir, 'compiled', m[1]!), { force: true }) } catch { /* best effort */ } }
+  }
   const failed = r.diagnostics.some((d) => d.severity === 'error')
-  if (bool(p, 'json')) io.out(JSON.stringify({ ok: !failed, compiled: r.compiled.map((c) => c.id), written: r.written, diagnostics: r.diagnostics, ms: Date.now() - t0 }) + '\n')
+  if (bool(p, 'json')) io.out(JSON.stringify({ ok: !failed, compiled: r.compiled.map((c) => c.id), written: r.written, ...(r.removed ? { removed: r.removed } : {}), diagnostics: r.diagnostics, ms: Date.now() - t0 }) + '\n')
   else {
     printDiags(io, r.diagnostics)
     for (const n of types.notes) io.err(n + '\n')
     io.out(r.compiled.length ? `зібрано ${r.compiled.map((c) => c.id).join(', ')} за ${Date.now() - t0} мс${r.written.length ? `; записано:\n  ${r.written.join('\n  ')}` : ''}\n` : `немає *.prompt.tsx у ${repo.promptDir}\n`)
+    if (r.removed?.length) io.out(`видалено (промпт прибрано або перейменовано):\n  ${r.removed.join('\n  ')}\n`)
   }
   return failed ? 1 : 0
 }
@@ -109,7 +133,7 @@ async function stageCommand(name: PipeStageName, p: ParsedArgv, root: string, io
   for (const [k, v] of Object.entries(p.flags)) if (k !== 'root' && k !== 'help' && k !== 'trust-repo' && k !== 'user-skills') args[k] = Array.isArray(v) ? v.join(',') : String(v)
   const stage: PipeStage = { stage: name, args, positional: p.positional, ...(name === 'where' ? { expr: p.positional.join(' ') } : {}) }
   const needsInput = name !== 'collect' && name !== 'why' && name !== 'signals'
-  const input = needsInput || !process.stdin.isTTY ? parseJsonl(await io.stdin()) : { items: [], bad: 0 }
+  const input = parseJsonl(needsInput ? await io.stdin() : await readOptionalStdin(io.stdin))
   if (input.bad) io.err(`пропущено ${input.bad} невалідних рядків JSONL\n`)
   const out = await runStage(stage, input.items, { root, ...(bool(p, 'trust-repo') ? { trustRepo: true } : {}) })
   if ('error' in out) { io.err(out.error + '\n'); return out.code ?? 1 }
@@ -136,16 +160,25 @@ const STAGE_HELP: Partial<Record<PipeStageName, [string, string[]]>> = {
   why: ['журнал рішень таблицею (--json — JSONL)', ['why [--n 50] [--json]']],
 }
 
+/** Boolean flags of the stages: declared, so `render --json prompt://x` never takes the target as the flag's value. */
+const STAGE_BOOLS: Record<string, FlagSpec> = {
+  json: { type: 'bool', desc: 'JSON / JSONL' },
+  trace: { type: 'bool', desc: 'trace рендера' },
+  markers: { type: 'bool', desc: 'маркери меж секцій' },
+  'dry-scripts': { type: 'bool', desc: '@run/@call лише з кешу' },
+  'dry-run': { type: 'bool', desc: 'лише показати' },
+}
+
 function stage(name: PipeStageName): Command {
   const [summary, usage] = STAGE_HELP[name] ?? [name, [name]]
-  return { summary, usage, flags: {}, loose: true, extra: 'Стадія pipe: JSONL на stdin → JSONL на stdout; аргументи — будь-які --ключ значення стадії.', run: (p, root, io) => stageCommand(name, p, root, io) }
+  return { summary, usage, flags: STAGE_BOOLS, loose: true, extra: 'Стадія pipe: JSONL на stdin → JSONL на stdout; аргументи — будь-які --ключ значення стадії.', run: (p, root, io) => stageCommand(name, p, root, io) }
 }
 
 export const COMMANDS: Record<string, Command> = {
   build: {
     summary: 'зібрати .claude/prompt/*.prompt.tsx у .compiled/*.json, prompt.lock.json і SKILL.md',
-    usage: ['build [--only id,…] [--watch] [--json]'],
-    flags: { only: { type: 'list', desc: 'лише ці промпти (id або шлях)', arg: '<ids>' }, watch: { type: 'bool', desc: 'перезбирати при зміні .claude/prompt/**, gate.json' }, json: { type: 'bool', desc: 'результат JSON (для mod-а)' } },
+    usage: ['build [--only id,…] [--watch] [--json] [--force]'],
+    flags: { only: { type: 'list', desc: 'лише ці промпти (id або шлях)', arg: '<ids>' }, watch: { type: 'bool', desc: 'перезбирати при зміні .claude/prompt/**, gate.json' }, json: { type: 'bool', desc: 'результат JSON (для mod-а)' }, force: { type: 'bool', desc: 'перезаписати SKILL.md, написаний вручну (без generated-by: context-gate)' } },
     async run(p, root, io) {
       if (!bool(p, 'watch')) return doBuild(root, p, io)
       const repo = loadRepo(root)
@@ -228,7 +261,7 @@ export const COMMANDS: Record<string, Command> = {
         if (r.refused) { io.err(`${f}${r.line ? ':' + r.line : ''}: не форматую — ${r.refused}\n`); bad++; continue }
         if (!r.changed) continue
         if (bool(p, 'check')) { io.out(`потребує fmt: ${f}\n`); bad++ }
-        else { writeText(join(root, f), r.text); io.out(`відформатовано ${f}\n`) }
+        else { writeText(join(root, f), r.text, root); io.out(`відформатовано ${f}\n`) }
       }
       return bad ? 1 : 0
     },
@@ -276,7 +309,7 @@ export const COMMANDS: Record<string, Command> = {
     async run(p, root, io) {
       const text = p.positional.join(' ')
       if (!text) { io.err('використання: context-gate pipe "<стадія> | <стадія> …"\n'); return 2 }
-      const input = process.stdin.isTTY ? [] : parseJsonl(await io.stdin()).items
+      const input = parseJsonl(await readOptionalStdin(io.stdin)).items
       const out = await runPipe(text.includes('|') ? text : text + ' | take 1000000', input, { root, ...(bool(p, 'trust-repo') ? { trustRepo: true } : {}) })
       if ('error' in out) { io.err(out.error + '\n'); return out.code ?? 1 }
       io.out(formatStageOut(out))
@@ -348,7 +381,7 @@ export const COMMANDS: Record<string, Command> = {
     flags: { before: { type: 'bool', desc: 'колонка без gate' }, after: { type: 'bool', desc: 'колонка з gate' }, json: { type: 'bool', desc: 'JSON' }, profile: ctxFlags.profile!, tier: ctxFlags.tier!, model: ctxFlags.model! },
     async run(p, root, io) {
       // Bench numbers never depend on the machine: user skills only with an explicit --user-skills.
-      const r = await withUserSkills(p.flags['user-skills'] === true, () => benchCommand(root, p.positional, { before: bool(p, 'before'), after: bool(p, 'after'), json: bool(p, 'json'), ...(str(p, 'profile') ? { profile: str(p, 'profile') } : {}), ...(str(p, 'tier') ? { tier: str(p, 'tier') } : {}), ...(str(p, 'model') ? { model: str(p, 'model') } : {}) }))
+      const r = await withUserSkills(p.flags['user-skills'] === true, () => benchCommand(root, p.positional, { before: bool(p, 'before'), after: bool(p, 'after'), json: bool(p, 'json'), ...(str(p, 'profile') ? { profile: str(p, 'profile') } : {}), ...(str(p, 'tier') ? { tier: str(p, 'tier') } : {}), ...(str(p, 'model') ? { model: str(p, 'model') } : {}), ...(bool(p, 'trust-repo') ? { trustRepo: true } : {}) }))
       io.out(r.out)
       return r.code
     },
@@ -358,7 +391,7 @@ export const COMMANDS: Record<string, Command> = {
     usage: ['example skills [--force]'],
     flags: { force: { type: 'bool', desc: 'перезаписати наявні' } },
     async run(p, root, io) {
-      const r = exampleCommand(root, p.positional[0], { force: bool(p, 'force') })
+      const r = exampleCommand(root, p.positional[0], { force: bool(p, 'force'), dir: loadRepo(root).promptDir })
       ;(r.code ? io.err : io.out)(r.out)
       return r.code
     },
@@ -465,6 +498,18 @@ export function mainHelp(): string {
   return lines.join('\n') + '\n'
 }
 
+/**
+ * `--trust-repo` in CI (risk S10): on `pull_request_target` the checkout may be a fork's code running with the
+ * base repo's secrets, so the flag is refused unless CONTEXT_GATE_TRUST_PR_TARGET=1; on other `pull_request*`
+ * events it works but warns that the PR's TSX, `@run` and cli providers execute.
+ */
+export function ciTrustCheck(env: Record<string, string | undefined>): { allow: boolean; warning?: string } {
+  const ev = env.GITHUB_EVENT_NAME ?? ''
+  if (ev === 'pull_request_target' && env.CONTEXT_GATE_TRUST_PR_TARGET !== '1') return { allow: false, warning: 'context-gate: --trust-repo проігноровано на pull_request_target — код PR (TSX, @run, cli-провайдери) виконався б із секретами базового репозиторію. CONTEXT_GATE_TRUST_PR_TARGET=1 — якщо це свідомо.' }
+  if (ev.startsWith('pull_request')) return { allow: true, warning: `context-gate: --trust-repo на ${ev}: код PR (TSX, @run, cli-провайдери) виконується з правами цього job-а.` }
+  return { allow: true }
+}
+
 export async function main(argv: readonly string[], io: Io): Promise<number> {
   const [name, ...rest] = argv
   if (!name || name === '--help' || name === '-h' || name === 'help') {
@@ -479,6 +524,11 @@ export async function main(argv: readonly string[], io: Io): Promise<number> {
   if (bool(p, 'help')) { io.out(helpText(name, cmd.summary, cmd.usage, cmd.flags, cmd.extra)); return 0 }
   if (p.errors.length) { io.err(p.errors.join('\n') + `\ncontext-gate ${name} --help — довідка.\n`); return 2 }
   const root = str(p, 'root') ? resolve(str(p, 'root')!) : findRoot(process.cwd())
+  if (bool(p, 'trust-repo')) {
+    const t = ciTrustCheck(process.env)
+    if (t.warning) io.err(t.warning + '\n')
+    if (!t.allow) p.flags['trust-repo'] = false
+  }
   try {
     return await withUserSkills(p.flags['user-skills'] !== false, () => cmd.run(p, root, io))
   } catch (e) {

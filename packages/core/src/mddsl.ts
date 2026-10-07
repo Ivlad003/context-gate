@@ -3,8 +3,9 @@
 // diagnostic and the parser moves on.
 
 import type { Diagnostic, IncludeMode, Node, Scope, SectionNode, Tier } from './types.ts'
-import { evalExpr, isStatic, newBudget, parseExpr, splitTemplate } from './expr.ts'
+import { evalExpr, freeVars, isStatic, newBudget, parseExpr, splitTemplate } from './expr.ts'
 import { canonicalNodes } from './canonical.ts'
+import { parseDuration } from './duration.ts'
 
 export interface MarkdownParseResult {
   section: SectionNode
@@ -21,11 +22,18 @@ export interface MarkdownParseOptions {
   path: string
   /** Section fields to inherit when frontmatter does not set them (tier variant files inherit the base). */
   inherit?: Partial<SectionNode>
+  /**
+   * Configured tier names. With them only `<id>.<tier>.md` of a known tier loses its suffix in the section id;
+   * `release.notes.md` stays `release.notes`. Without them every `<a>.<b>.md` is read as a tier variant.
+   */
+  tiers?: Tier[]
 }
 
 const MAX_IF_DEPTH = 3
 const MAX_LOOP_DEPTH = 2
 const MAX_REPEAT = 1000
+/** Nodes `@fn` expansion may produce per file (the interpreter's step limit): a chain of double calls is 2^N. */
+const MAX_EXPANDED_NODES = 10_000
 
 const DIRECTIVES = new Set([
   'if', 'elif', 'else', 'end', 'each', 'let', 'set', 'repeat', 'break', 'continue', 'store', 'run', 'call', 'use', 'include',
@@ -80,6 +88,32 @@ function unquote(s: string): string {
   const t = s.trim()
   if (t.length >= 2 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0]) return t.slice(1, -1)
   return t
+}
+
+/** A quoted message (`@debug`, `@assert`, `@log`, descriptions): the quotes go, `\"` and `\\` lose the backslash. */
+function unquoteMsg(s: string): string {
+  const t = s.trim()
+  return isQuoted(t) ? t.slice(1, -1).replace(/\\(["'\\])/g, '$1') : t
+}
+
+/** True when `s` is one string literal (no unescaped matching quote inside), e.g. `"a b"` but not `'a' in x || 'b'`. */
+function isSingleLiteral(s: string): boolean {
+  const t = s.trim()
+  if (t.length < 2 || (t[0] !== '"' && t[0] !== "'") || t[t.length - 1] !== t[0]) return false
+  for (let i = 1; i < t.length - 1; i++) {
+    if (t[i] === '\\') { i++; continue }
+    if (t[i] === t[0]) return false
+  }
+  return true
+}
+
+/** CommonMark fence opener/closer on a (trimmed) line: the run of ``` or ~~~ and the info string. */
+function fenceLine(trimmed: string): { ch: string; len: number; info: string } | undefined {
+  const m = /^(`{3,}|~{3,})(.*)$/.exec(trimmed)
+  if (!m) return undefined
+  // A backtick fence's info string cannot contain a backtick (``` `x` ``` is inline code).
+  if (m[1][0] === '`' && m[2].includes('`')) return undefined
+  return { ch: m[1][0], len: m[1].length, info: m[2].trim() }
 }
 
 const isQuoted = (s: string): boolean => /^(["']).*\1$/s.test(s.trim())
@@ -156,7 +190,8 @@ function parseFrontmatter(lines: string[], diags: Diagnostic[], path: string): {
     if (value === '') { fm[key] = {}; mapKey = key; continue }
     const v = value.trim()
     if (v.startsWith('[') && v.endsWith(']')) fm[key] = splitTopLevel(v.slice(1, -1)).map(unquote).filter(Boolean)
-    else fm[key] = unquote(v)
+    // `when: 'a' in tags || mode == 'b'` is an expression: only a lone string literal loses its quotes.
+    else fm[key] = isSingleLiteral(v) ? unquote(v) : v
   }
   return { fm, bodyStart: end + 1 }
 }
@@ -177,9 +212,9 @@ export function tierVariantOf(path: string, tiers?: Tier[]): { id: string; tier:
   return { id: m[1], tier: m[2] }
 }
 
-function idFromPath(path: string): string {
+function idFromPath(path: string, tiers?: Tier[]): string {
   const base = (path.split('/').pop() ?? path).replace(/\.md$/, '')
-  const v = tierVariantOf(path)
+  const v = tierVariantOf(path, tiers)
   return v ? v.id : base
 }
 
@@ -209,7 +244,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
     if (scopeRaw === 'static' || scopeRaw === 'profile' || scopeRaw === 'volatile') scope = scopeRaw
     else diag('G006', `Невідомий scope «${scopeRaw}» (static | profile | volatile)`, 1)
   }
-  const section: SectionNode = { id: typeof fm.id === 'string' ? fm.id : inherit.id ?? idFromPath(path), scope, children: [], source: { path, line: 1 } }
+  const section: SectionNode = { id: typeof fm.id === 'string' ? fm.id : inherit.id ?? idFromPath(path, opts.tiers), scope, children: [], source: { path, line: 1 } }
   const when = typeof fm.when === 'string' ? fm.when : inherit.when
   if (when) { section.when = when; checkExpr(when, 1) }
   if (fm.budget !== undefined) {
@@ -229,7 +264,8 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
   const stack: Block[] = [root]
   const fns = new Map<string, { params: string[]; body: PNode[]; line: number }>()
   const rootLets = new Set<string>()
-  let inFence = false
+  /** Open code fence (CommonMark: closed only by the same character, at least as long, without info). */
+  let fence: { ch: string; len: number } | undefined
   let run: { node: Extract<Node, { t: 'run' }>; lines: string[]; line: number } | undefined
 
   const top = (): Block => stack[stack.length - 1]
@@ -245,16 +281,22 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
   const depth = (kinds: Block['kind'][]): number => stack.filter(b => kinds.includes(b.kind) && !(b.kind === 'if' && b.chained)).length
   const pushText = (s: string, line: number): void => {
     const out = target()
-    for (const part of splitTemplate(s)) {
-      if ('text' in part) {
-        const last = out[out.length - 1]
-        if (last && last.t === 'text') last.value += part.text
-        else out.push({ t: 'text', value: part.text })
-      } else {
-        checkExpr(part.expr, line)
-        out.push({ t: 'expr', expr: part.expr })
-      }
+    const lit = (text: string): void => {
+      const last = out[out.length - 1]
+      if (last && last.t === 'text') last.value += text
+      else out.push({ t: 'text', value: text })
     }
+    // `\{{` is a literal `{{` (GitHub Actions `$\{{ github.sha }}`, Helm, Jinja samples).
+    const pieces = s.split('\\{{')
+    pieces.forEach((piece, i) => {
+      if (i) lit('{{')
+      for (const part of splitTemplate(piece)) {
+        if ('text' in part) { if (part.text) lit(part.text) } else {
+          checkExpr(part.expr, line)
+          out.push({ t: 'expr', expr: part.expr })
+        }
+      }
+    })
   }
 
   for (let li = bodyStart; li < lines.length; li++) {
@@ -271,8 +313,13 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
       continue
     }
 
-    if (/^(```|~~~)/.test(trimmed)) { inFence = !inFence; pushText(raw + '\n', line); continue }
-    if (inFence || !trimmed.startsWith('@')) {
+    const fl = fenceLine(trimmed)
+    if (fl && (!fence || (fl.ch === fence.ch && fl.len >= fence.len && !fl.info))) {
+      fence = fence ? undefined : { ch: fl.ch, len: fl.len }
+      pushText(raw + '\n', line)
+      continue
+    }
+    if (fence || !trimmed.startsWith('@')) {
       pushText((trimmed.startsWith('\\@') ? raw.replace('\\@', '@') : raw) + '\n', line)
       continue
     }
@@ -374,6 +421,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
       }
       case 'break':
       case 'continue': {
+        // Inside @fn the call site decides (checked at expansion).
         const inLoop = stack.some(b => b.kind === 'each' || b.kind === 'repeat' || b.kind === 'fn')
         if (!inLoop) { diag('G005', `@${name} поза @each/@repeat`, line); break }
         target().push({ t: name })
@@ -391,6 +439,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         if (bare.length > 1) diag('G004', `Зайві аргументи @run: ${bare.slice(1).join(' ')}`, line, 'warning')
         if (kv.as) node.as = kv.as
         if (kv.cache) node.cache = kv.cache
+        if (kv.cache && parseDuration(kv.cache) === undefined) diag('G004', `cache=«${kv.cache}» — не тривалість (500ms, 10s, 5m, 1h, 1d, 1h30m)`, line, 'warning')
         if (kv.store) { node.store = kv.store; legacyStore('run', kv.store, node.as, line) }
         if (kv.needs) node.needs = kv.needs.split(',').map(s => s.trim()).filter(Boolean)
         if (!kv.cache && scope === 'static') diag('G163', '@run без cache у static-секції', line, 'error', 'додати cache=… або перенести у volatile')
@@ -406,6 +455,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         const node: Extract<Node, { t: 'call' }> = { t: 'call', fn: c.name, args: c.args, as: bare[1] }
         if (Object.keys(c.kwargs).length) node.kwargs = c.kwargs
         if (kv.cache) node.cache = kv.cache
+        if (kv.cache && parseDuration(kv.cache) === undefined) diag('G004', `cache=«${kv.cache}» — не тривалість (500ms, 10s, 5m, 1h, 1d, 1h30m)`, line, 'warning')
         if (kv.store) { node.store = kv.store; legacyStore('call', kv.store, node.as, line) }
         target().push(node)
         break
@@ -422,8 +472,13 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
       case 'skill':
       case 'rule': {
         const ws = words(rest)
-        const desc = ws.filter(isQuoted).map(unquote)[0]
-        const { bare, kv } = options(ws.filter(w => !isQuoted(w)))
+        // The first word is the path / name even when quoted (`@include "docs/my notes.md"`); a quoted word
+        // after it is the description.
+        const first = ws[0] !== undefined && isQuoted(ws[0]) && !/^[A-Za-z_][\w-]*=/.test(ws[0]) ? [unquote(ws[0])] : []
+        const restWs = first.length ? ws.slice(1) : ws
+        const desc = restWs.filter(isQuoted).map(unquoteMsg)[0]
+        const { bare: bareRest, kv } = options(restWs.filter(w => !isQuoted(w)))
+        const bare = [...first, ...bareRest]
         if (!bare[0]) { diag('G004', `@${name} потребує ${name === 'include' ? 'шлях' : 'ім\'я'}`, line); break }
         const mode = (bare[1] ?? (name === 'include' || name === 'section' ? 'inline' : 'ref')) as IncludeMode
         if (!MODES.has(mode)) { diag('G004', `Невідомий режим «${mode}» (inline | ref | lazy)`, line); break }
@@ -480,7 +535,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         const node: Extract<Node, { t: 'debug' }> = { t: 'debug', exprs: [] }
         const msg = /^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*(?!,)(.*)$/s.exec(rest)
         if (msg && (msg[2].includes('{{') || !msg[2].trim())) {
-          node.message = unquote(msg[1]) + (msg[2].trim() ? ' ' + msg[2].trim() : '')
+          node.message = unquoteMsg(msg[1]) + (msg[2].trim() ? ' ' + msg[2].trim() : '')
           for (const p of splitTemplate(node.message)) if ('expr' in p) checkExpr(p.expr, line)
         } else {
           node.exprs = splitTopLevel(rest).filter(Boolean)
@@ -494,7 +549,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         if (!parts[0]) { diag('G004', '@assert без умови', line); break }
         const node: Extract<Node, { t: 'assert' }> = { t: 'assert', test: parts[0] }
         if (parts.length > 1 && isQuoted(parts[parts.length - 1])) {
-          node.message = unquote(parts[parts.length - 1])
+          node.message = unquoteMsg(parts[parts.length - 1])
           node.test = parts.slice(0, -1).join(', ')
         } else if (parts.length > 1) node.test = rest
         checkExpr(node.test, line)
@@ -506,7 +561,7 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
         const { bare, kv } = options(ws)
         const level = (kv.level ?? 'info') as 'info' | 'warn' | 'error'
         if (!['info', 'warn', 'error'].includes(level)) { diag('G004', `Невідомий level «${level}»`, line); break }
-        target().push({ t: 'log', level, message: bare.map(unquote).join(' ') })
+        target().push({ t: 'log', level, message: bare.map(unquoteMsg).join(' ') })
         break
       }
       case 'trace': {
@@ -542,7 +597,8 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
     }
   }
 
-  // Expand `@fn` call sites; detect direct and mutual recursion (G151).
+  // `@fn`: static checks on the call graph first (unknown name G001, arity G004, recursion G151), then call
+  // sites are inlined. Bodies are not expanded just to validate them, and the expanded size is bounded (G156).
   const seen = new Set<string>()
   const expDiag = (code: Diagnostic['code'], message: string, line: number): void => {
     const k = `${code}:${line}:${message}`
@@ -550,52 +606,132 @@ export function parseMarkdownPrompt(text: string, opts: MarkdownParseOptions): M
     seen.add(k)
     diag(code, message, line, 'error', code === 'G151' ? 'ця логіка має жити в провайдері' : undefined)
   }
-  const expand = (nodes: PNode[], chain: string[]): Node[] => {
+  const kids = (n: PNode): PNode[][] => n.t === 'if' ? [n.then as PNode[], (n.else ?? []) as PNode[]] : 'children' in n && Array.isArray(n.children) ? [n.children as PNode[]] : []
+  const callsIn = (nodes: readonly PNode[], out: FnCall[] = []): FnCall[] => {
+    for (const n of nodes) { if (n.t === 'fncall') out.push(n); else for (const k of kids(n)) callsIn(k, out) }
+    return out
+  }
+  for (const c of [...callsIn(root.children), ...[...fns.values()].flatMap(f => callsIn(f.body))]) {
+    const fn = fns.get(c.name)
+    if (!fn) expDiag('G001', `Невідома директива або функція @${c.name}`, c.line)
+    else if (c.args.length !== fn.params.length) expDiag('G004', `@${c.name} очікує ${fn.params.length} аргумент(и), отримано ${c.args.length}`, c.line)
+  }
+  const recursive = new Set<string>()
+  {
+    const state = new Map<string, 1 | 2>()
+    const cycles = new Set<string>()
+    const dfs = (name: string, path: string[]): void => {
+      state.set(name, 1)
+      for (const c of callsIn(fns.get(name)!.body)) {
+        if (!fns.has(c.name)) continue
+        const st = state.get(c.name)
+        if (st === 1) {
+          const cycle = path.slice(path.indexOf(c.name))
+          cycle.forEach(x => recursive.add(x))
+          const k = [...cycle].sort().join(',')
+          if (!cycles.has(k)) { cycles.add(k); expDiag('G151', `Рекурсія @fn: ${[...cycle, c.name].join(' → ')}`, c.line) }
+        } else if (!st) dfs(c.name, [...path, c.name])
+      }
+      state.set(name, 2)
+    }
+    for (const name of fns.keys()) if (!state.has(name)) dfs(name, [name])
+  }
+  // Expanded node count of one call (memoized; recursion already reported counts as 0).
+  const sizes = new Map<string, number>()
+  const sizeOfNodes = (nodes: readonly PNode[]): number => {
+    let total = 0
+    for (const n of nodes) {
+      if (n.t === 'fncall') { const fn = fns.get(n.name); total += 1 + (fn ? 2 * fn.params.length + sizeOfFn(n.name) : 0) } else {
+        total++
+        for (const k of kids(n)) total += sizeOfNodes(k)
+      }
+      if (total > MAX_EXPANDED_NODES) return total
+    }
+    return total
+  }
+  const sizeOfFn = (name: string): number => {
+    if (recursive.has(name)) return 0
+    const memo = sizes.get(name)
+    if (memo !== undefined) return memo
+    sizes.set(name, 0)
+    const n = Math.min(sizeOfNodes(fns.get(name)!.body), MAX_EXPANDED_NODES + 1)
+    sizes.set(name, n)
+    return n
+  }
+  // `@break` / `@continue` that leave the body outside any loop of the body (memoized per fn).
+  const escapes = new Map<string, boolean>()
+  const escapesNodes = (nodes: readonly PNode[]): boolean => nodes.some(n =>
+    n.t === 'break' || n.t === 'continue' ? true
+      : n.t === 'fncall' ? escapesFn(n.name)
+        : n.t === 'each' || n.t === 'repeat' ? false
+          : kids(n).some(escapesNodes))
+  const escapesFn = (name: string): boolean => {
+    if (!fns.has(name) || recursive.has(name)) return false
+    if (!escapes.has(name)) { escapes.set(name, false); escapes.set(name, escapesNodes(fns.get(name)!.body)) }
+    return escapes.get(name)!
+  }
+  let expanded = 0
+  let tooBig = false
+  let tmp = 0
+  const expand = (nodes: PNode[], chain: string[], inLoop: boolean): Node[] => {
     const out: Node[] = []
     for (const n of nodes) {
       if (n.t === 'fncall') {
         const fn = fns.get(n.name)
-        if (!fn) { expDiag('G001', `Невідома директива або функція @${n.name}`, n.line); continue }
-        if (chain.includes(n.name)) {
-          const cycle = chain.slice(chain.indexOf(n.name))
-          const k = `G151:${[...cycle].sort().join(',')}`
-          if (!seen.has(k)) { seen.add(k); expDiag('G151', `Рекурсія @fn: ${[...cycle, n.name].join(' → ')}`, n.line) }
-          continue
+        if (!fn || recursive.has(n.name) || chain.includes(n.name)) continue
+        if (!chain.length) {
+          expanded += sizeOfFn(n.name)
+          if (expanded > MAX_EXPANDED_NODES) {
+            if (!tooBig) { tooBig = true; expDiag('G156', `Розгортання @fn дає понад ${MAX_EXPANDED_NODES} вузлів (виклик @${n.name})`, n.line) }
+            continue
+          }
         }
-        if (n.args.length !== fn.params.length) expDiag('G004', `@${n.name} очікує ${fn.params.length} аргумент(и), отримано ${n.args.length}`, n.line)
-        const binds: Node[] = fn.params.map((p, i) => ({ t: 'let', name: p, value: n.args[i] ?? 'null' }))
-        out.push({ t: 'if', test: 'true', then: [...binds, ...expand(fn.body, [...chain, n.name])] })
+        if (!inLoop && escapesFn(n.name)) expDiag('G005', `@break/@continue у @${n.name} поза @each/@repeat`, n.line)
+        // Arguments are evaluated in the caller's frame: when one names an earlier parameter (`@pair(b, a)`),
+        // bind every argument to a temporary first, then the parameters.
+        const params = fn.params
+        const args = params.map((_, i) => n.args[i] ?? 'null')
+        const clash = args.some((a, i) => { const p = parseExpr(a); return !!p.ast && freeVars(p.ast).some(v => params.indexOf(v) >= 0 && params.indexOf(v) < i) })
+        let binds: Node[]
+        if (clash) {
+          const id = tmp++
+          binds = [
+            ...args.map((a, i): Node => ({ t: 'let', name: `__fn${id}_${i}`, value: a })),
+            ...params.map((p, i): Node => ({ t: 'let', name: p, value: `__fn${id}_${i}` })),
+          ]
+        } else binds = params.map((p, i): Node => ({ t: 'let', name: p, value: args[i] }))
+        out.push({ t: 'if', test: 'true', then: [...binds, ...expand(fn.body, [...chain, n.name], inLoop)] })
         continue
       }
-      out.push(expandChildren(n, chain))
+      out.push(expandChildren(n, chain, inLoop))
     }
     return out
   }
-  const expandChildren = (n: Node, chain: string[]): Node => {
+  const expandChildren = (n: Node, chain: string[], inLoop: boolean): Node => {
     switch (n.t) {
-      case 'if': return { ...n, then: expand(n.then, chain), ...(n.else ? { else: expand(n.else, chain) } : {}) }
+      case 'if': return { ...n, then: expand(n.then, chain, inLoop), ...(n.else ? { else: expand(n.else, chain, inLoop) } : {}) }
       case 'each':
-      case 'repeat':
+      case 'repeat': return { ...n, children: expand(n.children, chain, true) } as Node
       case 'tier':
       case 'el':
       case 'fence':
-      case 'list': return { ...n, children: expand(n.children, chain) } as Node
+      case 'list': return { ...n, children: expand(n.children, chain, inLoop) } as Node
       default: return n
     }
   }
-  for (const [fname, fn] of fns) expand(fn.body, [fname])
   // Frontmatter `use:` bindings become canonical `use` nodes at the top of the section.
   const fmUses: Node[] = fm.use && typeof fm.use === 'object' && !Array.isArray(fm.use)
     ? Object.entries(fm.use).map(([name, p]) => ({ t: 'use', name, path: p }))
     : []
   // Р5: only canonical nodes leave the compiler (`store=` → `store`, `@let x = scripts.f()` → `call`).
-  section.children = canonicalNodes([...fmUses, ...expand(root.children, [])])
+  section.children = canonicalNodes([...fmUses, ...expand(root.children, [], false)])
 
   return { section, uses, diagnostics, ...(sourceHash ? { sourceHash } : {}), frontmatter: fm }
 }
 
 function dedent(lines: string[]): string[] {
-  const ind = Math.min(...lines.filter(l => l.trim()).map(l => /^[ \t]*/.exec(l)![0].length))
+  let ind = Infinity
+  for (const l of lines) if (l.trim()) ind = Math.min(ind, /^[ \t]*/.exec(l)![0].length)
   if (!Number.isFinite(ind) || ind === 0) return lines
   return lines.map(l => l.slice(Math.min(ind, /^[ \t]*/.exec(l)![0].length)))
 }
@@ -621,7 +757,14 @@ export function printMarkdownNodes(nodes: readonly Node[]): string {
   let out = ''
   const nl = (): void => { if (out && !out.endsWith('\n')) out += '\n' }
   const dir = (line: string): void => { nl(); out += line + '\n' }
-  const text = (s: string): void => { out += s.replace(/(^|\n)([ \t]*)@/g, '$1$2\\@') }
+  // A text `@` is escaped only where it starts a physical line of the output (the parser unescapes `\@` only
+  // there); it is marked here and resolved once the whole text is known. `{{` in text is always literal.
+  const text = (s: string): void => { out += s.replace(/@/g, AT_MARK).replace(/\{\{/g, '\\{{') }
+  const fence = (body: string): string => {
+    let max = 0
+    for (const m of body.matchAll(/`+/g)) max = Math.max(max, m[0].length)
+    return '`'.repeat(Math.max(3, max + 1))
+  }
   const q = (s: string): string => JSON.stringify(s)
   const opts = (kv: Record<string, string | undefined>): string => Object.entries(kv).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => ` ${k}=${/\s/.test(v!) ? q(v!) : v}`).join('')
   const inline = (list: readonly Node[]): string => { const save = out; out = ''; walk(list, undefined); const r = out; out = save; return r }
@@ -636,7 +779,7 @@ export function printMarkdownNodes(nodes: readonly Node[]): string {
             case 'li': nl(); out += (listKind === 'ol' ? '1. ' : '- ') + inner().trim() + '\n'; break
             case 'ol': case 'ul': nl(); walk(n.children.filter((c) => !(c.t === 'text' && !c.value.trim())), n.tag); break
             case 'code': out += '`' + inner() + '`'; break
-            case 'pre': nl(); out += '```' + (n.attrs?.lang ?? '') + '\n' + inner().replace(/^\n+|\n+$/g, '') + '\n```\n'; break
+            case 'pre': { nl(); const body = inner().replace(/^\n+|\n+$/g, ''); const f = fence(body); out += f + (n.attrs?.lang ?? '') + '\n' + body + '\n' + f + '\n'; break }
             case 'b': out += `**${inner()}**`; break
             case 'i': out += `*${inner()}*`; break
             case 'p': nl(); out += inner().trim() + '\n\n'; break
@@ -651,7 +794,15 @@ export function printMarkdownNodes(nodes: readonly Node[]): string {
         case 'if': {
           dir(`@if ${n.test}`)
           walk(n.then, listKind)
-          if (n.else?.length) { dir('@else'); walk(n.else, listKind) }
+          // An else that is a single `if` is what `@elif` parses into: print the chain flat (one @end, no depth).
+          let rest = n.else
+          while (rest && rest.length === 1 && rest[0].t === 'if') {
+            const x: Extract<Node, { t: 'if' }> = rest[0]
+            dir(`@elif ${x.test}`)
+            walk(x.then, listKind)
+            rest = x.else
+          }
+          if (rest?.length) { dir('@else'); walk(rest, listKind) }
           dir('@end')
           break
         }
@@ -675,7 +826,7 @@ export function printMarkdownNodes(nodes: readonly Node[]): string {
           break
         }
         case 'tier': dir(`@tier${n.is === 'non-premium' ? '' : ' ' + n.is.join(', ')}`); walk(n.children, listKind); dir('@end'); break
-        case 'fence': nl(); out += '```' + (n.lang ?? '') + (n.title ? ` ${n.title}` : '') + '\n' + inline(n.children).replace(/^\n+|\n+$/g, '') + '\n```\n'; break
+        case 'fence': { nl(); const body = inline(n.children).replace(/^\n+|\n+$/g, ''); const f = fence(body); out += f + (n.lang ?? '') + (n.title ? ` ${n.title}` : '') + '\n' + body + '\n' + f + '\n'; break }
         case 'list': walk(n.children, n.ordered ? 'ol' : 'ul'); break
         case 'table': {
           nl()
@@ -693,8 +844,12 @@ export function printMarkdownNodes(nodes: readonly Node[]): string {
     }
   }
   walk(nodes, undefined)
-  return out.replace(/\n{3,}/g, '\n\n').trim()
+  const lines = out.replace(/\n{3,}/g, '\n\n').trim().split('\n')
+  return lines.map(l => l.replace(new RegExp(`^([ \\t]*)${AT_MARK}`), '$1\\@').split(AT_MARK).join('@')).join('\n')
 }
+
+/** Private-use placeholder for a text `@` while printing (see `printMarkdownNodes`). */
+const AT_MARK = '\uE000'
 
 /** True when the nodes already carry tier variants (`tier` nodes anywhere). */
 export function hasTierNodes(nodes: readonly Node[]): boolean {

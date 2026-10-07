@@ -47,7 +47,8 @@ export function resolveCli(i: ResolveCliInput): CliCommand {
 
 /** Shell line for a terminal (`expand` code action): quoted argv, env prefix on POSIX. */
 export function shellLine(cmd: CliCommand, args: string[]): string {
-  const q = (a: string) => (/[\s"'$`\\]/.test(a) ? JSON.stringify(a) : a)
+  // POSIX double quotes still expand `$`, backticks and `\`: escape them (JSON.stringify did not).
+  const q = (a: string) => (!/[\s"'$`\\;&|<>()*?!#~{}[\]]/.test(a) ? a : process.platform === 'win32' ? JSON.stringify(a) : `"${a.replace(/(["\\$`])/g, '\\$1')}"`)
   return [...cmd.argv, ...args].map(q).join(' ')
 }
 

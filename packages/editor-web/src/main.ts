@@ -5,7 +5,13 @@
 import { pathToFileURL } from 'node:url'
 import { startEditorServer } from './server.ts'
 
-export interface MainArgs { id?: string; root: string; port: number; cli?: string; json: boolean; help: boolean; /** `--no-stdin-watch`: the parent owns the lifetime (`$.process.spawn` kills the child), stdin may be closed. */ noStdinWatch?: boolean }
+export interface MainArgs {
+  id?: string; root: string; port: number; cli?: string; json: boolean; help: boolean
+  /** `--no-stdin-watch`: the parent owns the lifetime (`$.process.spawn` kills the child), stdin may be closed. */
+  noStdinWatch?: boolean
+  /** `--no-cdn`: no CodeMirror from esm.sh (plain textarea, no third-party code next to the API token). */
+  noCdn?: boolean
+}
 
 export function parseMainArgs(argv: string[]): MainArgs {
   const out: MainArgs = { root: process.cwd(), port: 0, json: false, help: false }
@@ -17,6 +23,7 @@ export function parseMainArgs(argv: string[]): MainArgs {
     else if (a === '--cli') out.cli = next()
     else if (a === '--json') out.json = true
     else if (a === '--no-stdin-watch') out.noStdinWatch = true
+    else if (a === '--no-cdn') out.noCdn = true
     else if (a === '-h' || a === '--help') out.help = true
     else if (!a.startsWith('-') && !out.id) out.id = a
     else throw new Error(`Невідомий аргумент ${a}`)
@@ -24,13 +31,13 @@ export function parseMainArgs(argv: string[]): MainArgs {
   return out
 }
 
-const USAGE = 'Використання: context-gate-edit <id> [--root <шлях>] [--port <n>] [--cli "<команда>"] [--json] [--no-stdin-watch]'
+const USAGE = 'Використання: context-gate-edit <id> [--root <шлях>] [--port <n>] [--cli "<команда>"] [--json] [--no-stdin-watch] [--no-cdn]'
 
 export async function main(argv: string[]): Promise<number> {
   let args: MainArgs
   try { args = parseMainArgs(argv) } catch (e) { process.stderr.write(`${(e as Error).message}\n${USAGE}\n`); return 2 }
   if (args.help || !args.id) { process.stdout.write(USAGE + '\n'); return args.help ? 0 : 2 }
-  const srv = await startEditorServer({ root: args.root, id: args.id, port: args.port, ...(args.cli ? { cli: args.cli } : {}) })
+  const srv = await startEditorServer({ root: args.root, id: args.id, port: args.port, ...(args.cli ? { cli: args.cli } : {}), ...(args.noCdn ? { cdn: false } : {}) })
   process.stdout.write(args.json ? JSON.stringify({ url: srv.url, port: srv.port, file: srv.file }) + '\n' : `context-gate edit: ${srv.file}\n${srv.url}\n`)
   await new Promise<void>((done) => {
     const stop = (): void => { void srv.close().then(done) }

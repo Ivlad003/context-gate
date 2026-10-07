@@ -3,7 +3,7 @@
 // collected by the components during module evaluation are drained here.
 
 import type { CompiledPrompt, Diagnostic, Node, SectionNode } from '../../core/src/types.ts'
-import { isMarker, takeDiagnostics, type PromptMarker } from './core.ts'
+import { diagnosticsOf, isMarker, type PromptMarker } from './core.ts'
 import { canonicalNodes } from '../../core/src/canonical.ts'
 
 export type CompiledPart = Pick<CompiledPrompt, 'sections' | 'skill' | 'uses' | 'diagnostics'> & { id?: string }
@@ -22,10 +22,11 @@ function rel(p: string, root?: string): string {
 }
 
 export function compilePrompt(value: unknown, opts: CompileOptions = {}): CompiledPart {
-  const diagnostics: Diagnostic[] = takeDiagnostics()
   let marker: PromptMarker | undefined
   if (isMarker(value) && value.$cg === 'prompt') marker = value
-  else diagnostics.push({ code: 'G001', severity: 'error', message: 'Default export промпту має бути елементом <Prompt>.', ...(opts.file ? { path: opts.file } : {}) })
+  // Multi-skill packages: each <Prompt> owns the diagnostics recorded while it was built (core `claimDiagnostics`).
+  const diagnostics: Diagnostic[] = diagnosticsOf(marker)
+  if (!marker) diagnostics.push({ code: 'G001', severity: 'error', message: 'Default export промпту має бути елементом <Prompt>.', ...(opts.file ? { path: opts.file } : {}) })
   const out: CompiledPart = { sections: [], diagnostics }
   if (marker) {
     if (marker.id) out.id = marker.id

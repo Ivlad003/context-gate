@@ -9,14 +9,14 @@ import { renderPrompt } from '../../packages/core/src/render.ts'
 import { skillArgs } from '../../packages/core/src/assemble.ts'
 import { decideGate } from '../../packages/core/src/decide.ts'
 import { evalSource, newBudget } from '../../packages/core/src/expr.ts'
-import { makeItem } from '../../packages/core/src/items.ts'
+import { groupsOf, makeItem, mcpServerOf } from '../../packages/core/src/items.ts'
 import { formatPipeText, itemProvenance, runPipeline, type PipeHost, type RenderedRecord } from '../../packages/core/src/pipeline.ts'
 import type { ContextGateManual, ContextGateSectionView } from '../../types'
 import { json } from '../state.ts'
-import { type Io, type Runtime, now } from '../ctx.ts'
+import { type Io, OWN_TOOL_PREFIX, type Runtime, now } from '../ctx.ts'
 import { ensureSession } from './config.ts'
 import { rulesReport } from './cursor-rules.ts'
-import { effectiveMode, ensureItems, readBranch, recompute } from './skill-gate.ts'
+import { effectiveMode, ensureItems, groupedConfig, readBranch, recompute } from './skill-gate.ts'
 import { buildPrompts, buildScope, composeSections, hostFor, loadPrompts, preloadOf, renderOptions, sectionsFor } from './dsl.ts'
 import { revokeTrust } from './trust.ts'
 import { HEALTH_PANE, SECTION_PANE, WHY_PANE, buildErrorOf, gateLine } from './ui.ts'
@@ -24,12 +24,13 @@ import { openEditor } from './editor.ts'
 import { unverifiedLines } from './probe.ts'
 import { formatTierCosts, tierCosts } from '../../packages/core/src/report.ts'
 
-export const GATE_HINT = '[<profile>|+group|-group|off|auto|new|why [off]|shadow|apply|rules|health|build|render prompt://<id>|edit <id>|trust revoke|<stage> | <stage>…]'
+export const GATE_HINT = '[<profile>|+group|-group|off|auto|new|why [off|<item>]|shadow|apply|rules|health|build|render prompt://<id>|edit <id>|trust revoke|<stage> | <stage>…]'
 
 const HELP = [
   '/gate — стан; /gate <profile> — зафіксувати профіль; /gate +g / -g — групи на сесію;',
   '/gate off | auto — вимкнути фільтрацію / повернути автоматику; /gate new — перекласифікувати;',
-  '/gate shadow | apply — режим класифікатора; /gate why [off] — журнал рішень; /gate rules — доставлені правила;',
+  '/gate shadow | apply — режим класифікатора; /gate why [off] — журнал рішень; /gate why <елемент> — чому skill/MCP/агент/правило вимкнено;',
+  '/gate rules — доставлені правила;',
   '/gate health — метрики промпту (pane); /gate build — зібрати промпти; /gate render prompt://<id> — секція (pane);',
   '/gate edit <id> — браузерний редактор; /gate trust revoke; pipe: /gate collect kind=skill | where group=frontend | off.',
 ].join('\n')
@@ -76,6 +77,60 @@ async function provenanceLines(io: Io, rt: Runtime, gate: Gate, manual: ContextG
   return [...by].map(([label, ids]) => `- ${label}: ${ids.slice(0, 20).join(', ')}${ids.length > 20 ? ` …(+${ids.length - 20})` : ''}`)
 }
 
+const DECISION_LABEL: Record<string, string> = { on: 'увімкнено', nameOnly: 'лише назва (без опису)', off: 'вимкнено', preload: 'preload (тіло в промпті)' }
+
+/** Items a `/gate why <q>` names: an id (`skill:x`, `tool:mcp__a__b`), a name, or an MCP server (`postgres`). */
+function itemsNamed(items: readonly Item[], q: string): Item[] {
+  const bare = q.replace(/^@/, '')
+  const byId = items.filter((it) => it.id === bare)
+  if (byId.length) return byId
+  return items.filter((it) => it.name === bare || it.name.replace(/^[^:]+:/, '') === bare || (it.kind === 'tool' && (mcpServerOf(it.name) === bare || it.name === OWN_TOOL_PREFIX + bare)))
+}
+
+/**
+ * `/gate why <item>` (O7): for each item the query names, the decision in force and the reason: the groups that
+ * mention it, which of them are active (profile, tier, `/gate +g`), the mode, denies so far, and how to turn it
+ * on; an item the session does not hold says why it may be missing.
+ */
+async function explainItem(io: Io, rt: Runtime, q: string): Promise<string> {
+  if (!rt.config) return `skill-gate вимкнено: ${rt.disabled.gate ?? 'немає конфігурації'} — жоден елемент не фільтрується.`
+  const items = await ensureItems(io, rt)
+  const gate = await io.read('gate')
+  const log = (await io.read('log')) as DecisionLogEntry[]
+  const found = itemsNamed(items, q)
+  if (!found.length) {
+    const lines = [`«${q}» немає серед елементів сесії (${items.length}), тож gate його не вимикав.`]
+    if (!rt.listingText) lines.push('- листинг skills ще не надходив (з’явиться з першим запитом до моделі): skill може бути там.')
+    if (!rt.mcpTools?.length) lines.push('- MCP-інструментів сесія ще не показала.')
+    if (rt.disabled.rules) lines.push(`- шар cursor-rules вимкнено: ${rt.disabled.rules}`)
+    if ((rt.config.itemSources ?? []).some((s) => s.kind === 'claude-tools' && s.match)) lines.push('- itemSources `claude-tools` з `match` звужує, які MCP-інструменти стають елементами.')
+    const denied = log.filter((e) => e.kind === 'deny' && JSON.stringify(e.data ?? {}).includes(q)).length
+    if (denied) lines.push(`- у журналі ${denied} deny зі згадкою «${q}»: /gate why`)
+    lines.push('Повний перелік: /gate collect | where name~' + JSON.stringify(q))
+    return lines.join('\n')
+  }
+  const cfg = groupedConfig(rt.config)
+  const active = new Set(gate?.groups ?? [])
+  const mode = !gate ? 'рішення ще не було' : gate.off ? '/gate off: нічого не фільтрується' : gate.shadow ? 'shadow: рішення лише в журнал, нічого не фільтрується' : `застосовано (${gate.profile ? `профіль ${gate.profile}` : `tier ${gate.tier}`})`
+  const lines = [`режим: ${mode}`]
+  for (const it of found.slice(0, 10)) {
+    const d = gate?.items[it.id]
+    const groups = groupsOf(cfg, it)
+    const on = groups.filter((g) => active.has(g))
+    const parts = [`\`${it.id}\`: ${d ? DECISION_LABEL[d] ?? d : 'ще не вирішено'}`]
+    if (groups.length) parts.push(`групи: ${groups.map((g) => `${g}${active.has(g) ? ' (активна)' : ''}`).join(', ')}`)
+    else parts.push(it.kind === 'tool' && it.name.startsWith('mcp__') ? 'жодна група не згадує → не фільтрується' : it.kind === 'skill' ? 'жодна група не згадує → лише назва в apply' : 'жодна група не згадує → доступний')
+    if (d === 'off' && groups.length && !on.length) parts.push(`увімкнути: /gate +${groups[0]}`)
+    const denies = rt.denies[it.name] ?? rt.denies[it.name.replace(/^tool:/, '')]
+    if (denies) parts.push(`deny у сесії: ${denies}`)
+    if (it.kind === 'rule' && d === 'off' && rt.rules?.list.find((r) => r.id === it.name)?.type === 'auto') parts.push('Auto Attached: доставляється за globs, профіль його не вимикає')
+    if (it.kind === 'rule') parts.push(`доставлено main: ${(await io.read('seen')).includes(`main:${it.name}`) ? 'так' : 'ні'}`)
+    lines.push(`- ${parts.join(' · ')}`)
+  }
+  if (found.length > 10) lines.push(`…(+${found.length - 10})`)
+  return lines.join('\n')
+}
+
 async function setManual(io: Io, fn: (m: ContextGateManual) => ContextGateManual): Promise<void> {
   await io.update('manual', (m) => json(fn(m)))
 }
@@ -87,6 +142,9 @@ export async function registerCommands(io: Io): Promise<void> {
 
 export async function gateCommand(io: Io, rt: Runtime, args: string): Promise<{ text: string }> {
     await ensureSession(io, rt)
+    // `/gate why <item>` (O7): core's grammar knows only `why [off]`, the item form is the mod's.
+    const whyItem = args.includes('|') ? null : /^\s*why\s+(\S.*?)\s*$/.exec(args)
+    if (whyItem && whyItem[1] !== 'off') return { text: await explainItem(io, rt, whyItem[1]) }
     const profiles = rt.config ? Object.keys(rt.config.profiles) : undefined
     const cmd = parseGateCommand(args, profiles ? { profiles } : {})
     if ('error' in cmd) return { text: `${cmd.error}\n${HELP}` }
@@ -106,8 +164,10 @@ export async function gateCommand(io: Io, rt: Runtime, args: string): Promise<{ 
         else if (cmd.cmd === 'groups') await setManual(io, (m) => ({ ...m, add: [...new Set([...m.add.filter((g) => !cmd.remove.includes(g)), ...cmd.add])], remove: [...new Set([...m.remove.filter((g) => !cmd.add.includes(g)), ...cmd.remove])] }))
         else if (cmd.cmd === 'off') await setManual(io, (m) => ({ ...m, off: true }))
         else await setManual(io, (m) => ({ add: [], remove: [], ...(m.mode ? { mode: m.mode } : {}) }))
-        await recompute(io, rt, 'manual', cmd.cmd === 'auto' ? { recheck: true, recheckReason: 'auto' } : {})
-        return { text: await statusText(io, rt) }
+        const g = await recompute(io, rt, 'manual', cmd.cmd === 'auto' ? { recheck: true, recheckReason: 'auto' } : {})
+        // In shadow `+g` / `-g` only edit the proposal (M20): say so, the user may expect filtering to start.
+        const note = cmd.cmd === 'groups' && g?.shadow ? 'shadow: групи записано в пропозицію, нічого не фільтрується; застосувати: /gate apply або /gate <профіль>.\n' : ''
+        return { text: note + (await statusText(io, rt)) }
       }
       case 'new': {
         const off = needGate()
@@ -187,7 +247,7 @@ export async function renderSectionView(io: Io, rt: Runtime, id: string): Promis
   const set = await loadPrompts(io, rt)
   const host = await hostFor(io, rt)
   const { scope, tier } = await buildScope(io, rt, host, undefined)
-  const assembled = sectionsFor(rt, set, tier, await preloadOf(io))
+  const assembled = sectionsFor(rt, set, tier, await preloadOf(io, rt))
   const skill = set.compiled.find((p) => p.skill?.name === id)
   if (skill?.skill) {
     const parsed = skillArgs(skill, '')
@@ -275,7 +335,7 @@ export function modPipeHost(io: Io, rt: Runtime): PipeHost {
       const host = await hostFor(io, rt)
       const built = await buildScope(io, rt, host, a.model)
       const tier = a.tier ?? built.tier
-      const res = await renderPrompt(sectionsFor(rt, set, tier, await preloadOf(io)).system, built.scope, host, renderOptions(rt, tier))
+      const res = await renderPrompt(sectionsFor(rt, set, tier, await preloadOf(io, rt)).system, built.scope, host, renderOptions(rt, tier))
       const sections = new Map<string, RenderedRecord>()
       for (const s of res.sections) if (ids.has(s.id)) sections.set(s.id, { text: s.text, tokens: s.tokens, included: s.included, ...(s.reason ? { reason: s.reason } : {}), status: s.status })
       return { tier, sections }

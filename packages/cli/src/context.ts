@@ -1,7 +1,8 @@
 // Render context for the CLI (SPEC «Автономний інтерпретатор», «Провайдери»): live repo (git, cursor rules,
 // gate decision, providers), a session snapshot from `.claude/gate.log.jsonl`, or a fixture JSON.
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join, relative, resolve } from 'node:path'
 import { loadEsbuild } from './esbuild-load.ts'
 import type { CompiledPrompt, Diagnostic, Gate, GateConfig, Item, MdcRule, ProviderConfig, Signals, Tier, Value } from '../../core/src/types.ts'
@@ -24,8 +25,11 @@ import { scriptArgv, shimLang, usedFunctions } from '../../core/src/shims.ts'
 import { scriptFnName, scriptLang } from './scripts.ts'
 import { NODE_SHIM } from './shims.ts'
 import { repoCacheDir, trustState, type TrustState } from './settings.ts'
-import { posix, readJson, readText, runProcess, sha256, walkFiles, writeJson } from './util.ts'
+import { lexicallyInside, posix, readJson, readText, runProcess, safeJoin, sha256, walkFiles, walkFilesInfo, writeJson } from './util.ts'
 import { fileProviderValue, parseLoose, pickFields, providerResultOk } from '../../core/src/providers.ts'
+
+/** Shared deadline of all provider values of one render (each process still has its own 10 s timeout). */
+export const PROVIDERS_DEADLINE_MS = 12_000
 
 export const BUILTIN_PROVIDERS = new Set(['git', 'fs', 'cursor', 'session', 'gate', 'ctx', 'scripts', 'data', 'args', 'budgets'])
 
@@ -42,26 +46,63 @@ export interface Repo {
   narrowBinaries?: string[]
 }
 
+export const DEFAULT_PROMPT_DIR = '.claude/prompt'
+/** The prompt dir when even `.claude/prompt` is a symlink out of the repo: a path nothing creates, so no prompt is
+ *  read from outside and nothing is built there (an empty prompt set). */
+const NO_PROMPT_DIR = '.claude/.context-gate-no-prompt-dir'
+
 export function loadRepo(root: string): Repo {
   const text = readText(join(root, '.claude', 'gate.json'))
   const { config, diagnostics } = loadConfig(text)
   const cfg = config ?? loadConfig(undefined).config!
   const narrow = config?.allowBinaries
-  const diags = diagnostics
-  return { root, config: cfg, configDiagnostics: diags, hasConfig: text !== undefined, promptDir: cfg.prompt?.dir ?? '.claude/prompt', cacheDir: repoCacheDir(root), ...(narrow ? { narrowBinaries: narrow } : {}) }
+  const diags = [...diagnostics]
+  // prompt.dir comes from the repo: it must stay inside it (.trace, .compiled, data/ are written there; Р2).
+  let promptDir = cfg.prompt?.dir ?? DEFAULT_PROMPT_DIR
+  if (!lexicallyInside(promptDir.replace(/^\.\//, '')) || !safeJoin(root, promptDir)) {
+    diags.push({ code: 'G303', severity: 'error', message: `prompt.dir «${promptDir}» виходить за межі репозиторію — використано ${DEFAULT_PROMPT_DIR}`, path: '.claude/gate.json', hint: 'шлях відносно кореня, без .. і symlink назовні' })
+    promptDir = DEFAULT_PROMPT_DIR
+  }
+  if (!safeJoin(root, promptDir)) {
+    // The fallback itself is a symlink out of the repo: no prompt dir at all.
+    diags.push({ code: 'G303', severity: 'error', message: `${promptDir} — symlink за межі репозиторію: промпти не читаються й не збираються`, path: promptDir, hint: 'заміни symlink текою всередині репозиторію' })
+    promptDir = NO_PROMPT_DIR
+  }
+  return { root, config: cfg, configDiagnostics: diags, hasConfig: text !== undefined, promptDir, cacheDir: repoCacheDir(root), ...(narrow ? { narrowBinaries: narrow } : {}) }
 }
 
 // ───────────────────────── cursor rules ─────────────────────────
 
-export function findMdcFiles(root: string, config: GateConfig): string[] {
+/** Repo files git knows (tracked + untracked, `.gitignore` honoured), or undefined outside git / on failure. */
+export function gitListFiles(root: string): string[] | undefined {
+  try {
+    const out = execFileSync('git', ['--no-optional-locks', '-c', 'core.quotePath=false', 'ls-files', '-z', '-co', '--exclude-standard'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 256 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } })
+    return out.split('\0').filter(Boolean)
+  } catch { return undefined }
+}
+
+const NESTED_RULE = /(^|\/)\.cursor\/rules\/.+\.mdc$/
+
+export function findMdcFiles(root: string, config: GateConfig, diagnostics?: Diagnostic[]): string[] {
   const { dirs, nested } = cursorRuleDirs(config)
   const out = new Set<string>()
   for (const d of dirs) for (const f of walkFiles(root, { under: d })) if (f.endsWith('.mdc')) out.add(f)
   if (nested) {
-    for (const f of walkFiles(root)) if (/(^|\/)\.cursor\/rules\/.+\.mdc$/.test(f)) out.add(f)
+    // `git ls-files` honours .gitignore (build output never hides rules); the walk is the fallback outside git.
+    const listed = gitListFiles(root)
+    if (listed) { for (const f of listed) if (NESTED_RULE.test(f) && existsSync(join(root, f))) out.add(f) }
+    else {
+      const w = walkFilesInfo(root)
+      for (const f of w.files) if (NESTED_RULE.test(f)) out.add(f)
+      if (w.truncated) diagnostics?.push({ code: 'G313', severity: 'warning', message: `Пошук вкладених .cursor/rules зупинено на ${w.files.length} файлах — правила далі за списком не знайдено`, hint: 'ініціалізуй git (тоді враховується .gitignore) або вимкни cursorRules.nested' })
+    }
   }
   return [...out].sort()
 }
+
+/** Files `sync` writes into `.claude/rules/cursor/`: never read back as rule sources. */
+export const SYNC_RULES_DIR = '.claude/rules/cursor'
+const SYNC_MARK = '<!-- generated by context-gate from '
 
 /** `markdown-dir` sources (G-51): every `.md` under `dir`, through core `parseMarkdownRule`. */
 export function loadMarkdownRules(root: string, config: GateConfig): { rules: MdcRule[]; diagnostics: Diagnostic[] } {
@@ -71,8 +112,10 @@ export function loadMarkdownRules(root: string, config: GateConfig): { rules: Md
     if (src.kind !== 'markdown-dir' || !src.dir) continue
     const dir = src.dir.replace(/^\.\//, '').replace(/\/+$/, '')
     for (const path of walkFiles(root, { under: dir }).filter((f) => /\.(md|markdown)$/i.test(f) && !/(^|\/)readme\.md$/i.test(f)).sort()) {
+      // sync's own output (`.claude/rules/cursor/*.md`, marked) is not a source: it would nest one level per sync.
+      if (path === SYNC_RULES_DIR || path.startsWith(SYNC_RULES_DIR + '/')) continue
       const text = readText(join(root, path))
-      if (text === undefined) continue
+      if (text === undefined || text.includes(SYNC_MARK)) continue
       const r = parseMarkdownRule(text, { path, id: markdownRuleId(path, dir), ...(src.frontmatter ? { frontmatter: src.frontmatter } : {}), ...(src.as ? { as: src.as } : {}) })
       rules.push(r.rule)
       diagnostics.push(...r.diagnostics)
@@ -111,13 +154,17 @@ export function loadRules(root: string, config: GateConfig): { rules: MdcRule[];
   const rules: MdcRule[] = []
   const diagnostics: Diagnostic[] = []
   if (config.cursorRules?.enabled === false) return { rules, diagnostics }
-  for (const path of findMdcFiles(root, config)) {
+  const { dirs } = cursorRuleDirs(config)
+  for (const path of findMdcFiles(root, config, diagnostics)) {
     const text = readText(join(root, path))
     if (text === undefined) continue
-    const { id, dirPrefix } = ruleIdFromPath(path)
+    // Ids below a custom cursor-mdc dir, and one rule per id (core loadRuleSources, M41).
+    const { id, dirPrefix } = ruleIdFromPath(path, dirs)
     const r = parseMdc(text, { path, id, dirPrefix })
-    rules.push(r.rule)
     diagnostics.push(...r.diagnostics)
+    const dup = rules.find((x) => x.id === r.rule.id)
+    if (dup) { diagnostics.push({ code: 'G001', severity: 'warning', message: `Правило ${r.rule.id}: id уже має ${dup.path}; ${path} пропущено`, path }); continue }
+    rules.push(r.rule)
   }
   const md = loadMarkdownRules(root, config)
   rules.push(...md.rules)
@@ -127,23 +174,44 @@ export function loadRules(root: string, config: GateConfig): { rules: MdcRule[];
 
 // ───────────────────────── git ─────────────────────────
 
-async function git(root: string, args: string[]): Promise<string | undefined> {
-  const r = await runProcess(['git', ...args], { cwd: root, timeoutMs: 5000 })
+/** git without optional locks (a render never holds index.lock against the user's commit) and with raw paths. */
+async function git(root: string, args: string[], onTimeout?: (args: string[]) => void): Promise<string | undefined> {
+  const r = await runProcess(['git', '--no-optional-locks', '-c', 'core.quotePath=false', ...args], { cwd: root, timeoutMs: 5000, env: { GIT_OPTIONAL_LOCKS: '0' } })
+  if (r.timedOut) onTimeout?.(args)
   return r.exitCode === 0 ? r.stdout : undefined
 }
 
-export async function gitInfo(root: string): Promise<Record<string, Value>> {
-  const inside = await git(root, ['rev-parse', '--is-inside-work-tree'])
+/** `git status --porcelain=v1 -z` → changed paths (the new path of a rename/copy). */
+export function parsePorcelainZ(out: string): string[] {
+  const parts = out.split('\0')
+  const changed: string[] = []
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i]!
+    if (e.length < 4) continue
+    changed.push(e.slice(3))
+    if (e[0] === 'R' || e[0] === 'C') i++ // the next field is the original path
+  }
+  return changed
+}
+
+export async function gitInfo(root: string, diagnostics?: Diagnostic[]): Promise<Record<string, Value>> {
+  const timedOut: string[] = []
+  const onTimeout = (args: string[]) => { timedOut.push(args[0] ?? '') }
+  const inside = await git(root, ['rev-parse', '--is-inside-work-tree'], onTimeout)
   const base: Record<string, Value> = { branch: '', head: '', dirty: false, ahead: 0, behind: 0, changed: [], name: basename(root), remote: '' }
-  if (!inside || inside.trim() !== 'true') return base
+  if (!inside || inside.trim() !== 'true') {
+    if (timedOut.length) diagnostics?.push({ code: 'G203', severity: 'warning', message: 'git не відповів за 5 с — git.* порожні, профілі за шляхами не спрацюють' })
+    return base
+  }
   const [branch, head, status, remote, counts] = await Promise.all([
-    git(root, ['branch', '--show-current']),
-    git(root, ['rev-parse', '--short', 'HEAD']),
-    git(root, ['status', '--porcelain']),
-    git(root, ['config', '--get', 'remote.origin.url']),
-    git(root, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD']),
+    git(root, ['branch', '--show-current'], onTimeout),
+    git(root, ['rev-parse', '--short', 'HEAD'], onTimeout),
+    git(root, ['status', '--porcelain=v1', '-z', '-uall'], onTimeout),
+    git(root, ['config', '--get', 'remote.origin.url'], onTimeout),
+    git(root, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'], onTimeout),
   ])
-  const changed = (status ?? '').split('\n').filter(Boolean).map((l) => l.slice(3).replace(/^.* -> /, '').replace(/^"|"$/g, ''))
+  if (timedOut.length) diagnostics?.push({ code: 'G203', severity: 'warning', message: `git ${timedOut.join(', ')} не відповів за 5 с — git.changed/dirty можуть бути неповні, профілі за шляхами можуть не спрацювати` })
+  const changed = parsePorcelainZ(status ?? '')
   const [behind, ahead] = (counts ?? '0\t0').trim().split(/\s+/).map((x) => Number(x) || 0)
   const r = (remote ?? '').trim()
   return { ...base, branch: (branch ?? '').trim(), head: (head ?? '').trim(), dirty: changed.length > 0, changed, ahead: ahead ?? 0, behind: behind ?? 0, remote: r, name: r ? (r.split(/[/:]/).pop() ?? '').replace(/\.git$/, '') || basename(root) : basename(root) }
@@ -180,11 +248,13 @@ export function dataMetaPath(repo: Repo): string {
 export function loadData(repo: Repo): DataEntry[] {
   const meta = readJson<Record<string, { fetchedAt?: number; cache?: string }>>(dataMetaPath(repo)) ?? {}
   const out = new Map<string, DataEntry>()
-  const dir = dataDir(repo)
-  if (existsSync(dir)) {
+  // data/ and its files are repo-controlled: neither may be a symlink out of the repo (H02).
+  const dir = safeJoin(repo.root, join(repo.promptDir, 'data'))
+  if (dir && existsSync(dir)) {
     for (const f of readdirSync(dir).sort()) {
       if (!f.endsWith('.json')) continue
       const key = f.slice(0, -5)
+      if (!safeJoin(repo.root, join(repo.promptDir, 'data', f))) continue
       const value = readJson<Value>(join(dir, f))
       if (value === undefined) continue
       let fetchedAt = meta[key]?.fetchedAt
@@ -201,11 +271,20 @@ export function loadData(repo: Repo): DataEntry[] {
   return [...out.values()]
 }
 
+/**
+ * Writes `data.<key>`. `key` must pass `validDataKey` (render `store=`/`<Store name>` keys come from the repo):
+ * anything else is refused with `[]` and no write, so `../` never leaves `data/` (Р2). With `persist` the value
+ * lives only in `<prompt dir>/data/<key>.json` — deleting that file deletes the value; the cache store holds the
+ * render-only (`persist: false`) values.
+ */
 export function setData(repo: Repo, key: string, value: Value, opts: { cache?: string; persist?: boolean; fetchedAt?: number } = {}): string[] {
+  if (!validDataKey(key)) return []
   const written: string[] = []
   const now = opts.fetchedAt ?? Date.now()
-  if (opts.persist ?? true) {
-    const p = join(dataDir(repo), `${key}.json`)
+  const persist = opts.persist ?? true
+  if (persist) {
+    const p = safeJoin(repo.root, join(repo.promptDir, 'data', `${key}.json`))
+    if (!p) return []
     writeJson(p, value)
     written.push(posix(relative(repo.root, p)))
   }
@@ -215,7 +294,8 @@ export function setData(repo: Repo, key: string, value: Value, opts: { cache?: s
   writeJson(metaP, meta)
   const storeP = join(repo.cacheDir, 'data.json')
   const store = readJson<Record<string, { value: Value; at: number; cache?: string }>>(storeP) ?? {}
-  store[key] = { value, at: now, ...(opts.cache ? { cache: opts.cache } : {}) }
+  if (persist) delete store[key]
+  else store[key] = { value, at: now, ...(opts.cache ? { cache: opts.cache } : {}) }
   writeJson(storeP, store)
   return written
 }
@@ -227,13 +307,16 @@ export function validDataKey(key: string): boolean {
 // ───────────────────────── prompts ─────────────────────────
 
 export function loadCompiled(repo: Repo): { compiled: CompiledPrompt[]; from: 'repo' | 'cache' | 'none' } {
+  // With a lock, only the ids it lists: an orphan of a removed or renamed prompt never renders.
+  const lock = readJson<{ prompts?: Record<string, unknown> }>(join(repo.root, repo.promptDir, 'prompt.lock.json'))
+  const listed = lock?.prompts && Object.keys(lock.prompts).length ? lock.prompts : undefined
   const read = (dir: string): CompiledPrompt[] => {
     if (!existsSync(dir)) return []
     const out: CompiledPrompt[] = []
     for (const f of readdirSync(dir).sort()) {
       if (!f.endsWith('.json')) continue
       const cp = readJson<CompiledPrompt>(join(dir, f))
-      if (cp && cp.version === 1 && Array.isArray(cp.sections)) out.push(cp)
+      if (cp && cp.version === 1 && Array.isArray(cp.sections) && (!listed || Object.hasOwn(listed, cp.id))) out.push(cp)
     }
     return out
   }
@@ -247,8 +330,9 @@ export function loadCompiled(repo: Repo): { compiled: CompiledPrompt[]; from: 'r
 export function loadMarkdown(repo: Repo): MarkdownFile[] {
   const out = new Map<string, MarkdownFile>()
   for (const rel of promptSectionDirs({ ...repo.config, prompt: { ...repo.config.prompt, dir: repo.promptDir } })) {
-    const dir = join(repo.root, rel)
-    if (!existsSync(dir)) continue
+    // A section dir linked out of the repo is never read (H02); a linked file is not a plain file (isFile) either.
+    const dir = safeJoin(repo.root, rel)
+    if (!dir || !existsSync(dir)) continue
     for (const d of readdirSync(dir, { withFileTypes: true })) {
       if (!d.isFile() || !isMarkdownSectionFile(d.name)) continue
       const path = posix(join(rel, d.name))
@@ -259,8 +343,8 @@ export function loadMarkdown(repo: Repo): MarkdownFile[] {
 }
 
 /** The prompts for `tier`; `preload` (the gate's `skills.preload`) adds the generated `preload` section (Р5). */
-export function loadPrompts(repo: Repo, tier: Tier, preload?: readonly string[]): PromptSet & { compiledFrom: string } {
-  const { compiled, from } = loadCompiled(repo)
+export function loadPrompts(repo: Repo, tier: Tier, preload?: readonly string[], override?: readonly CompiledPrompt[]): PromptSet & { compiledFrom: string } {
+  const { compiled, from } = override ? { compiled: [...override], from: 'memory' } : loadCompiled(repo)
   const set = assemblePrompts(compiled, loadMarkdown(repo), tier, Object.keys(repo.config.tiers ?? {}), preload?.length ? { preload } : {})
   return { ...set, compiledFrom: from }
 }
@@ -463,17 +547,38 @@ export class Providers {
     return v === undefined ? null : pickFields(v, p.pick)
   }
 
-  /** Bundles a module provider with esbuild into the cache (once per content hash). */
+  /**
+   * Bundles a module provider with esbuild, keyed by the hashes of every bundled input (the entry and its
+   * imports) and the esbuild version: editing a helper rebuilds it. npm imports stay external, so the bundle is
+   * written where Node resolves them from the repo — `<root>/node_modules/.cache/context-gate/modules/` when the
+   * repo has node_modules, else the per-repo cache dir.
+   */
   private async moduleFile(name: string, p: ProviderConfig): Promise<string | undefined> {
     if (this.moduleFiles.has(name)) return this.moduleFiles.get(name)
-    const src = p.path ? resolve(this.o.repo.root, p.path) : undefined
+    const root = this.o.repo.root
+    const src = p.path ? safeJoin(root, p.path) : undefined
     let out: string | undefined
     if (src && existsSync(src)) {
-      const hash = sha256(readFileSync(src)).slice(0, 16)
-      out = join(this.o.repo.cacheDir, 'modules', `${name}-${hash}.mjs`)
-      if (!existsSync(out)) {
+      const dir = existsSync(join(root, 'node_modules')) ? join(root, 'node_modules', '.cache', 'context-gate', 'modules') : join(this.o.repo.cacheDir, 'modules')
+      const manifestPath = join(dir, `${name}-${sha256(src).slice(0, 12)}.inputs.json`)
+      const manifest = readJson<{ out: string; esbuild?: string; inputs: { path: string; hash: string }[] }>(manifestPath)
+      // A bundle of another esbuild version is stale too; with no esbuild at all (the installed plugin ships none) a
+      // bundle whose inputs are unchanged is still used.
+      const available = await loadEsbuild(root).catch(() => undefined)
+      const version = (available as { version?: string } | undefined)?.version
+      const fresh = (m: typeof manifest): boolean => !!m && (!version || m.esbuild === version) && existsSync(join(dir, m.out)) && m.inputs.every((i) => { try { return sha256(readFileSync(resolve(root, i.path))) === i.hash } catch { return false } })
+      if (fresh(manifest)) out = join(dir, manifest!.out)
+      else {
         try {
-          await (await loadEsbuild(this.o.repo.root)).build({ entryPoints: [src], bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile: out, logLevel: 'silent', packages: 'external', loader: { '.md': 'text', '.txt': 'text' } })
+          const esbuild = available ?? (await loadEsbuild(root))
+          const r = await esbuild.build({ entryPoints: [src], bundle: true, platform: 'node', format: 'esm', target: 'node22', write: false, outdir: dir, metafile: true, absWorkingDir: root, logLevel: 'silent', packages: 'external', loader: { '.md': 'text', '.txt': 'text' } })
+          const code = r.outputFiles[0]!.contents
+          const inputs = Object.keys(r.metafile.inputs).filter((i) => !i.includes(':')).map((i) => ({ path: i, hash: (() => { try { return sha256(readFileSync(resolve(root, i))) } catch { return 'missing' } })() }))
+          const file = `${name}-${sha256(Buffer.from(code)).slice(0, 16)}.mjs`
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(join(dir, file), code)
+          writeJson(manifestPath, { out: file, esbuild: (esbuild as { version?: string }).version, inputs })
+          out = join(dir, file)
         } catch (e) {
           this.fail(name, p, `збірка модуля ${p.path}: ${String((e as Error).message).split('\n')[0]}`)
           out = undefined
@@ -489,11 +594,12 @@ export class Providers {
     if (!host.trusted) return this.untrusted(name, 'module')
     const file = await this.moduleFile(name, p)
     if (!file) return null
+    // The bundle's name carries the hash of its content, so a changed import invalidates cached results too.
     const key = `prov:${name}:${basename(file)}:${fn}:${sha256(JSON.stringify([args, kwargs])).slice(0, 16)}`
     const v = await this.cached(key, p.cache, async () => {
       if (host.dryScripts) return undefined
       const rel = posix(relative(host.root, file))
-      const inRepo = !rel.startsWith('..')
+      const inRepo = !rel.startsWith('..') && !!host.abs(rel) // a symlinked node_modules resolves outside: absolute shim
       const r = inRepo ? await host.shim(rel, [{ fn, args, kwargs }]) : await shimAbs(host, file, [{ fn, args, kwargs }])
       if (r.errors[0]) { this.fail(name, p, r.errors[0]); return undefined }
       return r.results[0] ?? null
@@ -524,10 +630,25 @@ export class Providers {
     return v
   }
 
-  /** Values for providers referenced by the prompts (all when `names` is undefined). */
-  async resolveAll(names?: Set<string>): Promise<Record<string, Value>> {
+  /**
+   * Values for providers referenced by the prompts (all when `names` is undefined), in parallel under one shared
+   * deadline (P2): a provider still running at `deadlineMs` is `null` with a G203 warning instead of holding the
+   * whole render (its process is still bounded by its own 10 s timeout).
+   */
+  async resolveAll(names?: Set<string>, deadlineMs = PROVIDERS_DEADLINE_MS): Promise<Record<string, Value>> {
     const out: Record<string, Value> = {}
-    await Promise.all(Object.keys(this.cfg).filter((n) => !BUILTIN_PROVIDERS.has(n) && !this.cfg[n]!.builtin && (!names || names.has(n))).map(async (n) => { out[n] = await this.value(n) }))
+    const todo = Object.keys(this.cfg).filter((n) => !BUILTIN_PROVIDERS.has(n) && !this.cfg[n]!.builtin && (!names || names.has(n)))
+    if (!todo.length) return out
+    let timer: NodeJS.Timeout | undefined
+    const deadline = new Promise<'late'>((done) => { timer = setTimeout(() => done('late'), deadlineMs) })
+    await Promise.all(todo.map(async (n) => {
+      const v = await Promise.race([this.value(n), deadline])
+      if (v === 'late') {
+        out[n] = null
+        this.o.host.note({ code: 'G203', severity: 'warning', message: `Провайдер ${n}: не встиг за спільний дедлайн ${Math.round(deadlineMs / 1000)} с — значення null`, hint: 'додай cache або pick, або винеси повільну команду з рендера' })
+      } else out[n] = v
+    }))
+    if (timer) clearTimeout(timer)
     return out
   }
 
@@ -540,7 +661,7 @@ export class Providers {
     if (ns === 'fs' && fn === 'glob') { const m = compileGlob(String(args[0] ?? ''), { matchBase: true }); return walkFiles(root).filter((f) => m(f)) }
     if (ns === 'fs' && fn === 'exists') { const p = this.o.host.abs(String(args[0] ?? '')); return !!p && existsSync(p) }
     if (ns === 'cursor' && fn === 'match') return cursorMatch(this.o.rules, String(args[0] ?? ''), { nocase: detectWindows(root) })
-    if (ns === 'scripts') return this.script(fn, args, kwargs)
+    if (ns === 'scripts') return this.script(fn, args, kwargs, req.timeoutMs)
     const p = this.cfg[ns]
     if (!p) return null
     if (p.kind === 'cli') {
@@ -557,7 +678,7 @@ export class Providers {
   }
 
   /** `scripts.<name>(…)`: run `.claude/prompt/scripts/<name>.*` with `{ ctx, args }` on stdin. */
-  private async script(fn: string, args: Value[], kwargs: Record<string, Value>): Promise<Value> {
+  private async script(fn: string, args: Value[], kwargs: Record<string, Value>, timeoutMs?: number): Promise<Value> {
     const host = this.o.host
     const file = scriptFiles(this.o.repo).find((f) => scriptFnName(f) === fn)
     const p: ProviderConfig = { kind: 'cli', onError: 'unverified', cache: this.o.repo.config.prompt?.runCacheDefault ?? '5m' }
@@ -572,7 +693,7 @@ export class Providers {
     const v = await this.cached(key, p.cache, async () => {
       if (host.dryScripts) return undefined
       host.processes++
-      const r = await runProcess(argv, { cwd: this.o.repo.root, stdin: JSON.stringify({ ctx: {}, args: Object.keys(kwargs).length ? [...args, kwargs] : args }), timeoutMs: 10_000 })
+      const r = await runProcess(argv, { cwd: this.o.repo.root, stdin: JSON.stringify({ ctx: {}, args: Object.keys(kwargs).length ? [...args, kwargs] : args }), timeoutMs: timeoutMs !== undefined && timeoutMs > 0 ? Math.min(timeoutMs, 10_000) : 10_000 })
       if (r.exitCode !== 0) { this.fail(`scripts.${fn}`, p, `exit ${r.exitCode}: ${r.stderr.trim().split('\n')[0] ?? ''}`); return undefined }
       return parseLoose(r.stdout)
     })
@@ -581,7 +702,11 @@ export class Providers {
 }
 
 async function shimAbs(host: NodeHost, file: string, calls: { fn: string; args: Value[]; kwargs?: Record<string, Value> }[]) {
-  // Bundled module providers live in the cache dir: run the node shim on the absolute path.
+  // Bundled module providers in the cache dir: the node shim on the absolute path, under the same whitelist.
+  if (!host.allowed('node')) {
+    host.note({ code: 'G201', severity: 'warning', message: 'Бінарник «node» поза білим списком ~/.claude/context-gate.json (allowBinaries)' })
+    return { results: calls.map(() => null), errors: calls.map(() => 'бінарник node не дозволено') }
+  }
   host.processes++
   const r = await runProcess(['node', '--input-type=module', '-e', NODE_SHIM], { cwd: host.root, stdin: JSON.stringify({ file, calls }), timeoutMs: 10_000 })
   try { return JSON.parse(r.stdout) as { results: Value[]; errors: (string | null)[] } } catch { return { results: calls.map(() => null), errors: calls.map(() => `exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`) } }
@@ -608,6 +733,8 @@ export interface ContextOptions extends GateFlags {
   args?: Record<string, Value>
   /** Names referenced by the prompts: only those providers are resolved (default all). */
   providerNames?: Set<string>
+  /** Compiled prompts to use instead of `.compiled` (an in-memory build: bench). */
+  compiled?: CompiledPrompt[]
 }
 
 export interface RenderContext {
@@ -695,7 +822,7 @@ export async function buildContext(o: ContextOptions): Promise<RenderContext> {
   const live = source === 'live' || (source === 'session' && !snapshot?.scope)
   const { rules, diagnostics: ruleDiags } = loadRules(root, repo.config)
   diagnostics.push(...ruleDiags)
-  const git = live ? await gitInfo(root) : undefined
+  const git = live ? await gitInfo(root, diagnostics) : undefined
   const trust = trustState(root, repo.config, { flag: o.trustRepo, ...(typeof git?.remote === 'string' ? { remote: git.remote } : {}) })
   const host = new NodeHost({ root, config: repo.config, trusted: trust.trusted, dryScripts: o.dryScripts, cacheDir: repo.cacheDir, ...(repo.narrowBinaries ? { narrowBinaries: repo.narrowBinaries } : {}) })
   const providers = new Providers({ repo, host, rules, liveGit: live })
@@ -713,7 +840,7 @@ export async function buildContext(o: ContextOptions): Promise<RenderContext> {
   const items = collectItems(repo, rules, unverifiedRules)
   const gate = decide(repo.config, items, { ...flags, paths: o.paths ?? (live ? ((git?.changed as string[] | undefined) ?? []) : []), branch: o.branch ?? (typeof git?.branch === 'string' ? git.branch : undefined) }, {})
   const tier = gate.tier
-  const prompts = loadPrompts(repo, tier, gate.skills.preload)
+  const prompts = loadPrompts(repo, tier, gate.skills.preload, o.compiled)
   diagnostics.push(...prompts.diagnostics)
   let scope: Record<string, Value>
   if (snapshot?.scope) {

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import type { Value } from '../../core/src/types.ts'
 import { buildGateIndex, symbolsOf } from '../../core/src/gateindex.ts'
 import { buildContext, collectItems, scriptTools, type ContextOptions } from './context.ts'
-import { renderWith } from './cmd-run.ts'
+import { maskedScope, renderWith } from './cmd-run.ts'
 import { writeJson } from './util.ts'
 
 /** The CLI's index: core `buildGateIndex` over the repo on disk (the mod adds the session fields). */
@@ -38,7 +38,7 @@ export async function buildIndex(o: ContextOptions): Promise<Record<string, unkn
     symbols,
     tools,
     data: Object.keys((ctx.scope.data ?? {}) as Record<string, Value>),
-    scope: ctx.scope as Record<string, unknown>,
+    scope: maskedScope(ctx.scope) as Record<string, unknown>,
   })
 }
 

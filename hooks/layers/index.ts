@@ -91,7 +91,8 @@ export async function writeIndex(io: Io, rt: Runtime, reason: string): Promise<b
     await ensureSession(io, rt)
     if (!(await configured(io, rt))) return false
     const index = await buildModIndex(io, rt)
-    const key = indexKey(index)
+    // Keyed by root too: after a move into another worktree the same content still has to land there.
+    const key = `${rt.root}\0${indexKey(index)}`
     if (written.get(rt) === key) return false
     await io.fs.write(join(rt.root, INDEX_FILE), JSON.stringify(index, null, 2) + '\n')
     written.set(rt, key)

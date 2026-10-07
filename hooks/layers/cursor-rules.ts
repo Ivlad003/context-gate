@@ -2,21 +2,25 @@
 // Always → prompt.context instruction files (or a `cursorRules` block after claudeMd);
 // Auto Attached → `context` after Read/Edit/Write/NotebookEdit results and for `@file` mentions;
 // Manual → `@id` mentions and `/rule <id>`; Agent Requested → listed only (`context-gate sync` makes skills).
-// Dedup per agent in io.state `seen` (`<agentId|main>:<ruleId>`), reset on prompt.context.
+// Dedup per agent in io.state `seen` (`<agentId|main>:<ruleId>`), reset on prompt.context (the latest prompt's own
+// deliveries kept: they ride the message prompt.context precedes), subagent keys capped.
+// Auto Attached rules are not gated by the profile: the glob is their gate (risk M1).
 // Sources (G-04, G-51): `.cursor/rules` plus every `cursor-mdc` `dir`, `markdown-dir` sources and `provider`
 // sources from `itemSources`; all yield MdcRule and share delivery, dedup and journaling (`rule-delivered`).
 
 
 import type { Diagnostic, MdcRule } from '../../packages/core/src/types.ts'
 import { detectWindows, normalizePath } from '../../packages/core/src/glob.ts'
+import { profileParts } from '../../packages/core/src/decide.ts'
 import { cursorRuleDirs, frameRule, isFileRule, markdownRuleId, packInjections, parseMarkdownRule, parseMdc, providerRules, ruleIdFromPath, ruleMatches, ruleSourcesOf } from '../../packages/core/src/mdc.ts'
-import { isApplied } from '../state.ts'
+import { INITIAL, isApplied, json } from '../state.ts'
 import type { ContextGateDecision } from '../../types'
-import { type Io, type FileCall, type Runtime, type ToolResultLike, debug, join, now } from '../ctx.ts'
+import { type Io, type FileCall, type Runtime, type ToolResultLike, debug, insideRoot, join, now } from '../ctx.ts'
 import { ensureSession, loadGateConfig } from './config.ts'
-import { journal } from './journal.ts'
-import { makeRenderHost, providerData } from './host.ts'
+import { flushJournal, journal } from './journal.ts'
+import { configuredPromptDir, makeRenderHost, providerConfigs, providerData, readRepoFile } from './host.ts'
 import { repoKey, trustState } from './trust.ts'
+import { refreshStatus } from './ui.ts'
 
 const TYPE_LABEL: Record<string, string> = { always: 'Always', auto: 'Auto Attached', agent: 'Agent Requested', manual: 'Manual' }
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'target', 'vendor', '.venv'])
@@ -52,7 +56,9 @@ async function loadProviderRules(io: Io, rt: Runtime, force: boolean): Promise<{
   const hit = providerCache.get(rt)
   if (hit && hit.cfg === rt.cfg && !force) return hit
   const trusted = (await trustState(io, rt).catch(() => 'unknown')) === 'trusted'
-  const host = makeRenderHost(io, rt, { trusted, repoKey: await repoKey(io, rt), itemBody: async () => undefined, rules: async () => rt.rules?.list ?? [] })
+  // With the prompt dir's `lib/` module providers, as dsl.ts and gates.ts build their hosts (M11).
+  const promptDir = configuredPromptDir(rt.cfg)
+  const host = makeRenderHost(io, rt, { trusted, repoKey: await repoKey(io, rt), itemBody: async () => undefined, rules: async () => rt.rules?.list ?? [], promptDir, providers: await providerConfigs(io, rt, promptDir) })
   const rules: MdcRule[] = []
   const diagnostics: Diagnostic[] = []
   for (const src of sources) {
@@ -68,20 +74,61 @@ async function loadProviderRules(io: Io, rt: Runtime, force: boolean): Promise<{
 
 /** Edge case 6: the session root moved (a `cd` into another worktree): drop the caches built for the old root. */
 /** The new root's gate.json replaces the old one's (which also marks items and prompts dirty). Checked on every
- *  `ensureRules`, before the 2 s re-list throttle: one engine call, and a move is seen on the very next tool call. */
+ *  `ensureRules`, before the 2 s re-list throttle: one engine call, and a move is seen on the very next tool call.
+ *  The old root's pending journal lines are written to the old root first; per-repo session evidence (files read
+ *  for read-before-write, changed paths, recent paths, rule dedup, the journal and debug-log text) starts empty, so
+ *  nothing of repo A is written into, or vouches for, repo B (M01). */
 export async function checkRoot(io: Io, rt: Runtime): Promise<void> {
   const root = await io.session.root().catch(() => rt.root)
   if (!root || root === rt.root) return
   debug(io, `session root moved: ${rt.root} → ${root}; caches dropped`)
+  if (rt.root) await flushJournal(io, rt).catch(() => undefined)
   rt.root = root
   rt.windows = detectWindows(root, await io.env.os().catch(() => undefined))
   rt.rules = undefined
   rt.rulesDirty = true
   rt.itemsDirty = true
   rt.promptsDirty = true
+  rt.prompts = undefined
   rt.staticCache.clear()
   providerCache.delete(rt)
+  freshSeen.delete(rt)
+  const r = rt as Runtime & { journalText?: string; journalBlocked?: boolean }
+  r.journalText = undefined
+  r.journalBlocked = undefined
+  rt.journalBuffer = []
+  rt.debugLogText = undefined
+  rt.lastSnapshot = undefined
+  rt.lastDebug = undefined
+  rt.traceWrite = undefined
+  rt.readFiles.clear()
+  rt.changedPaths.clear()
+  rt.trustAsked = false
+  rt.trustCache = undefined
+  rt.buildAttempted.clear()
+  rt.buildError = undefined
+  rt.lastRender = undefined
+  rt.lastHealth = undefined
+  await io.update('recentPaths', () => [])
+  await io.update('seen', () => [])
   await loadGateConfig(io, rt)
+  // The old repo's decision is not the new one's: decided afresh on the next prompt, which is a new task there
+  // (turn 0: classifier, brief), so the old profile, its source and pending `when` candidate go with it. A pinned
+  // profile the new gate.json does not declare would apply as an empty profile there (denying nearly everything):
+  // it goes too.
+  const wasApplied = isApplied(await io.read('gate').catch(() => null))
+  await io.update('gate', () => null)
+  await io.update('gateState', () => json(INITIAL.gateState))
+  const profiles = rt.config?.profiles ?? {}
+  await io.update('manual', (m) => (m.profile !== undefined && !profileParts(m.profile, rt.config).every((p) => Object.prototype.hasOwnProperty.call(profiles, p)) ? json({ ...m, profile: undefined }) : m))
+  if (wasApplied) {
+    // MCP descriptions and the attachment the engine cached still show the old repo's gate.
+    try {
+      io.ui.invalidate('prompt.attachment')
+      io.ui.invalidate('tool.describe')
+    } catch { /* no surface */ }
+  }
+  await refreshStatus(io, rt).catch(() => undefined)
 }
 
 /** Directories holding `.cursor/rules` below the root (nested option), breadth-first with caps. */
@@ -116,9 +163,10 @@ export async function ensureRules(io: Io, rt: Runtime, opts: { force?: boolean }
   if (rt.rules && !rt.rulesDirty && !opts.force && t - rt.rules.checkedAt < RECHECK_MS) return rt.rules.list
   const { dirs, nested } = cursorRuleDirs(rt.cfg)
   const files: Found[] = []
-  for (const d of dirs) await listFiles(io, rt, trimDir(d), files, 0)
+  // Source dirs come from the repo's gate.json: one outside the root (absolute, `..`) is never read (M05).
+  for (const d of dirs) if (insideRoot(trimDir(d))) await listFiles(io, rt, trimDir(d), files, 0)
   if (nested) for (const d of await nestedRuleDirs(io, rt)) await listFiles(io, rt, d, files, 0)
-  const mdSources = ruleSourcesOf(rt.cfg).filter((s) => s.kind === 'markdown-dir' && s.dir)
+  const mdSources = ruleSourcesOf(rt.cfg).filter((s) => s.kind === 'markdown-dir' && s.dir && insideRoot(trimDir(s.dir)))
   const mdFiles: { rel: string; mtimeMs: number; src: (typeof mdSources)[number] }[] = []
   for (const src of mdSources) {
     const found: Found[] = []
@@ -136,15 +184,19 @@ export async function ensureRules(io: Io, rt: Runtime, opts: { force?: boolean }
   const list: MdcRule[] = []
   const diagnostics: Diagnostic[] = []
   for (const f of uniqueFiles.sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
-    const text = await io.fs.read(join(rt.root, f.rel)).catch(() => undefined)
+    // Symlinks out of the repo are not read (H02).
+    const text = await readRepoFile(io, rt, f.rel)
     if (typeof text !== 'string') continue
-    const { id, dirPrefix } = ruleIdFromPath(f.rel)
+    // Ids below a custom cursor-mdc dir, and one rule per id (core loadRuleSources, M41).
+    const { id, dirPrefix } = ruleIdFromPath(f.rel, dirs)
     const r = parseMdc(text, { path: f.rel, id, dirPrefix })
-    list.push(r.rule)
     diagnostics.push(...r.diagnostics)
+    const dup = list.find((x) => x.id === r.rule.id)
+    if (dup) { diagnostics.push({ code: 'G001', severity: 'warning', message: `Правило ${r.rule.id}: id уже має ${dup.path}; ${f.rel} пропущено`, path: f.rel }); continue }
+    list.push(r.rule)
   }
   for (const f of mdFiles.sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
-    const text = await io.fs.read(join(rt.root, f.rel)).catch(() => undefined)
+    const text = await readRepoFile(io, rt, f.rel)
     if (typeof text !== 'string') continue
     const r = parseMarkdownRule(text, { path: f.rel, id: markdownRuleId(f.rel, trimDir(f.src.dir!)), ...(f.src.frontmatter ? { frontmatter: f.src.frontmatter } : {}), ...(f.src.as ? { as: f.src.as } : {}) })
     if (!list.some((x) => x.id === r.rule.id)) list.push(r.rule)
@@ -165,8 +217,9 @@ export function ruleOn(gate: ContextGateDecision | null, id: string): boolean {
   return gate.items[`rule:${id}`] !== 'off'
 }
 
-function readGate(io: Io): Promise<ContextGateDecision | null> {
-  return io.read('gate')
+/** The gate rules obey: none while gate.json is invalid (layer 2 off, a stored gate must not outlive it, M18). */
+async function readGate(io: Io, rt: Runtime): Promise<ContextGateDecision | null> {
+  return rt.config ? io.read('gate') : null
 }
 
 export function relPath(rt: Runtime, file: string): string {
@@ -182,20 +235,43 @@ export async function pushRecent(io: Io, paths: string[]): Promise<void> {
   })
 }
 
-/** Auto rules matching `rel`, not yet seen by `agent`, not gated off. */
+/** Auto rules matching `rel`, not yet seen by `agent`. The profile does not gate them: a task that started under
+ * one profile and then touches another area still gets that area's rules (risk M1). */
 async function autoHits(io: Io, rt: Runtime, rels: string[], agent: string): Promise<MdcRule[]> {
   const rules = await ensureRules(io, rt)
   if (!rules.length) return []
   const seen = new Set(await io.read('seen'))
-  const gate = await readGate(io)
   const opts = { nocase: rt.windows }
-  return rules.filter((r) => r.type === 'auto' && !seen.has(`${agent}:${r.id}`) && ruleOn(gate, r.id) && rels.some((p) => ruleMatches(r, p, opts)))
+  return rules.filter((r) => r.type === 'auto' && !seen.has(`${agent}:${r.id}`) && rels.some((p) => ruleMatches(r, p, opts)))
+}
+
+/** Subagents whose deliveries `seen` keeps (the most recent ones): ids are ephemeral (L04). */
+const SEEN_AGENTS_MAX = 16
+
+/** `seen` with `keys` added; subagent keys of all but the SEEN_AGENTS_MAX most recently added agents dropped. */
+export function addSeen(seen: readonly string[], keys: readonly string[]): string[] {
+  const all = [...new Set([...seen, ...keys])]
+  const agents: string[] = []
+  for (const k of all) {
+    const a = splitSeen(k).agent
+    if (a === 'main') continue
+    const i = agents.indexOf(a)
+    if (i >= 0) agents.splice(i, 1)
+    agents.push(a)
+  }
+  if (agents.length <= SEEN_AGENTS_MAX) return all
+  const keep = new Set(agents.slice(-SEEN_AGENTS_MAX))
+  return all.filter((k) => { const a = splitSeen(k).agent; return a === 'main' || keep.has(a) })
 }
 
 async function markSeen(io: Io, keys: string[]): Promise<void> {
   if (!keys.length) return
-  await io.update('seen', (s) => [...new Set([...s, ...keys])])
+  await io.update('seen', (s) => addSeen(s, keys))
 }
+
+/** `main:` keys the latest prompt delivered (its @file / @id context): prompt.context, computed for the message that
+ * prompt starts, must not forget them (L06). Reset by the next prompt. */
+const freshSeen = new WeakMap<Runtime, Set<string>>()
 
 /** Journal one `rule-delivered` entry per rule (G-05): `report` and `observe --status never` count these. */
 async function journalDelivered(io: Io, rt: Runtime, ids: readonly string[], agent: string, via: string, extra: Record<string, unknown> = {}): Promise<void> {
@@ -208,19 +284,35 @@ function maxChars(rt: Runtime): number {
   return rt.cfg.cursorRules?.maxCharsPerInjection ?? 30000
 }
 
-/** Layer-1 part of prompt.submit: `@file` → Auto Attached, `@id` → Manual/any rule. Returns context blocks. */
+/** A mentioned rule id: exact, else the one rule whose id ends in `/<id>` (a Manual rule in a `.cursor/rules`
+ * subfolder, `db/migrations` for `@migrations`, as the hooks adapter resolves it; L05). */
+export function findRule(rules: readonly MdcRule[], id: string): MdcRule | undefined {
+  const exact = rules.find((r) => r.id === id)
+  if (exact) return exact
+  const tail = rules.filter((r) => r.id.endsWith(`/${id}`))
+  return tail.length === 1 ? tail[0] : undefined
+}
+
+/** Layer-1 part of prompt.submit: `@file` → Auto Attached, `@id` → Manual/any rule. Returns context blocks.
+ * A slash mention that names a rule id and no extension (`@db/migrations`) is that rule, not a file. */
 export async function rulesForPrompt(io: Io, rt: Runtime, files: string[], ruleIds: string[]): Promise<string[]> {
-  const rels = files.map((f) => relPath(rt, f))
+  const fresh = new Set<string>()
+  freshSeen.set(rt, fresh)
+  const all = rulesActive(rt) ? await ensureRules(io, rt) : []
+  const asRule = (f: string): boolean => !/\.[A-Za-z0-9]+$/.test(f) && all.some((r) => r.id === f.replace(/^\.\//, ''))
+  const rels = files.filter((f) => !asRule(f)).map((f) => relPath(rt, f))
+  const ids = [...ruleIds, ...files.filter(asRule).map((f) => f.replace(/^\.\//, ''))]
   await pushRecent(io, rels)
   if (!rulesActive(rt)) return []
   const blocks: string[] = []
   const hits = rels.length ? await autoHits(io, rt, rels, 'main') : []
   const seen = new Set(await io.read('seen'))
-  const all = await ensureRules(io, rt)
-  const mentioned = ruleIds.map((id) => all.find((r) => r.id === id)).filter((r): r is MdcRule => !!r && !seen.has(`main:${r.id}`) && !hits.includes(r))
+  const mentioned = [...new Set(ids.map((id) => findRule(all, id)).filter((r): r is MdcRule => !!r && !seen.has(`main:${r.id}`) && !hits.includes(r)))]
   const packed = packInjections([...hits, ...mentioned], maxChars(rt))
   if (packed.text) blocks.push(packed.text)
-  await markSeen(io, packed.included.map((id) => `main:${id}`))
+  const keys = packed.included.map((id) => `main:${id}`)
+  await markSeen(io, keys)
+  for (const k of keys) fresh.add(k)
   const byFile = hits.filter((r) => packed.included.includes(r.id)).map((r) => r.id)
   const byId = mentioned.filter((r) => packed.included.includes(r.id)).map((r) => r.id)
   await journalDelivered(io, rt, byFile, 'main', '@file', { paths: rels })
@@ -236,7 +328,7 @@ export async function ruleCommand(io: Io, rt: Runtime, args: string): Promise<{ 
   if (!rulesActive(rt)) return { text: `Шар cursor-rules вимкнено: ${rt.disabled.rules}` }
   const usage = `Використання: /rule <id>${manualIds.length ? `. Manual/Agent-правила: ${manualIds.join(', ')}` : ''}`
   if (!id) return { text: usage }
-  const rule = rules.find((r) => r.id === id)
+  const rule = findRule(rules, id)
   if (!rule) return { text: `Правило «${id}» не знайдено. ${usage}` }
   await markSeen(io, [`main:${rule.id}`])
   await journalDelivered(io, rt, [rule.id], 'main', '/rule')
@@ -255,10 +347,16 @@ export async function rulesReport(io: Io, rt: Runtime): Promise<string> {
   const rules = await ensureRules(io, rt)
   if (!rulesActive(rt)) return `Шар cursor-rules вимкнено: ${rt.disabled.rules}`
   const seen = new Set(await io.read('seen'))
-  const agents = new Set<string>(['main'])
-  for (const k of seen) agents.add(splitSeen(k).agent)
-  for (const a of Object.keys(await io.read('agentTiers').catch(() => ({})))) agents.add(a)
-  const gate = await readGate(io)
+  // main plus the most recent subagents (ids are ephemeral; a long session would add one column per subagent).
+  const subagents: string[] = []
+  for (const a of [...[...seen].map((k) => splitSeen(k).agent), ...Object.keys(await io.read('agentTiers').catch(() => ({})))]) {
+    if (a === 'main') continue
+    const i = subagents.indexOf(a)
+    if (i >= 0) subagents.splice(i, 1)
+    subagents.push(a)
+  }
+  const agents = new Set<string>(['main', ...subagents.slice(-REPORT_AGENTS_MAX)])
+  const gate = await readGate(io, rt)
   const lines = [`**Правила** (${rules.length})`]
   if (!rules.length) lines.push('- (немає: .cursor/rules порожній, itemSources без правил)')
   for (const t of ['always', 'auto', 'agent', 'manual']) {
@@ -266,7 +364,8 @@ export async function rulesReport(io: Io, rt: Runtime): Promise<string> {
       const parts = [`\`${r.id}\``, TYPE_LABEL[r.type] ?? r.type]
       if (r.globs.length || r.negGlobs.length) parts.push(`globs ${[...r.globs, ...r.negGlobs.map((g) => `!${g}`)].join(', ')}`)
       if (r.source && r.source !== 'cursor-mdc') parts.push(`джерело ${r.source}`)
-      if (!ruleOn(gate, r.id)) parts.push('вимкнено профілем')
+      // Auto Attached rules follow their globs whatever the profile (autoHits): only the other types are gated.
+      if (!ruleOn(gate, r.id)) parts.push(r.type === 'auto' ? 'профіль вимикає, але Auto Attached доставляється за globs' : 'вимкнено профілем')
       const delivered = [...agents].map((a) => `${a} — ${seen.has(`${a}:${r.id}`) ? 'так' : 'ні'}`).join(', ')
       parts.push(r.type === 'agent' ? `доставлено: ${delivered} (Agent Requested: через skill cursor-*, \`context-gate sync\`)` : `доставлено: ${delivered}`)
       lines.push(`- ${parts.join(' · ')}`)
@@ -278,6 +377,8 @@ export async function rulesReport(io: Io, rt: Runtime): Promise<string> {
   return lines.join('\n')
 }
 
+const REPORT_AGENTS_MAX = 8
+
 type ReadLike = { offset?: unknown; limit?: unknown; pages?: unknown }
 
 function isPartial(e: ReadLike, r: unknown): boolean {
@@ -286,10 +387,12 @@ function isPartial(e: ReadLike, r: unknown): boolean {
   return res?.type === 'file_unchanged' || res?.file?.truncatedByTokenCap === true
 }
 
-/** prompt.context, before `next`: reset dedup (re-delivery after compaction and /clear), re-read rules. */
+/** prompt.context, before `next`: reset dedup (re-delivery after compaction and /clear), re-read rules. The latest
+ * prompt's own deliveries stay: its context rides the very message this prompt.context precedes (L06). */
 export async function rulesContextBefore(io: Io, rt: Runtime): Promise<void> {
   await ensureSession(io, rt)
-  await io.update('seen', () => [])
+  const keep = [...(freshSeen.get(rt) ?? [])]
+  await io.update('seen', () => keep)
   await ensureRules(io, rt, { force: true })
 }
 
@@ -302,7 +405,7 @@ export async function rulesContextAfter<R extends { blocks: readonly ContextBloc
 ): Promise<R> {
   const rules = rt.rules?.list ?? []
   if (!rulesActive(rt) || !rules.length) return r
-  const gate = await readGate(io)
+  const gate = await readGate(io, rt)
   const always = rules.filter((x) => x.type === 'always' && ruleOn(gate, x.id))
   if (!always.length) return r
   const packed = packInjections(always, maxChars(rt))

@@ -4,6 +4,7 @@
 // Markdown sections, with the core renderer directly, and evaluates REPL expressions in the last trace scope.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { fileURLToPath } from 'node:url'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -13,7 +14,8 @@ import { parseMarkdownPrompt } from '../../core/src/mddsl.ts'
 import { renderPrompt } from '../../core/src/render.ts'
 import { buildModel, membersOf, shapeText, traceScope, type GateIndex, type LastTrace } from '../../lsp/src/model.ts'
 import { analyzeMarkdown, completeMarkdown, hoverMarkdownAt } from '../../lsp/src/markdown.ts'
-import { buildRunArgs, cliArgv, runCli, type RunView } from '../../lsp/src/runcli.ts'
+import { buildRunArgs, cliArgv, DEFAULT_CLI, invalidRunState, runCli, type RunView } from '../../lsp/src/runcli.ts'
+import { repoFileReader } from '../../lsp/src/load.ts'
 import { editorPage } from './page.ts'
 
 export interface EditorServerOptions {
@@ -25,8 +27,10 @@ export interface EditorServerOptions {
   port?: number
   /** Fixed token (tests); random by default. */
   token?: string
-  /** CLI argv prefix (default `npx context-gate`). */
+  /** CLI argv prefix (default: the plugin's own `dist/cli.js`, else `npx --no context-gate`). */
   cli?: string | string[]
+  /** Load CodeMirror from esm.sh (pinned versions; default true). false: the plain textarea, no third-party code. */
+  cdn?: boolean
   /** Injected CLI runner (tests). */
   runCli?: (argv: string[], cwd: string) => Promise<RunView>
 }
@@ -80,6 +84,20 @@ export function safePromptPath(promptDir: string, rel: string): string {
   return abs
 }
 
+/** Attributes of a JSX opening tag up to its `>`: quoted strings and `{…}` may contain `>` (`when="a > 1"`). */
+const TAG_ATTRS = String.raw`(?:[^>"'{]|"[^"]*"|'[^']*'|\{[^}]*\})*?`
+
+/** Ids of the sections declared in a prompt file (TSX `<Section id>` or Markdown front-matter `id:`). */
+export function sectionIds(text: string): string[] {
+  const out: string[] = []
+  const re = new RegExp(`<Section\\b${TAG_ATTRS}\\bid\\s*=\\s*(?:"([^"]+)"|'([^']+)'|\\{\\s*["'\`]([^"'\`]+)["'\`]\\s*\\})`, 'g')
+  for (const m of text.matchAll(re)) out.push(m[1] ?? m[2] ?? m[3]!)
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
+  const md = fm && /^id:\s*["']?([^"'\r\n]+?)["']?\s*$/m.exec(fm[1]!)
+  if (md) out.push(md[1]!)
+  return out
+}
+
 /** Find the file for `id`: `<id>.prompt.tsx`, `<id>.md`, else a file declaring `<Section id="<id>">` / `id: <id>`. */
 export function resolvePromptFile(promptDir: string, id: string): string | undefined {
   for (const c of [`${id}.prompt.tsx`, `${id}.md`, id]) {
@@ -97,8 +115,7 @@ export function resolvePromptFile(promptDir: string, id: string): string | undef
       if (st.isDirectory() && depth < 3) { const r = walk(p, depth + 1); if (r) return r; continue }
       if (!/\.(prompt\.tsx|md)$/.test(e)) continue
       const text = readFileSync(p, 'utf8')
-      const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      if (new RegExp(`<Section\\b[^>]*\\bid\\s*=\\s*["'{\`]+${esc}["'}\`]`).test(text) || new RegExp(`^id:\\s*["']?${esc}["']?\\s*$`, 'm').test(text)) return p
+      if (sectionIds(text).includes(id)) return p
     }
     return undefined
   }
@@ -158,6 +175,16 @@ export function replEval(expr: string, scope: Scope_): { ok: boolean; value?: Va
   }
 }
 
+/** The CLI next to this package in the plugin (`<plugin>/dist/cli.js`), run with this Node; else `npx --no`. */
+function bundledCli(): string[] | string {
+  try {
+    // `packages/editor-web/src/server.ts` and the bundled `packages/editor-web/dist/editor-web.js` are both three levels deep.
+    const p = resolve(dirname(fileURLToPath(import.meta.url)), '../../../dist/cli.js')
+    if (existsSync(p)) return [process.execPath, p]
+  } catch { /* not a file URL (bundled elsewhere) */ }
+  return DEFAULT_CLI
+}
+
 export async function startEditorServer(opts: EditorServerOptions): Promise<EditorServer> {
   const root = resolve(opts.root)
   const config0 = readConfig(root)
@@ -165,12 +192,15 @@ export async function startEditorServer(opts: EditorServerOptions): Promise<Edit
   const token = opts.token ?? randomBytes(18).toString('base64url')
   const file = resolvePromptFile(promptDir, opts.id) ?? join(promptDir, `${opts.id}.prompt.tsx`)
   const fileRel = relative(promptDir, file).split(sep).join('/')
-  const cli = cliArgv(opts.cli ?? process.env.CONTEXT_GATE_CLI)
+  const cli = cliArgv(opts.cli ?? process.env.CONTEXT_GATE_CLI ?? bundledCli())
+  const cdn = opts.cdn ?? process.env.CONTEXT_GATE_EDITOR_CDN !== '0'
   const runner = opts.runCli ?? ((argv: string[], cwd: string) => runCli(argv, cwd))
   const tracePath = join(promptDir, '.trace', 'last.json')
   let port = 0
 
   const model = () => buildModel({
+    // Provider `schema` files (`.schema.json`, `.d.ts`), only inside the repo.
+    readFile: repoFileReader(root),
     ...(readConfig(root) ? { config: readConfig(root)! } : {}),
     ...(readJson<GateIndex>(join(root, '.claude', 'gate.index.json')) ? { index: readJson<GateIndex>(join(root, '.claude', 'gate.index.json'))! } : {}),
     ...(readJson<LastTrace>(tracePath) ? { trace: readJson<LastTrace>(tracePath)! } : {}),
@@ -180,29 +210,33 @@ export async function startEditorServer(opts: EditorServerOptions): Promise<Edit
   const sectionId = (): string => {
     // `/gate edit <id>` may name a file or a section; a file id that is not a section falls back to the first section.
     try {
-      const text = readFileSync(file, 'utf8')
-      const esc = opts.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      if (new RegExp(`id\\s*[=:]\\s*["'{\`]*${esc}\\b`).test(text)) return opts.id
-      const m = /<Section\b[^>]*\bid\s*=\s*["'{`]+([^"'}`]+)/.exec(text) ?? /^id:\s*["']?([^"'\n]+)/m.exec(text)
-      return m?.[1] ?? opts.id
+      const ids = sectionIds(readFileSync(file, 'utf8'))
+      return ids.includes(opts.id) ? opts.id : ids[0] ?? opts.id
     } catch { return opts.id }
   }
+
+  // One CLI run at a time: concurrent previews would rebuild the same `.compiled` files.
+  let cliQueue: Promise<unknown> = Promise.resolve()
+  const runQueued = (argv: string[]): Promise<RunView> => {
+    const next = cliQueue.then(() => runner(argv, root))
+    cliQueue = next.catch(() => undefined)
+    return next
+  }
+  const readRepoFile = repoFileReader(root)
 
   const previewMarkdown = async (abs: string, b: { tier?: string; profile?: string }): Promise<RunView> => {
     const text = readFileSync(abs, 'utf8')
     const rel = relative(root, abs).split(sep).join('/')
-    const parsed = parseMarkdownPrompt(text, { path: rel })
+    const tierNames = Object.keys(readConfig(root)?.tiers ?? {})
+    const parsed = parseMarkdownPrompt(text, { path: rel, ...(tierNames.length ? { tiers: tierNames } : {}) })
     const scope: Scope_ = { ...(traceScope(readJson<LastTrace>(tracePath)) ?? {}) }
     const gate = (scope.gate && typeof scope.gate === 'object' && !Array.isArray(scope.gate) ? { ...scope.gate } : {}) as Record<string, Value>
     if (b.tier) gate.tier = b.tier
     if (b.profile) gate.profile = b.profile
     scope.gate = gate
     const host: RenderHost = {
-      readFile: async (p) => {
-        const a = resolve(root, p)
-        if (a !== root && !a.startsWith(root + sep)) return undefined
-        try { return readFileSync(a, 'utf8') } catch { return undefined }
-      },
+      // Inside the repo only, symlinks resolved (`@include ../../.ssh/id_rsa` or a symlink out of the repo is refused).
+      readFile: async (p) => readRepoFile(p),
       now: () => Date.now(),
       trusted: false,
       dryScripts: true,
@@ -217,14 +251,17 @@ export async function startEditorServer(opts: EditorServerOptions): Promise<Edit
     const url = new URL(req.url ?? '/', `http://${host}`)
     const origin = req.headers.origin
     if (origin && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) throw new HttpError(403, 'Чужий Origin')
+    // Browsers without Origin on a request still send Sec-Fetch-Site: another site never reaches the API.
+    if (req.headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, 'Чужий Origin')
     const given = url.pathname === '/' ? url.searchParams.get('t') : (req.headers['x-gate-token'] as string | undefined)
     if (!tokenOk(given, token)) throw new HttpError(401, 'Потрібен токен (?t=… з URL, який надрукував /gate edit)')
     const m = req.method ?? 'GET'
 
     if (m === 'GET' && url.pathname === '/') {
       const nonce = randomBytes(16).toString('base64')
-      send(res, 200, editorPage({ token, file: fileRel, id: opts.id, section: sectionId(), nonce }), {
-        'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}' https://esm.sh; style-src 'unsafe-inline'; connect-src 'self' https://esm.sh; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      const esm = cdn ? ' https://esm.sh' : ''
+      send(res, 200, editorPage({ token, file: fileRel, id: opts.id, section: sectionId(), nonce, cdn }), {
+        'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'${esm}; style-src 'unsafe-inline'; connect-src 'self'${esm}; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
       })
       return
     }
@@ -232,7 +269,10 @@ export async function startEditorServer(opts: EditorServerOptions): Promise<Edit
       const abs = safePromptPath(promptDir, url.searchParams.get('path') ?? fileRel)
       if (m === 'GET') {
         let text: string
-        try { text = readFileSync(abs, 'utf8') } catch { throw new HttpError(404, 'Файл не знайдено') }
+        try { text = readFileSync(abs, 'utf8') } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new HttpError(404, 'Файл не знайдено')
+          throw new HttpError(500, `Не вдалося прочитати файл: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`)
+        }
         send(res, 200, { path: relative(promptDir, abs).split(sep).join('/'), text, etag: etag(text) })
         return
       }
@@ -240,8 +280,10 @@ export async function startEditorServer(opts: EditorServerOptions): Promise<Edit
         if (!EDITABLE.has(extname(abs))) throw new HttpError(403, `Редагування ${extname(abs) || 'файлів без розширення'} не дозволено`)
         const relParts = relative(promptDir, abs).split(sep)
         if (relParts.some((p) => p.startsWith('.'))) throw new HttpError(403, 'Службові каталоги (.compiled, .trace, .types) не редагуються')
-        const b = await jsonBody<{ text?: string; etag?: string }>(req)
+        const b = await jsonBody<{ text?: string; etag?: string | null }>(req)
         if (typeof b.text !== 'string') throw new HttpError(400, 'Очікувалось { text }')
+        // `etag: null` = the client saw no file: one created since then (by the agent, another editor) is not overwritten.
+        if (b.etag === null && existsSync(abs)) throw new HttpError(409, 'Файл створено поза редактором — перезавантаж')
         if (b.etag && existsSync(abs) && etag(readFileSync(abs, 'utf8')) !== b.etag) throw new HttpError(409, 'Файл змінено поза редактором — перезавантаж')
         mkdirSync(dirname(abs), { recursive: true })
         const tmp = `${abs}.${process.pid}.tmp`
@@ -256,10 +298,13 @@ export async function startEditorServer(opts: EditorServerOptions): Promise<Edit
       const abs = safePromptPath(promptDir, b.path ?? fileRel)
       if (b.runScripts && b.confirm !== true) throw new HttpError(428, 'Виконання скриптів потребує підтвердження (confirm: true)')
       const section = b.section || sectionId()
-      if (abs.endsWith('.md') && !b.runScripts && !b.ctxFrom) { send(res, 200, { via: 'core', ...(await previewMarkdown(abs, b)) }); return }
       const state = { section, ...(b.tier ? { tier: b.tier } : {}), ...(b.profile ? { profile: b.profile } : {}), ...(b.ctxFrom ? { ctxFrom: b.ctxFrom } : {}) }
+      // The Markdown preview renders in core (no CLI); only ids that become CLI arguments are checked.
+      if (abs.endsWith('.md') && !b.runScripts && !b.ctxFrom) { send(res, 200, { via: 'core', ...(await previewMarkdown(abs, b)) }); return }
+      const invalid = invalidRunState(state)
+      if (invalid) throw new HttpError(400, invalid)
       const argv = [...cli, ...buildRunArgs(state, { dryScripts: !b.runScripts })]
-      send(res, 200, { via: 'cli', argv, ...(await runner(argv, root)) })
+      send(res, 200, { via: 'cli', argv, ...(await runQueued(argv)) })
       return
     }
     if (m === 'POST' && url.pathname === '/api/eval') {
