@@ -1,0 +1,65 @@
+{
+  "compiler": "context-gate@0.1.0",
+  "prompts": {
+    "debug": {
+      "entry": ".claude/prompt/debug.prompt.tsx",
+      "sourceHash": "3fc75797aa8ca370cc118912289d7d365a9ee61f744326c2b6eb43be3a18f7ab",
+      "sources": [
+        {
+          "path": ".claude/prompt/debug.prompt.tsx",
+          "hash": "4293deb293f6f1f4dff4c96563cd04ec9f99508f2e9a3f7432c298aed301116c"
+        }
+      ]
+    },
+    "handoff": {
+      "entry": ".claude/prompt/handoff.prompt.tsx",
+      "sourceHash": "1902ada917ae4d8826955fe9a36a0bf858c06a3ce405f47fbdf0b80c7db809cc",
+      "sources": [
+        {
+          "path": ".claude/prompt/handoff.prompt.tsx",
+          "hash": "6397b750e78a330e7db4b7b782b10ada0fd1973f4aa15555046e9c443019c3cd"
+        }
+      ]
+    },
+    "release": {
+      "entry": ".claude/prompt/release.prompt.tsx",
+      "sourceHash": "f3db5e595e92b4041aee02913f8708134121b3b6e74add16ef9b989308fa4018",
+      "sources": [
+        {
+          "path": ".claude/prompt/release.prompt.tsx",
+          "hash": "ae50920b37896b280510ef9acfd9bc16229df377f013f6d9f4c2cfa947d31fd9"
+        }
+      ]
+    },
+    "research": {
+      "entry": ".claude/prompt/research.prompt.tsx",
+      "sourceHash": "1f40c6600df9f0050fe1c94e8828f228de1c19823fe3a334314e5d37eb3f93a1",
+      "sources": [
+        {
+          "path": ".claude/prompt/research.prompt.tsx",
+          "hash": "c83268ad7142b8baf8c1a537a04a049d198ba3d8889f7e9fbdf6efcbcb62aa82"
+        }
+      ]
+    },
+    "review": {
+      "entry": ".claude/prompt/review.prompt.tsx",
+      "sourceHash": "17b2c6ad0d3d79891d2368907f95d5dcf30cc2e540205d9df1fbb509d8487f44",
+      "sources": [
+        {
+          "path": ".claude/prompt/review.prompt.tsx",
+          "hash": "5cef57f5a4dd22f8a8f82860a3ad53c57e863c64f0657dc10d34340b06f536b8"
+        }
+      ]
+    },
+    "status": {
+      "entry": ".claude/prompt/status.prompt.tsx",
+      "sourceHash": "16802ddf08737a11f8a78b985bb0a6553a07b1745764fb23856f88906d3238e0",
+      "sources": [
+        {
+          "path": ".claude/prompt/status.prompt.tsx",
+          "hash": "116079b04f82c77556c2d9d0bb7d34ce95ad6a3d10af3d49a697dcc0339b9003"
+        }
+      ]
+    }
+  }
+}

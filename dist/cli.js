@@ -11867,6 +11867,14 @@ var package_default = {
   type: "module",
   license: "MIT",
   author: "kosmodev",
+  repository: {
+    type: "git",
+    url: "git+https://github.com/Ivlad003/context-gate.git"
+  },
+  homepage: "https://github.com/Ivlad003/context-gate#readme",
+  bugs: {
+    url: "https://github.com/Ivlad003/context-gate/issues"
+  },
   keywords: [
     "claude-code",
     "cursor-rules",

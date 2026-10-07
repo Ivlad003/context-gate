@@ -11,22 +11,43 @@
 
 ## Встановлення
 
+Потрібні Claude Code 2.1.287 або новіший і Node.js 22.18 або новіший у `PATH`. Встановлення має дві частини: плагін
+працює всередині Claude Code, а npm-пакет дає вашому проєкту команду `context-gate`.
+
+**1. Додайте плагін у Claude Code.** Виконайте ці дві команди в сесії Claude Code:
+
 ```text
-/plugin marketplace add <owner>/context-gate      # репозиторій на GitHub або локальний клон: /plugin marketplace add ./context-gate
+/plugin marketplace add Ivlad003/context-gate
 /plugin install context-gate@context-gate
 ```
 
-Marketplace лежить у цьому ж репозиторії (`.claude-plugin/marketplace.json`). Плагін постачається з уже зібраним
-CLI (`dist/cli.js`), тож після встановлення нічого збирати не треба — потрібен лише `node` ≥ 22.18 у `PATH`.
-Для компіляції TSX-промптів (`build`) потрібен ще `esbuild`: CLI бере його з `node_modules` репозиторію (`npm i -D esbuild`)
-або з плагіна після `npm --prefix "${CLAUDE_PLUGIN_ROOT}" ci --omit=dev`; усе інше, зокрема `run` і skills-промпти, працює без нього.
-Markdown-промпти збірки не потребують.
+Перша команда реєструє цей GitHub-репозиторій як маркетплейс плагінів, а друга встановлює з нього плагін
+`context-gate`. Те саме можна зробити з термінала: `claude plugin marketplace add Ivlad003/context-gate`, а потім
+`claude plugin install context-gate@context-gate`. Додайте `--scope project` до команди встановлення, якщо плагін має
+отримати вся команда через `.claude/settings.json` репозиторію. Після цього запустіть нову сесію `claude`, щоб плагін
+завантажився. Щоб пізніше отримати новішу версію, виконайте `claude plugin marketplace update context-gate`, а потім
+`claude plugin update context-gate@context-gate`.
 
-Той самий CLI опубліковано в npm як `context-gate` (TSX-компоненти — `@context-gate/jsx`):
+Плагін містить зібраний CLI (`dist/cli.js`), тому після встановлення нічого збирати не треба. Для компіляції
+TSX-промптів потрібен `esbuild`, і його приносить npm-пакет нижче. Markdown-промпти взагалі не потребують збірки.
+
+**2. Додайте CLI у свій проєкт.** У корені репозиторію:
 
 ```bash
+npm i -D context-gate          # CLI з npm: https://www.npmjs.com/package/context-gate
 npx context-gate init          # .claude/gate.json з профілями, вгаданими зі структури, classify: shadow
 ```
+
+Локальне встановлення важливе з двох причин. Skills, скомпільовані з TSX-промптів, викликають
+`npx --no-install context-gate`, коли плагіна немає (колега без плагіна, CI), а інтеграції з редактором викликають
+`npx --no context-gate`. Жоден із цих викликів нічого не завантажує, тому пакет має лежати в `node_modules`. Щоб один
+раз спробувати CLI без встановлення, виконайте `npx context-gate@latest init`. Пакет `@context-gate/jsx` з npm не
+потрібен: `init` і `build` записують його декларації типів у `.claude/prompt/.types/jsx/`, тож TSX-промпти мають
+автокомпліт і без нього.
+
+**3. Перевірте, що все працює.** Запустіть `claude` у репозиторії. Рядок стану показує gate, `/gate` друкує активний
+профіль і tier, а `npx context-gate health` перевіряє, що `gate.json` валідний. Покроковий курс із багатьма прикладами
+промптів лежить у [`docs/COURSE.uk.md`](docs/COURSE.uk.md).
 
 ## Швидкий старт
 

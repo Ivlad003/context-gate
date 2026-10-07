@@ -1,0 +1,148 @@
+{
+  "$schema": "../../../../schema/context-gate.schema.json",
+  "groups": {
+    "core": [
+      "skill:tdd",
+      "skill:diagnosing-bugs"
+    ],
+    "planning": [
+      "skill:grilling",
+      "skill:to-issues",
+      "skill:domain-modeling"
+    ],
+    "docs": [
+      "skill:writing-*"
+    ],
+    "release": [
+      "skill:release",
+      "skill:handoff"
+    ]
+  },
+  "tiers": {
+    "premium": {
+      "groups": [
+        "core"
+      ]
+    },
+    "standard": {
+      "groups": [
+        "core",
+        "release"
+      ]
+    },
+    "quick": {
+      "groups": [
+        "core",
+        "release",
+        "docs"
+      ]
+    }
+  },
+  "models": {
+    "*opus*": "premium",
+    "*sonnet*": "standard",
+    "*haiku*": "quick"
+  },
+  "profiles": {
+    "docs": {
+      "groups": [
+        "docs"
+      ],
+      "when": {
+        "paths": [
+          "docs/**",
+          "**/*.md"
+        ]
+      }
+    },
+    "planning": {
+      "groups": [
+        "planning"
+      ],
+      "when": {
+        "paths": [
+          ".scratch/**"
+        ]
+      }
+    },
+    "release": {
+      "groups": [
+        "release"
+      ],
+      "when": {
+        "branch": "^release/"
+      }
+    },
+    "agents-md": {
+      "groups": []
+    }
+  },
+  "classify": {
+    "mode": "shadow",
+    "minConfidence": 0.7
+  },
+  "gates": [
+    {
+      "name": "tests",
+      "on": "commit",
+      "run": [
+        "npm",
+        "test"
+      ],
+      "pass": "exitCode == 0",
+      "message": "Тести падають, тому коміт заблоковано. Спершу виправ їх."
+    },
+    {
+      "name": "no-secrets",
+      "on": "write",
+      "run": [
+        "sh",
+        "-c",
+        "! git diff -U0 | grep -iE '(password|passwd|secret|token)[^a-z]*[:=]'"
+      ],
+      "pass": "exitCode == 0",
+      "message": "Схоже, у файлі пароль або токен. Прибери його і використай системний keyring."
+    }
+  ],
+  "providers": {
+    "pkg": {
+      "kind": "file",
+      "path": "package.json",
+      "pick": [
+        "name",
+        "version",
+        "engines",
+        "scripts"
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "scripts": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "ci": {
+      "kind": "cli",
+      "command": [
+        "gh",
+        "run",
+        "view",
+        "--log-failed"
+      ],
+      "cache": "5m",
+      "onError": "skip"
+    }
+  },
+  "prompt": {
+    "dir": ".claude/prompt",
+    "runCacheDefault": "5m"
+  }
+}

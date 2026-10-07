@@ -11,23 +11,42 @@ is committed, and the session state lives in the mod. The full design is in [`do
 
 ## Install
 
+You need Claude Code 2.1.287 or newer and Node.js 22.18 or newer on `PATH`. Installation has two parts: the plugin
+runs inside Claude Code, and the npm package gives your project the `context-gate` command.
+
+**1. Add the plugin to Claude Code.** Run these two commands inside a Claude Code session:
+
 ```text
-/plugin marketplace add <owner>/context-gate      # the GitHub repo, or a local clone: /plugin marketplace add ./context-gate
+/plugin marketplace add Ivlad003/context-gate
 /plugin install context-gate@context-gate
 ```
 
-The marketplace lives in this repository (`.claude-plugin/marketplace.json`, marketplace `context-gate`, plugin
-`context-gate`). The plugin ships its built CLI
-(`dist/cli.js`), so nothing has to be built after install; only `node` (≥ 22.18) has to be on `PATH`.
-Compiling TSX prompts (`build`) also needs `esbuild`: the CLI takes it from the repository's `node_modules` (`npm i -D esbuild`)
-or from the plugin after `npm --prefix "${CLAUDE_PLUGIN_ROOT}" ci --omit=dev`; everything else, `run` and skill prompts included,
-works without it. Markdown prompts need no build.
+The first command registers this GitHub repository as a plugin marketplace, and the second one installs the
+`context-gate` plugin from it. The same works from a terminal: `claude plugin marketplace add Ivlad003/context-gate`
+and then `claude plugin install context-gate@context-gate`. Add `--scope project` to the install command if the whole
+team should get the plugin through the repository's `.claude/settings.json`. Start a new `claude` session afterwards,
+so that the plugin loads. To get a newer version later, run `claude plugin marketplace update context-gate` and then
+`claude plugin update context-gate@context-gate`.
 
-The same CLI is published to npm as `context-gate` (TSX components: `@context-gate/jsx`):
+The plugin ships its built CLI (`dist/cli.js`), so nothing has to be built after install. Compiling TSX prompts needs
+`esbuild`, which the npm package below brings along. Markdown prompts need no build at all.
+
+**2. Add the CLI to your project.** In the root of your repository:
 
 ```bash
+npm i -D context-gate          # the CLI from npm: https://www.npmjs.com/package/context-gate
 npx context-gate init          # .claude/gate.json with profiles guessed from the repo, classify: shadow
 ```
+
+The local install matters for two reasons. Skills compiled from TSX prompts call `npx --no-install context-gate` when
+the plugin is absent (a teammate without the plugin, CI), and the editor integrations call `npx --no context-gate`.
+Neither of them downloads anything, so the package has to be in `node_modules`. To try the CLI once without
+installing it, run `npx context-gate@latest init`. You do not need `@context-gate/jsx` from npm: `init` and `build`
+write its type declarations into `.claude/prompt/.types/jsx/`, so TSX prompts get autocomplete without it.
+
+**3. Check that it works.** Start `claude` in the repository. The status line shows the gate, `/gate` prints the
+active profile and tier, and `npx context-gate health` checks that `gate.json` is valid. A step-by-step course with
+many prompt examples is in [`docs/COURSE.md`](docs/COURSE.md).
 
 ## Quick start
 

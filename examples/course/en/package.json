@@ -1,0 +1,13 @@
+{
+  "name": "course-demo",
+  "version": "1.4.2",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "build": "tsc -p .",
+    "agents-md": "context-gate run --profile agents-md --tier standard --no-markers > AGENTS.md"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
